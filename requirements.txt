@@ -2,3 +2,5 @@ fastapi==0.95.2
 uvicorn[standard]==0.22.0
 pydantic==1.10.11
 pytest==7.4.0
+sqlmodel
+psycopg-binary
