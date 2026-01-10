@@ -1,0 +1,17 @@
+__pycache__/
+.venv/
+venv/
+env/
+.env
+.git
+.github
+.vscode
+*.pyc
+*.pyo
+*.pyd
+build/
+dist/
+*.egg-info
+node_modules/
+Dockerfile
+docker-compose.yml
