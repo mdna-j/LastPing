@@ -154,6 +154,11 @@ def scan_checks_once(session: Session):
                 continue
             timeout = check.timeout or 5
             retries = check.retries or 1
+            # scheduling: skip until next_run for HTTP checks
+            interval = getattr(check, "interval", None) or 60
+            if check.next_run is not None and now < check.next_run:
+                # not yet time to run this check
+                continue
             ok, reason = _http_check(check.url, timeout, retries)
             if ok:
                 check.last_ping = now
@@ -224,6 +229,13 @@ def scan_checks_once(session: Session):
                 else:
                     session.add(check)
                     session.commit()
+            # persist next_run after executing the HTTP check
+            try:
+                check.next_run = now + timedelta(seconds=interval)
+                session.add(check)
+                session.commit()
+            except Exception:
+                logger.exception("Error persisting next_run for check %s", getattr(check, 'id', None))
 
 
 def main():

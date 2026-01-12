@@ -48,6 +48,9 @@ class Check(SQLModel, table=True):
     url: Optional[str] = None
     timeout: Optional[int] = Field(default=5)
     retries: Optional[int] = Field(default=1)
+    # scheduling for HTTP checks
+    interval: Optional[int] = Field(default=60, description="interval in seconds for HTTP checks")
+    next_run: Optional[datetime] = None
 
     status: str = Field(default=CheckStatus.UP)
     last_ping: Optional[datetime] = None

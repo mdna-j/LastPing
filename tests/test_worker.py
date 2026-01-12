@@ -238,3 +238,79 @@ def test_alert_suppression(tmp_path, monkeypatch):
         worker.scan_checks_once(session)
 
         assert calls['n'] == 1
+
+
+def test_http_check_scheduling(tmp_path, monkeypatch):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db5.sqlite'}"
+
+    from sqlmodel import Session, select
+    from src import db as dbmod
+    from src.models import Project, Check, CheckType, CheckStatus
+    from src import worker
+
+    dbmod.create_db_and_tables()
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="proj_sched", api_key="ksched")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        now = datetime.utcnow()
+
+        # create an HTTP check with next_run in the future -> should be skipped
+        check = Check(
+            project_id=project.id,
+            name="http_sched",
+            type=CheckType.HTTP,
+            url="http://example.ok/health",
+            timeout=1,
+            retries=1,
+            status=CheckStatus.UP,
+            interval=60,
+            next_run=now + timedelta(seconds=300),
+        )
+        session.add(check)
+        session.commit()
+        session.refresh(check)
+
+        # monkeypatch urlopen to raise if called (should not be called)
+        def fail_if_called(*args, **kwargs):
+            raise AssertionError("HTTP check should not have been executed before next_run")
+
+        monkeypatch.setattr(worker.urllib.request, 'urlopen', fail_if_called)
+
+        # scan should skip the check
+        worker.scan_checks_once(session)
+
+        session.refresh(check)
+        assert check.last_ping is None
+
+        # now set next_run to past and monkeypatch urlopen to return 200
+        class FakeResp:
+            def __init__(self, code=200):
+                self._code = code
+
+            def getcode(self):
+                return self._code
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        def fake_urlopen(*args, **kwargs):
+            return FakeResp(200)
+
+        check.next_run = now - timedelta(seconds=1)
+        session.add(check)
+        session.commit()
+
+        monkeypatch.setattr(worker.urllib.request, 'urlopen', fake_urlopen)
+
+        worker.scan_checks_once(session)
+
+        session.refresh(check)
+        assert check.last_ping is not None
+        assert check.next_run is not None and check.next_run > datetime.utcnow()
