@@ -45,6 +45,22 @@ def send_slack_message(content: str) -> bool:
     return _post_json(url, payload)
 
 
+def send_generic_webhook(url: str, payload: dict) -> bool:
+    return _post_json(url, payload)
+
+
+def send_pagerduty_event(routing_key: str, summary: str, severity: str = "critical") -> bool:
+    if not routing_key:
+        logger.debug("No PagerDuty routing key configured")
+        return False
+    pd_payload = {
+        "routing_key": routing_key,
+        "event_action": "trigger",
+        "payload": {"summary": summary, "severity": severity, "source": "lastping"},
+    }
+    return _post_json("https://events.pagerduty.com/v2/enqueue", pd_payload)
+
+
 def notify_down(check, project, reason: str = None) -> None:
     try:
         reason_text = f" — Reason: {reason}" if reason else ""
@@ -52,6 +68,7 @@ def notify_down(check, project, reason: str = None) -> None:
             f":rotating_light: **DOWN** — Project `{project.name}` — Check `{check.name}`\n"
             f"Last ping: `{check.last_ping}` — expected every `{check.expected_interval}s` + grace `{check.grace_period}s`{reason_text}"
         )
+        # project-specific overrides handled by caller; keep defaults for global endpoints
         send_discord_message(msg)
         send_slack_message(msg)
     except Exception:
