@@ -191,3 +191,50 @@ def test_worker_recovery_transitions(tmp_path, monkeypatch):
         assert any(e.event_type == EventType.UP for e in events_hb)
         assert any(e.event_type == EventType.UP for e in events_http)
         assert 'recovery' in called
+
+
+def test_alert_suppression(tmp_path, monkeypatch):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db4.sqlite'}"
+
+    from sqlmodel import Session, select
+    from src import db as dbmod
+    from src.models import Project, Check, CheckType, CheckStatus
+    from src import worker
+
+    dbmod.create_db_and_tables()
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="proj4", api_key="key4")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        old = datetime.utcnow() - timedelta(hours=2)
+        check = Check(
+            project_id=project.id,
+            name="hb_supp",
+            type=CheckType.HEARTBEAT,
+            expected_interval=60,
+            grace_period=10,
+            last_ping=old,
+            status=CheckStatus.UP,
+            alert_enabled=True,
+            alert_after=1,
+            alert_cooldown=3600,
+        )
+        session.add(check)
+        session.commit()
+        session.refresh(check)
+
+        calls = {'n': 0}
+
+        def fake_notify_down(chk, proj, reason=None):
+            calls['n'] += 1
+
+        monkeypatch.setattr(worker, 'notify_down', fake_notify_down)
+
+        # run scan twice quickly; only one alert should be sent due to cooldown
+        worker.scan_checks_once(session)
+        worker.scan_checks_once(session)
+
+        assert calls['n'] == 1
