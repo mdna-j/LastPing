@@ -10,6 +10,8 @@ class Project(SQLModel, table=True):
     # hashed API key for improved security (PBKDF2)
     api_key_hash: Optional[str] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=datetime.utcnow)
+    # owner contact for notifications and key rotation delivery
+    owner_email: Optional[str] = None
 
     # per-project webhook configuration (overrides global env vars)
     discord_webhook_url: Optional[str] = None

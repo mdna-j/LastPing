@@ -2,7 +2,7 @@ from datetime import datetime
 import secrets
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Header
 from pydantic import BaseModel
 from sqlmodel import select, Session
 
@@ -17,6 +17,7 @@ router = APIRouter(prefix="/projects", tags=["projects"])
 
 class ProjectCreate(BaseModel):
     name: str
+    owner_email: Optional[str] = None
 
 
 class ProjectRead(BaseModel):
@@ -40,7 +41,7 @@ def create_project(payload: ProjectCreate, session: Session = Depends(get_sessio
     api_key = generate_api_key()
     api_key_hash = hash_api_key(api_key)
     # store only the hash; return plaintext to caller
-    project = ProjectModel(name=payload.name, api_key_hash=api_key_hash)
+    project = ProjectModel(name=payload.name, api_key_hash=api_key_hash, owner_email=payload.owner_email)
     session.add(project)
     session.commit()
     session.refresh(project)
@@ -103,6 +104,15 @@ def rotate_api_key(project_id: int, session: Session = Depends(get_session)):
         raise HTTPException(status_code=404, detail="Project not found")
     new_key = generate_api_key()
     project.api_key_hash = hash_api_key(new_key)
+    # email the new key to owner if configured
+    from ..alerts import send_email
+    if getattr(project, 'owner_email', None):
+        subject = f"[LastPing] API key rotated for project {project.name}"
+        body = f"A new API key was generated for project {project.name}:\n\n{new_key}\n\nStore this securely; it will not be shown again."
+        try:
+            send_email(subject, body, to=project.owner_email)
+        except Exception:
+            pass
     session.add(project)
     session.commit()
     session.refresh(project)
@@ -129,5 +139,14 @@ def rotate_all_keys(x_admin_token: Optional[str] = Header(None), session: Sessio
         p.api_key_hash = hash_api_key(new_key)
         session.add(p)
         result[p.id] = new_key
+        # email rotated key to owner when available
+        try:
+            if getattr(p, 'owner_email', None):
+                from ..alerts import send_email
+                subj = f"[LastPing] API key rotated for project {p.name}"
+                body = f"A new API key was generated for project {p.name}:\n\n{new_key}\n\nStore this securely; it will not be shown again."
+                send_email(subj, body, to=p.owner_email)
+        except Exception:
+            pass
     session.commit()
     return result
