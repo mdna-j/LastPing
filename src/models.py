@@ -8,6 +8,8 @@ class Project(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str
     api_key: Optional[str] = Field(default=None, index=True)
+    # hashed API key for improved security (PBKDF2)
+    api_key_hash: Optional[str] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
     checks: List["Check"] = Relationship(back_populates="project")

@@ -39,6 +39,12 @@ def send_discord_message(content: str) -> bool:
     return _post_json(url, payload)
 
 
+def send_slack_message(content: str) -> bool:
+    url = os.environ.get("SLACK_WEBHOOK_URL")
+    payload = {"text": content}
+    return _post_json(url, payload)
+
+
 def notify_down(check, project, reason: str = None) -> None:
     try:
         reason_text = f" — Reason: {reason}" if reason else ""
@@ -47,6 +53,7 @@ def notify_down(check, project, reason: str = None) -> None:
             f"Last ping: `{check.last_ping}` — expected every `{check.expected_interval}s` + grace `{check.grace_period}s`{reason_text}"
         )
         send_discord_message(msg)
+        send_slack_message(msg)
     except Exception:
         logger.exception("Failed to send DOWN notification")
 
@@ -58,6 +65,7 @@ def notify_recovery(check, project) -> None:
             f"Last ping: `{check.last_ping}`"
         )
         send_discord_message(msg)
+        send_slack_message(msg)
     except Exception:
         logger.exception("Failed to send recovery notification")
 
