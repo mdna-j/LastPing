@@ -63,26 +63,111 @@ def send_pagerduty_event(routing_key: str, summary: str, severity: str = "critic
 
 def notify_down(check, project, reason: str = None) -> None:
     try:
-        reason_text = f" — Reason: {reason}" if reason else ""
-        msg = (
-            f":rotating_light: **DOWN** — Project `{project.name}` — Check `{check.name}`\n"
-            f"Last ping: `{check.last_ping}` — expected every `{check.expected_interval}s` + grace `{check.grace_period}s`{reason_text}"
-        )
-        # project-specific overrides handled by caller; keep defaults for global endpoints
-        send_discord_message(msg)
-        send_slack_message(msg)
+        reason_text = f"Reason: {reason}" if reason else None
+        timestamp = None
+        try:
+            timestamp = check.last_ping.isoformat() if getattr(check, 'last_ping', None) else None
+        except Exception:
+            timestamp = None
+
+        # human-friendly summary
+        summary = f"Project {project.name} — Check {check.name} is DOWN"
+        details = {
+            "project": project.name,
+            "check": check.name,
+            "last_ping": timestamp,
+            "expected_interval": getattr(check, 'expected_interval', None) or getattr(check, 'interval', None),
+            "grace_period": getattr(check, 'grace_period', None),
+            "consecutive_failures": getattr(check, 'consecutive_failures', None),
+            "reason": reason_text,
+        }
+
+        sent = False
+        # Discord: use embed for nicer display
+        if getattr(project, 'discord_webhook_url', None):
+            embed = {
+                "title": ":rotating_light: DOWN",
+                "description": summary,
+                "fields": [
+                    {"name": "Check", "value": check.name, "inline": True},
+                    {"name": "Last ping", "value": timestamp or "n/a", "inline": True},
+                    {"name": "Failures", "value": str(getattr(check, 'consecutive_failures', 0)), "inline": True},
+                ],
+            }
+            if reason_text:
+                embed["fields"].append({"name": "Reason", "value": reason_text, "inline": False})
+            _post_json(project.discord_webhook_url, {"embeds": [embed]})
+            sent = True
+
+        # Slack: blocks
+        if getattr(project, 'slack_webhook_url', None):
+            blocks = [
+                {"type": "section", "text": {"type": "mrkdwn", "text": f":rotating_light: *{summary}*"}},
+                {"type": "section", "fields": [
+                    {"type": "mrkdwn", "text": f"*Check:* {check.name}"},
+                    {"type": "mrkdwn", "text": f"*Last ping:* {timestamp or 'n/a'}"},
+                    {"type": "mrkdwn", "text": f"*Failures:* {getattr(check, 'consecutive_failures', 0)}"},
+                ]},
+            ]
+            if reason_text:
+                blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"*Reason:* {reason_text}"}]})
+            _post_json(project.slack_webhook_url, {"blocks": blocks})
+            sent = True
+
+        # PagerDuty: use existing helper which builds proper event payload
+        if getattr(project, 'pagerduty_integration_key', None):
+            send_pagerduty_event(project.pagerduty_integration_key, summary, severity="critical")
+            sent = True
+
+        # Generic webhook: send structured JSON
+        if getattr(project, 'generic_webhook_url', None):
+            payload = {"event": "down", "summary": summary, "details": details}
+            send_generic_webhook(project.generic_webhook_url, payload)
+            sent = True
+
+        # fall back to global endpoints if no project-specific webhook is set
+        if not sent:
+            msg = (
+                f":rotating_light: **DOWN** — Project `{project.name}` — Check `{check.name}`\n"
+                f"Last ping: `{check.last_ping}` — expected every `{getattr(check, 'expected_interval', getattr(check, 'interval', None))}s` + grace `{getattr(check, 'grace_period', None)}s`{(' — Reason: ' + reason) if reason else ''}"
+            )
+            send_discord_message(msg)
+            send_slack_message(msg)
     except Exception:
         logger.exception("Failed to send DOWN notification")
 
 
 def notify_recovery(check, project) -> None:
     try:
-        msg = (
-            f":white_check_mark: **RECOVERY** — Project `{project.name}` — Check `{check.name}` is UP again\n"
-            f"Last ping: `{check.last_ping}`"
-        )
-        send_discord_message(msg)
-        send_slack_message(msg)
+        timestamp = None
+        try:
+            timestamp = check.last_ping.isoformat() if getattr(check, 'last_ping', None) else None
+        except Exception:
+            timestamp = None
+
+        summary = f"Project {project.name} — Check {check.name} recovered"
+        details = {"project": project.name, "check": check.name, "last_ping": timestamp}
+
+        sent = False
+        if getattr(project, 'discord_webhook_url', None):
+            embed = {"title": ":white_check_mark: RECOVERY", "description": summary, "fields": [{"name": "Last ping", "value": timestamp or "n/a", "inline": True}]}
+            _post_json(project.discord_webhook_url, {"embeds": [embed]})
+            sent = True
+        if getattr(project, 'slack_webhook_url', None):
+            blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": f":white_check_mark: *{summary}*"}}, {"type": "section", "fields": [{"type": "mrkdwn", "text": f"*Last ping:* {timestamp or 'n/a'}"}]}]
+            _post_json(project.slack_webhook_url, {"blocks": blocks})
+            sent = True
+        if getattr(project, 'pagerduty_integration_key', None):
+            send_pagerduty_event(project.pagerduty_integration_key, summary, severity="info")
+            sent = True
+        if getattr(project, 'generic_webhook_url', None):
+            send_generic_webhook(project.generic_webhook_url, {"event": "recovery", "summary": summary, "details": details})
+            sent = True
+
+        if not sent:
+            msg = (f":white_check_mark: **RECOVERY** — Project `{project.name}` — Check `{check.name}` is UP again\n" f"Last ping: `{check.last_ping}`")
+            send_discord_message(msg)
+            send_slack_message(msg)
     except Exception:
         logger.exception("Failed to send recovery notification")
 
@@ -130,3 +215,4 @@ def notify_escalation(project, reason: str):
     subj = f"[LastPing] Escalation: project {project.name} alert threshold exceeded"
     body = f"Project {project.name} has exceeded its alert threshold. Latest reason: {reason}"
     return send_email(subj, body, to=esc)
+    
