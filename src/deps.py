@@ -1,10 +1,11 @@
 from typing import Optional
 
 from fastapi import Depends, Header, HTTPException, status
-from sqlmodel import Session, select
+from sqlmodel import Session
 
 from .db import get_session
 from .models import Project
+from .security import verify_api_key
 
 
 def _extract_api_key(authorization: Optional[str], x_api_key: Optional[str]) -> Optional[str]:
@@ -27,11 +28,18 @@ def require_project_api_key(project_id: int, authorization: Optional[str] = Head
     if not key:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing API key")
 
-    project = session.exec(select(Project).where(Project.api_key == key)).first()
+    # load project by id and verify the provided key against stored hash or legacy plain field
+    project = session.get(Project, project_id)
     if not project:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API key")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
-    if project.id != project_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="API key does not belong to this project")
+    # Prefer hashed verification if available
+    if getattr(project, "api_key_hash", None):
+        if verify_api_key(key, project.api_key_hash):
+            return project
+        # fallthrough to legacy plain comparison for compatibility
 
-    return project
+    if getattr(project, "api_key", None) and project.api_key == key:
+        return project
+
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API key")
