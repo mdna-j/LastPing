@@ -27,7 +27,7 @@ jobs:
           python -m pip install -e .
       - name: Run tests with coverage
         run: |
-          pytest --cov=src --cov-report=xml:coverage.xml -q
+          PYTHONPATH=src pytest --cov=src --cov-report=xml:coverage.xml -q
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
         with:
