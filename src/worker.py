@@ -60,12 +60,28 @@ def scan_checks_once(session: Session):
                     check.consecutive_failures = (check.consecutive_failures or 0) + 1
                     event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.DOWN, message="missed heartbeat")
                     session.add(event)
-                    session.add(check)
-                    session.commit()
-                    try:
-                        notify_down(check, project, reason="missed heartbeat")
-                    except Exception:
-                        logger.exception("Error sending DOWN alert")
+                    # alerting: only send if enabled and threshold reached and cooldown passed
+                    should_alert = check.alert_enabled and (check.consecutive_failures >= (check.alert_after or 1))
+                    if should_alert:
+                        last_alert = check.last_alerted_at
+                        cooldown = check.alert_cooldown or 0
+                        if (last_alert is None) or ((now - last_alert).total_seconds() > cooldown):
+                            session.add(check)
+                            session.commit()
+                            try:
+                                ok = notify_down(check, project, reason="missed heartbeat")
+                                check.last_alerted_at = now
+                                check.last_alert_type = EventType.DOWN
+                                session.add(check)
+                                session.commit()
+                            except Exception:
+                                logger.exception("Error sending DOWN alert")
+                        else:
+                            session.add(check)
+                            session.commit()
+                    else:
+                        session.add(check)
+                        session.commit()
                 else:
                     check.consecutive_failures = (check.consecutive_failures or 0) + 1
                     session.add(check)
@@ -76,12 +92,27 @@ def scan_checks_once(session: Session):
                     check.consecutive_failures = 0
                     event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.UP, message="recovered")
                     session.add(event)
-                    session.add(check)
-                    session.commit()
-                    try:
-                        notify_recovery(check, project)
-                    except Exception:
-                        logger.exception("Error sending recovery alert")
+                    # recovery alert: respect cooldown and enabled
+                    if check.alert_enabled:
+                        last_alert = check.last_alerted_at
+                        cooldown = check.alert_cooldown or 0
+                        if (last_alert is None) or ((now - last_alert).total_seconds() > cooldown):
+                            session.add(check)
+                            session.commit()
+                            try:
+                                notify_recovery(check, project)
+                                check.last_alerted_at = now
+                                check.last_alert_type = EventType.UP
+                                session.add(check)
+                                session.commit()
+                            except Exception:
+                                logger.exception("Error sending recovery alert")
+                        else:
+                            session.add(check)
+                            session.commit()
+                    else:
+                        session.add(check)
+                        session.commit()
 
         elif check.type == CheckType.HTTP:
             if not check.url:
@@ -96,12 +127,27 @@ def scan_checks_once(session: Session):
                     check.consecutive_failures = 0
                     event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.UP, message=f"http success ({reason})")
                     session.add(event)
-                    session.add(check)
-                    session.commit()
-                    try:
-                        notify_recovery(check, project)
-                    except Exception:
-                        logger.exception("Error sending recovery alert")
+                    # recovery alert: respect cooldown and enabled
+                    if check.alert_enabled:
+                        last_alert = check.last_alerted_at
+                        cooldown = check.alert_cooldown or 0
+                        if (last_alert is None) or ((now - last_alert).total_seconds() > cooldown):
+                            session.add(check)
+                            session.commit()
+                            try:
+                                notify_recovery(check, project)
+                                check.last_alerted_at = now
+                                check.last_alert_type = EventType.UP
+                                session.add(check)
+                                session.commit()
+                            except Exception:
+                                logger.exception("Error sending recovery alert")
+                        else:
+                            session.add(check)
+                            session.commit()
+                    else:
+                        session.add(check)
+                        session.commit()
                 else:
                     check.consecutive_failures = 0
                     session.add(check)
@@ -113,12 +159,27 @@ def scan_checks_once(session: Session):
                     check.status = CheckStatus.DOWN
                     event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.HTTP_FAILURE, message=f"{reason}")
                     session.add(event)
-                    session.add(check)
-                    session.commit()
-                    try:
-                        notify_down(check, project, reason=reason)
-                    except Exception:
-                        logger.exception("Error sending DOWN alert")
+                    should_alert = check.alert_enabled and (check.consecutive_failures >= (check.alert_after or 1))
+                    if should_alert:
+                        last_alert = check.last_alerted_at
+                        cooldown = check.alert_cooldown or 0
+                        if (last_alert is None) or ((now - last_alert).total_seconds() > cooldown):
+                            session.add(check)
+                            session.commit()
+                            try:
+                                notify_down(check, project, reason=reason)
+                                check.last_alerted_at = now
+                                check.last_alert_type = EventType.HTTP_FAILURE
+                                session.add(check)
+                                session.commit()
+                            except Exception:
+                                logger.exception("Error sending DOWN alert")
+                        else:
+                            session.add(check)
+                            session.commit()
+                    else:
+                        session.add(check)
+                        session.commit()
                 else:
                     session.add(check)
                     session.commit()

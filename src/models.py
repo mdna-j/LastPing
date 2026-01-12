@@ -33,6 +33,13 @@ class Check(SQLModel, table=True):
     expected_interval: Optional[int] = Field(default=600, description="expected heartbeat interval in seconds")
     grace_period: Optional[int] = Field(default=600, description="additional grace seconds")
 
+    # alerting controls
+    alert_enabled: bool = Field(default=True, description="whether alerts are enabled for this check")
+    alert_after: int = Field(default=1, description="number of consecutive failures before alerting")
+    alert_cooldown: int = Field(default=3600, description="seconds to wait between alerts for this check")
+    last_alerted_at: Optional[datetime] = None
+    last_alert_type: Optional[str] = None
+
     # http-specific
     url: Optional[str] = None
     timeout: Optional[int] = Field(default=5)

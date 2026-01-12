@@ -14,14 +14,19 @@ def _post_json(url: str, payload: dict, timeout: int = 10) -> bool:
         return False
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            logger.debug("Webhook response code: %s", resp.getcode())
-        return True
-    except urllib.error.HTTPError as he:
-        logger.exception("HTTP error sending webhook: %s", he)
-    except Exception as e:
-        logger.exception("Error sending webhook: %s", e)
+    attempts = 3
+    backoff = 0.5
+    for i in range(attempts):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                logger.debug("Webhook response code: %s", resp.getcode())
+            return True
+        except urllib.error.HTTPError as he:
+            logger.exception("HTTP error sending webhook (attempt %s): %s", i + 1, he)
+        except Exception as e:
+            logger.exception("Error sending webhook (attempt %s): %s", i + 1, e)
+        time.sleep(backoff)
+        backoff *= 2
     return False
 
 
