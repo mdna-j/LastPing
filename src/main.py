@@ -4,6 +4,7 @@ from .db import create_db_and_tables
 from .routers.projects import router as projects_router
 from .routers.checks import router as checks_router
 from .routers.heartbeats import router as heartbeats_router
+from .routers.alerts import router as alerts_router
 
 
 app = FastAPI(title="LastPing API")
@@ -30,3 +31,4 @@ async def health():
 app.include_router(projects_router)
 app.include_router(checks_router)
 app.include_router(heartbeats_router)
+app.include_router(alerts_router)
