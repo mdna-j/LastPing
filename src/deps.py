@@ -33,13 +33,8 @@ def require_project_api_key(project_id: int, authorization: Optional[str] = Head
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
-    # Prefer hashed verification if available
-    if getattr(project, "api_key_hash", None):
-        if verify_api_key(key, project.api_key_hash):
-            return project
-        # fallthrough to legacy plain comparison for compatibility
-
-    if getattr(project, "api_key", None) and project.api_key == key:
+    # verify only against stored hash
+    if getattr(project, "api_key_hash", None) and verify_api_key(key, project.api_key_hash):
         return project
 
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API key")

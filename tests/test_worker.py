@@ -16,7 +16,8 @@ def test_worker_marks_overdue_heartbeat(tmp_path, monkeypatch):
     dbmod.create_db_and_tables()
 
     with Session(dbmod.engine) as session:
-        project = Project(name="proj1", api_key="key")
+        from src.security import hash_api_key
+        project = Project(name="proj1", api_key_hash=hash_api_key("key"))
         session.add(project)
         session.commit()
         session.refresh(project)
@@ -66,7 +67,8 @@ def test_worker_http_check_failure(tmp_path, monkeypatch):
     dbmod.create_db_and_tables()
 
     with Session(dbmod.engine) as session:
-        project = Project(name="proj2", api_key="key2")
+        from src.security import hash_api_key
+        project = Project(name="proj2", api_key_hash=hash_api_key("key2"))
         session.add(project)
         session.commit()
         session.refresh(project)
@@ -119,7 +121,8 @@ def test_worker_recovery_transitions(tmp_path, monkeypatch):
     dbmod.create_db_and_tables()
 
     with Session(dbmod.engine) as session:
-        project = Project(name="proj3", api_key="key3")
+        from src.security import hash_api_key
+        project = Project(name="proj3", api_key_hash=hash_api_key("key3"))
         session.add(project)
         session.commit()
         session.refresh(project)
@@ -204,7 +207,8 @@ def test_alert_suppression(tmp_path, monkeypatch):
     dbmod.create_db_and_tables()
 
     with Session(dbmod.engine) as session:
-        project = Project(name="proj4", api_key="key4")
+        from src.security import hash_api_key
+        project = Project(name="proj4", api_key_hash=hash_api_key("key4"))
         session.add(project)
         session.commit()
         session.refresh(project)
