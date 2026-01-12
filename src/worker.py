@@ -38,6 +38,34 @@ def _http_check(url: str, timeout: int, retries: int) -> (bool, str):
     return False, last_exc or "unknown"
 
 
+def _project_is_throttled(session: Session, project: Project, now: datetime) -> bool:
+    pr_count = getattr(project, "alert_rate_limit_count", 0) or 0
+    pr_window = getattr(project, "alert_rate_limit_window", 0) or 0
+    if not pr_count or not pr_window:
+        return False
+    cutoff = now - timedelta(seconds=pr_window)
+    recent_events = session.exec(select(Event).where(Event.project_id == project.id, Event.created_at > cutoff)).all()
+    recent_bad = [e for e in recent_events if e.event_type in (EventType.DOWN, EventType.HTTP_FAILURE)]
+    return len(recent_bad) >= pr_count
+
+
+def _trigger_escalation(session: Session, project: Project, now: datetime, reason: str):
+    try:
+        from .alerts import notify_escalation
+
+        last_es = getattr(project, "last_escalated_at", None)
+        window = getattr(project, "alert_rate_limit_window", 0) or 0
+        if (last_es is None) or ((now - last_es).total_seconds() > window):
+            ok = notify_escalation(project, reason)
+            project.last_escalated_at = now
+            session.add(project)
+            session.commit()
+            return ok
+    except Exception:
+        logger.exception("Error triggering escalation")
+    return False
+
+
 def scan_checks_once(session: Session):
     stmt = select(Check)
     results = session.exec(stmt).all()
@@ -63,22 +91,29 @@ def scan_checks_once(session: Session):
                     # alerting: only send if enabled and threshold reached and cooldown passed
                     should_alert = check.alert_enabled and (check.consecutive_failures >= (check.alert_after or 1))
                     if should_alert:
-                        last_alert = check.last_alerted_at
-                        cooldown = check.alert_cooldown or 0
-                        if (last_alert is None) or ((now - last_alert).total_seconds() > cooldown):
+                        # project-level throttling/escalation
+                        throttled = _project_is_throttled(session, project, now)
+                        if throttled:
+                            _trigger_escalation(session, project, now, "missed heartbeat")
                             session.add(check)
                             session.commit()
-                            try:
-                                ok = notify_down(check, project, reason="missed heartbeat")
-                                check.last_alerted_at = now
-                                check.last_alert_type = EventType.DOWN
+                        else:
+                            last_alert = check.last_alerted_at
+                            cooldown = check.alert_cooldown or 0
+                            if (last_alert is None) or ((now - last_alert).total_seconds() > cooldown):
                                 session.add(check)
                                 session.commit()
-                            except Exception:
-                                logger.exception("Error sending DOWN alert")
-                        else:
-                            session.add(check)
-                            session.commit()
+                                try:
+                                    ok = notify_down(check, project, reason="missed heartbeat")
+                                    check.last_alerted_at = now
+                                    check.last_alert_type = EventType.DOWN
+                                    session.add(check)
+                                    session.commit()
+                                except Exception:
+                                    logger.exception("Error sending DOWN alert")
+                            else:
+                                session.add(check)
+                                session.commit()
                     else:
                         session.add(check)
                         session.commit()
@@ -161,22 +196,28 @@ def scan_checks_once(session: Session):
                     session.add(event)
                     should_alert = check.alert_enabled and (check.consecutive_failures >= (check.alert_after or 1))
                     if should_alert:
-                        last_alert = check.last_alerted_at
-                        cooldown = check.alert_cooldown or 0
-                        if (last_alert is None) or ((now - last_alert).total_seconds() > cooldown):
+                        throttled = _project_is_throttled(session, project, now)
+                        if throttled:
+                            _trigger_escalation(session, project, now, reason)
                             session.add(check)
                             session.commit()
-                            try:
-                                notify_down(check, project, reason=reason)
-                                check.last_alerted_at = now
-                                check.last_alert_type = EventType.HTTP_FAILURE
+                        else:
+                            last_alert = check.last_alerted_at
+                            cooldown = check.alert_cooldown or 0
+                            if (last_alert is None) or ((now - last_alert).total_seconds() > cooldown):
                                 session.add(check)
                                 session.commit()
-                            except Exception:
-                                logger.exception("Error sending DOWN alert")
-                        else:
-                            session.add(check)
-                            session.commit()
+                                try:
+                                    notify_down(check, project, reason=reason)
+                                    check.last_alerted_at = now
+                                    check.last_alert_type = EventType.HTTP_FAILURE
+                                    session.add(check)
+                                    session.commit()
+                                except Exception:
+                                    logger.exception("Error sending DOWN alert")
+                            else:
+                                session.add(check)
+                                session.commit()
                     else:
                         session.add(check)
                         session.commit()

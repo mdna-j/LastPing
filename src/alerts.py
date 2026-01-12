@@ -3,6 +3,9 @@ import json
 import logging
 import urllib.request
 import urllib.error
+import time
+import smtplib
+from email.message import EmailMessage
 from typing import Optional
 
 logger = logging.getLogger("lastping.alerts")
@@ -59,6 +62,46 @@ def notify_recovery(check, project) -> None:
         logger.exception("Failed to send recovery notification")
 
 
-def notify_email_placeholder(subject: str, body: str, to: Optional[str] = None) -> None:
-    # Placeholder: integrate real email provider in future
-    logger.info("EMAIL placeholder — to=%s subject=%s body=%s", to, subject, body)
+def send_email(subject: str, body: str, to: Optional[str] = None) -> bool:
+    smtp_host = os.environ.get("SMTP_HOST")
+    smtp_port = int(os.environ.get("SMTP_PORT", "587"))
+    smtp_user = os.environ.get("SMTP_USER")
+    smtp_pass = os.environ.get("SMTP_PASS")
+    from_addr = os.environ.get("ALERT_EMAIL_FROM")
+    to_addr = to or os.environ.get("ALERT_EMAIL_TO")
+    if not smtp_host or not from_addr or not to_addr:
+        logger.debug("Email not configured (SMTP_HOST or ALERT_EMAIL_FROM/TO missing)")
+        return False
+
+    msg = EmailMessage()
+    msg["From"] = from_addr
+    msg["To"] = to_addr
+    msg["Subject"] = subject
+    msg.set_content(body)
+
+    try:
+        if smtp_port == 465:
+            with smtplib.SMTP_SSL(smtp_host, smtp_port) as smtp:
+                if smtp_user and smtp_pass:
+                    smtp.login(smtp_user, smtp_pass)
+                smtp.send_message(msg)
+        else:
+            with smtplib.SMTP(smtp_host, smtp_port) as smtp:
+                smtp.starttls()
+                if smtp_user and smtp_pass:
+                    smtp.login(smtp_user, smtp_pass)
+                smtp.send_message(msg)
+        return True
+    except Exception:
+        logger.exception("Failed to send email")
+    return False
+
+
+def notify_escalation(project, reason: str):
+    esc = os.environ.get("ALERT_ESCALATION_EMAIL")
+    if not esc:
+        logger.debug("No escalation email configured")
+        return False
+    subj = f"[LastPing] Escalation: project {project.name} alert threshold exceeded"
+    body = f"Project {project.name} has exceeded its alert threshold. Latest reason: {reason}"
+    return send_email(subj, body, to=esc)

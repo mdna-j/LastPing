@@ -11,6 +11,10 @@ class Project(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
     checks: List["Check"] = Relationship(back_populates="project")
+    # per-project alert throttling/escalation
+    alert_rate_limit_count: int = Field(default=100, description="max alerts in window before escalation/suppression")
+    alert_rate_limit_window: int = Field(default=3600, description="window in seconds for rate limiting alerts")
+    last_escalated_at: Optional[datetime] = None
 
 
 class CheckType(str):
