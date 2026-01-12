@@ -68,9 +68,25 @@ def notify_down(check, project, reason: str = None) -> None:
             f":rotating_light: **DOWN** — Project `{project.name}` — Check `{check.name}`\n"
             f"Last ping: `{check.last_ping}` — expected every `{check.expected_interval}s` + grace `{check.grace_period}s`{reason_text}"
         )
-        # project-specific overrides handled by caller; keep defaults for global endpoints
-        send_discord_message(msg)
-        send_slack_message(msg)
+        # Prefer per-project webhooks when available
+        sent = False
+        if getattr(project, 'discord_webhook_url', None):
+            _post_json(project.discord_webhook_url, {"content": msg})
+            sent = True
+        if getattr(project, 'slack_webhook_url', None):
+            _post_json(project.slack_webhook_url, {"text": msg})
+            sent = True
+        if getattr(project, 'pagerduty_integration_key', None):
+            send_pagerduty_event(project.pagerduty_integration_key, msg, severity="critical")
+            sent = True
+        if getattr(project, 'generic_webhook_url', None):
+            send_generic_webhook(project.generic_webhook_url, {"text": msg})
+            sent = True
+
+        # fall back to global endpoints if no project-specific webhook is set
+        if not sent:
+            send_discord_message(msg)
+            send_slack_message(msg)
     except Exception:
         logger.exception("Failed to send DOWN notification")
 
@@ -81,8 +97,23 @@ def notify_recovery(check, project) -> None:
             f":white_check_mark: **RECOVERY** — Project `{project.name}` — Check `{check.name}` is UP again\n"
             f"Last ping: `{check.last_ping}`"
         )
-        send_discord_message(msg)
-        send_slack_message(msg)
+        sent = False
+        if getattr(project, 'discord_webhook_url', None):
+            _post_json(project.discord_webhook_url, {"content": msg})
+            sent = True
+        if getattr(project, 'slack_webhook_url', None):
+            _post_json(project.slack_webhook_url, {"text": msg})
+            sent = True
+        if getattr(project, 'pagerduty_integration_key', None):
+            send_pagerduty_event(project.pagerduty_integration_key, msg, severity="info")
+            sent = True
+        if getattr(project, 'generic_webhook_url', None):
+            send_generic_webhook(project.generic_webhook_url, {"text": msg})
+            sent = True
+
+        if not sent:
+            send_discord_message(msg)
+            send_slack_message(msg)
     except Exception:
         logger.exception("Failed to send recovery notification")
 
