@@ -29,8 +29,12 @@ class ProjectRead(BaseModel):
 @router.post("/", status_code=status.HTTP_201_CREATED)
 def create_project(payload: ProjectCreate, session: Session = Depends(get_session)):
     """Create a new project and return the project and API key."""
-    api_key = secrets.token_urlsafe(32)
-    project = ProjectModel(name=payload.name, api_key=api_key)
+    from ..security import generate_api_key, hash_api_key
+
+    api_key = generate_api_key()
+    api_key_hash = hash_api_key(api_key)
+    # store only the hash; return plaintext to caller
+    project = ProjectModel(name=payload.name, api_key_hash=api_key_hash)
     session.add(project)
     session.commit()
     session.refresh(project)
@@ -56,8 +60,10 @@ def rotate_api_key(project_id: int, session: Session = Depends(get_session)):
     project = session.get(ProjectModel, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    new_key = secrets.token_urlsafe(32)
-    project.api_key = new_key
+    from ..security import generate_api_key, hash_api_key
+
+    new_key = generate_api_key()
+    project.api_key_hash = hash_api_key(new_key)
     session.add(project)
     session.commit()
     session.refresh(project)
