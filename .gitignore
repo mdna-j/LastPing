@@ -30,3 +30,6 @@ Thumbs.db
 
 # Node
 node_modules/
+scripts/inspect_schema.py
+scripts/inspect_project_cols.py
+scripts/drop_api_key_now.py
