@@ -1,3 +1,11 @@
+"""
+Alert helpers and channel adapters.
+
+This module centralises all outbound alerting logic (Discord, Slack,
+PagerDuty, email, generic webhooks). Functions retry transient
+failures and prefer project-specific webhooks when configured.
+"""
+
 import os
 import json
 import logging
@@ -83,7 +91,7 @@ def notify_down(check, project, reason: str = None) -> None:
         }
 
         sent = False
-        # Discord: use embed for nicer display
+        # Discord: use embed for nicer display (structured data improves readability)
         if getattr(project, 'discord_webhook_url', None):
             embed = {
                 "title": ":rotating_light: DOWN",
@@ -99,7 +107,7 @@ def notify_down(check, project, reason: str = None) -> None:
             _post_json(project.discord_webhook_url, {"embeds": [embed]})
             sent = True
 
-        # Slack: blocks
+        # Slack: send Block Kit payload for structured messages
         if getattr(project, 'slack_webhook_url', None):
             blocks = [
                 {"type": "section", "text": {"type": "mrkdwn", "text": f":rotating_light: *{summary}*"}},
@@ -119,7 +127,7 @@ def notify_down(check, project, reason: str = None) -> None:
             send_pagerduty_event(project.pagerduty_integration_key, summary, severity="critical")
             sent = True
 
-        # Generic webhook: send structured JSON
+        # Generic webhook: send structured JSON payload so receivers can process
         if getattr(project, 'generic_webhook_url', None):
             payload = {"event": "down", "summary": summary, "details": details}
             send_generic_webhook(project.generic_webhook_url, payload)
@@ -164,6 +172,7 @@ def notify_recovery(check, project) -> None:
             send_generic_webhook(project.generic_webhook_url, {"event": "recovery", "summary": summary, "details": details})
             sent = True
 
+        # fall back to global endpoints if no project-specific webhook is configured
         if not sent:
             msg = (f":white_check_mark: **RECOVERY** — Project `{project.name}` — Check `{check.name}` is UP again\n" f"Last ping: `{check.last_ping}`")
             send_discord_message(msg)
@@ -179,6 +188,7 @@ def send_email(subject: str, body: str, to: Optional[str] = None) -> bool:
     smtp_pass = os.environ.get("SMTP_PASS")
     from_addr = os.environ.get("ALERT_EMAIL_FROM")
     to_addr = to or os.environ.get("ALERT_EMAIL_TO")
+    # Basic configuration check - skip email if required env vars are missing
     if not smtp_host or not from_addr or not to_addr:
         logger.debug("Email not configured (SMTP_HOST or ALERT_EMAIL_FROM/TO missing)")
         return False

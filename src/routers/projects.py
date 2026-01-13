@@ -1,3 +1,11 @@
+"""
+Project management routes.
+
+Endpoints here create projects and manage per-project webhook
+configuration and API keys. `create_project` returns a plaintext API
+key once; the server stores only the PBKDF2 hash.
+"""
+
 from datetime import datetime
 import secrets
 from typing import List, Optional
@@ -36,15 +44,14 @@ class ProjectRead(BaseModel):
 @router.post("/", status_code=status.HTTP_201_CREATED)
 def create_project(payload: ProjectCreate, session: Session = Depends(get_session)):
     """Create a new project and return the project and API key."""
-    from ..security import generate_api_key, hash_api_key
-
+    # generate one-time plaintext API key and store only the hash
     api_key = generate_api_key()
     api_key_hash = hash_api_key(api_key)
-    # store only the hash; return plaintext to caller
     project = ProjectModel(name=payload.name, api_key_hash=api_key_hash, owner_email=payload.owner_email)
     session.add(project)
     session.commit()
     session.refresh(project)
+    # Caller must securely persist `api_key` — it will not be shown again.
     return {"project": ProjectRead.from_orm(project), "api_key": api_key}
 
 
@@ -104,7 +111,8 @@ def rotate_api_key(project_id: int, session: Session = Depends(get_session)):
         raise HTTPException(status_code=404, detail="Project not found")
     new_key = generate_api_key()
     project.api_key_hash = hash_api_key(new_key)
-    # email the new key to owner if configured
+    # Email the new key to the project owner when configured. This is
+    # the safe most practical delivery mechanism for production usage.
     from ..alerts import send_email
     if getattr(project, 'owner_email', None):
         subject = f"[LastPing] API key rotated for project {project.name}"
@@ -112,6 +120,7 @@ def rotate_api_key(project_id: int, session: Session = Depends(get_session)):
         try:
             send_email(subject, body, to=project.owner_email)
         except Exception:
+            # We swallow email errors here — rotation still succeeds.
             pass
     session.add(project)
     session.commit()

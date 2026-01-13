@@ -1,3 +1,11 @@
+"""
+Checks CRUD routes.
+
+Create and list monitoring checks for a project. Checks may be
+heartbeat-based or HTTP checks; the worker interprets check fields to
+drive scheduling and detection logic.
+"""
+
 from typing import List, Optional
 from datetime import datetime
 
@@ -37,6 +45,12 @@ class CheckRead(BaseModel):
 
 @router.post("/", status_code=status.HTTP_201_CREATED, response_model=CheckRead)
 def create_check(project_id: int, payload: CheckCreate, _proj: Project = Depends(require_project_api_key), session: Session = Depends(get_session)):
+    """Create a check for the given project.
+
+    Names must be unique within a project. HTTP checks should provide a
+    `url`; heartbeat checks are created automatically by the heartbeat
+    endpoint on first use as well.
+    """
     # ensure name uniqueness within project
     existing = session.exec(select(CheckModel).where(CheckModel.project_id == project_id, CheckModel.name == payload.name)).first()
     if existing:
@@ -61,6 +75,7 @@ def create_check(project_id: int, payload: CheckCreate, _proj: Project = Depends
 
 @router.get("/", response_model=List[CheckRead])
 def list_checks(project_id: int, session: Session = Depends(get_session)):
+    """List checks for a project (minimal visibility endpoint)."""
     checks = session.exec(select(CheckModel).where(CheckModel.project_id == project_id)).all()
     return checks
 

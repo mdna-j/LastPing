@@ -1,3 +1,12 @@
+"""
+Data models for LastPing.
+
+This module defines the persistent domain objects used throughout the
+application: `Project`, `Check`, `Heartbeat` and `Event`. Keep schema
+fields small and explicit — these models are the source of truth for
+Alembic migrations and worker behaviour.
+"""
+
 from datetime import datetime
 from typing import List, Optional
 
@@ -11,6 +20,7 @@ class Project(SQLModel, table=True):
     api_key_hash: Optional[str] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     # owner contact for notifications and key rotation delivery
+    # This is used to email rotated API keys and escalation notices.
     owner_email: Optional[str] = None
 
     # per-project webhook configuration (overrides global env vars)
@@ -19,6 +29,7 @@ class Project(SQLModel, table=True):
     pagerduty_integration_key: Optional[str] = None
     generic_webhook_url: Optional[str] = None
 
+    # Relationship to checks owned by this project (one-to-many)
     checks: List["Check"] = Relationship(back_populates="project")
     # per-project alert throttling/escalation
     alert_rate_limit_count: int = Field(default=100, description="max alerts in window before escalation/suppression")
@@ -66,6 +77,7 @@ class Check(SQLModel, table=True):
     consecutive_failures: int = Field(default=0)
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
+    # reverse relationship to the owning `Project`
     project: Optional[Project] = Relationship(back_populates="checks")
     heartbeats: List["Heartbeat"] = Relationship(back_populates="check")
     events: List["Event"] = Relationship(back_populates="check")

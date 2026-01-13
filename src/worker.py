@@ -1,6 +1,15 @@
 import os
 import time
 import logging
+"""
+Background worker: scans checks and executes monitoring logic.
+
+This module contains the worker loop and core detection behaviour used
+to mark checks UP/DOWN, persist events, and call alerting functions.
+Keep scan logic deterministic and side-effect minimal so tests remain
+stable.
+"""
+
 from datetime import datetime, timedelta
 import urllib.request
 import urllib.error
@@ -15,10 +24,16 @@ logger = logging.getLogger("lastping.worker")
 
 
 def _now() -> datetime:
+    """Return current UTC datetime (extracted to ease testing)."""
     return datetime.utcnow()
 
 
 def _http_check(url: str, timeout: int, retries: int) -> (bool, str):
+    """Perform a simple HTTP GET with retries.
+
+    Returns (ok: bool, reason: str). The reason is a short diagnostic
+    such as `status=200` or an error string for logging/alerting.
+    """
     last_exc = None
     for attempt in range(max(1, retries)):
         try:
@@ -30,6 +45,7 @@ def _http_check(url: str, timeout: int, retries: int) -> (bool, str):
                 else:
                     last_exc = f"status={code}"
         except urllib.error.HTTPError as he:
+            # record HTTP errors (4xx/5xx) as the last exception reason
             last_exc = f"http_error={getattr(he, 'code', 'unknown')}"
         except Exception as e:
             last_exc = str(e)
@@ -67,12 +83,18 @@ def _trigger_escalation(session: Session, project: Project, now: datetime, reaso
 
 
 def scan_checks_once(session: Session):
+    # Load all checks and process each synchronously. The worker is
+    # intentionally simple (single-threaded) to avoid race conditions
+    # with the DB and to make behaviour easy to reason about in tests.
     stmt = select(Check)
     results = session.exec(stmt).all()
     now = _now()
     for check in results:
         project = session.get(Project, check.project_id)
 
+        # HEARTBEAT checks are driven by client pings; worker only
+        # marks them DOWN when the expected interval + grace window
+        # has passed since `last_ping`.
         if check.type == CheckType.HEARTBEAT:
             expected = check.expected_interval or 600
             grace = check.grace_period or 600
@@ -149,6 +171,9 @@ def scan_checks_once(session: Session):
                         session.add(check)
                         session.commit()
 
+        # HTTP checks are actively polled according to `interval` and
+        # `next_run`. The worker executes `_http_check`, updates status
+        # and persists `next_run` for scheduling.
         elif check.type == CheckType.HTTP:
             if not check.url:
                 continue
