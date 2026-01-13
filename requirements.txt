@@ -4,6 +4,5 @@ pydantic==1.10.11
 pytest==7.4.0
 pytest-cov==4.1.0
 sqlmodel
-psycopg-binary
-alembic==1.11.1
+psycopg2-binary
 alembic==1.11.1

@@ -273,6 +273,14 @@ def main():
                     scan_checks_once(session)
                 except Exception:
                     logger.exception("Error scanning checks")
+            # update worker health file so orchestration can determine liveness
+            health_file = os.environ.get("WORKER_HEALTH_FILE", "/tmp/lastping_worker.health")
+            try:
+                with open(health_file, "w") as hf:
+                    hf.write(datetime.utcnow().isoformat() + "\n")
+            except Exception:
+                logger.exception("Failed to write worker health file")
+
             time.sleep(scan_interval)
     except KeyboardInterrupt:
         logger.info("Worker stopping")

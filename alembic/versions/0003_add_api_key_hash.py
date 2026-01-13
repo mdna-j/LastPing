@@ -15,7 +15,10 @@ depends_on = None
 
 def upgrade() -> None:
     with engine.connect() as conn:
-        conn.execute(text('ALTER TABLE "project" ADD COLUMN "api_key_hash" TEXT'))
+        try:
+            conn.execute(text('ALTER TABLE "project" ADD COLUMN "api_key_hash" TEXT'))
+        except Exception:
+            pass
 
 
 def downgrade() -> None:

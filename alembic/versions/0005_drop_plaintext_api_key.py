@@ -59,8 +59,8 @@ def upgrade() -> None:
             try:
                 conn.execute(text('ALTER TABLE project DROP COLUMN api_key'))
             except Exception:
-                # best-effort; if it fails, raise to ensure migration author inspects
-                raise
+                # ignore if column is already removed or unsupported
+                pass
 
 
 def downgrade() -> None:

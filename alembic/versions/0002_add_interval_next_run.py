@@ -17,8 +17,15 @@ def upgrade() -> None:
     # Add `interval` and `next_run` columns to the `check` table.
     # Use simple ALTER TABLE ADD COLUMN which is supported by SQLite.
     with engine.connect() as conn:
-        conn.execute(text('ALTER TABLE "check" ADD COLUMN "interval" INTEGER DEFAULT 60'))
-        conn.execute(text('ALTER TABLE "check" ADD COLUMN "next_run" DATETIME'))
+        try:
+            conn.execute(text('ALTER TABLE "check" ADD COLUMN "interval" INTEGER DEFAULT 60'))
+        except Exception:
+            # column may already exist on some databases; ignore
+            pass
+        try:
+            conn.execute(text('ALTER TABLE "check" ADD COLUMN "next_run" DATETIME'))
+        except Exception:
+            pass
 
 
 def downgrade() -> None:
