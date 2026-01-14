@@ -64,6 +64,10 @@ class Check(SQLModel, table=True):
     last_alerted_at: Optional[datetime] = None
     last_alert_type: Optional[str] = None
 
+    # optional maintenance window (suppress alerts during this period)
+    maintenance_starts_at: Optional[datetime] = None
+    maintenance_ends_at: Optional[datetime] = None
+
     # http-specific
     url: Optional[str] = None
     timeout: Optional[int] = Field(default=5)
