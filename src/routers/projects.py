@@ -76,6 +76,11 @@ class WebhookUpdate(BaseModel):
     generic_webhook_url: Optional[str] = None
 
 
+class MaintenanceWindow(BaseModel):
+    maintenance_starts_at: Optional[datetime] = None
+    maintenance_ends_at: Optional[datetime] = None
+
+
 @router.get("/{project_id}/webhooks", response_model=WebhookUpdate)
 def get_project_webhooks(project_id: int, session: Session = Depends(get_session)):
     project = session.get(ProjectModel, project_id)
@@ -98,6 +103,27 @@ def update_project_webhooks(project_id: int, payload: WebhookUpdate, session: Se
     project.slack_webhook_url = payload.slack_webhook_url
     project.pagerduty_integration_key = payload.pagerduty_integration_key
     project.generic_webhook_url = payload.generic_webhook_url
+    session.add(project)
+    session.commit()
+    session.refresh(project)
+    return payload
+
+
+@router.get("/{project_id}/maintenance", response_model=MaintenanceWindow)
+def get_project_maintenance(project_id: int, session: Session = Depends(get_session)):
+    project = session.get(ProjectModel, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return MaintenanceWindow(maintenance_starts_at=project.maintenance_starts_at, maintenance_ends_at=project.maintenance_ends_at)
+
+
+@router.post("/{project_id}/maintenance", response_model=MaintenanceWindow)
+def set_project_maintenance(project_id: int, payload: MaintenanceWindow, session: Session = Depends(get_session)):
+    project = session.get(ProjectModel, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    project.maintenance_starts_at = payload.maintenance_starts_at
+    project.maintenance_ends_at = payload.maintenance_ends_at
     session.add(project)
     session.commit()
     session.refresh(project)

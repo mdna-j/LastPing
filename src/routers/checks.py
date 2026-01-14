@@ -38,6 +38,8 @@ class CheckRead(BaseModel):
     type: str
     status: str
     last_ping: Optional[datetime]
+    maintenance_starts_at: Optional[datetime] = None
+    maintenance_ends_at: Optional[datetime] = None
 
     class Config:
         orm_mode = True
@@ -86,3 +88,29 @@ def get_check(project_id: int, check_id: int, session: Session = Depends(get_ses
     if not check or check.project_id != project_id:
         raise HTTPException(status_code=404, detail="Check not found")
     return check
+
+
+class MaintenanceWindow(BaseModel):
+    maintenance_starts_at: Optional[datetime] = None
+    maintenance_ends_at: Optional[datetime] = None
+
+
+@router.get("/{check_id}/maintenance", response_model=MaintenanceWindow)
+def get_check_maintenance(project_id: int, check_id: int, session: Session = Depends(get_session)):
+    check = session.get(CheckModel, check_id)
+    if not check or check.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Check not found")
+    return MaintenanceWindow(maintenance_starts_at=check.maintenance_starts_at, maintenance_ends_at=check.maintenance_ends_at)
+
+
+@router.post("/{check_id}/maintenance", response_model=MaintenanceWindow)
+def set_check_maintenance(project_id: int, check_id: int, payload: MaintenanceWindow, _proj: Project = Depends(require_project_api_key), session: Session = Depends(get_session)):
+    check = session.get(CheckModel, check_id)
+    if not check or check.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Check not found")
+    check.maintenance_starts_at = payload.maintenance_starts_at
+    check.maintenance_ends_at = payload.maintenance_ends_at
+    session.add(check)
+    session.commit()
+    session.refresh(check)
+    return payload

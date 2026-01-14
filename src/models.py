@@ -35,6 +35,9 @@ class Project(SQLModel, table=True):
     alert_rate_limit_count: int = Field(default=100, description="max alerts in window before escalation/suppression")
     alert_rate_limit_window: int = Field(default=3600, description="window in seconds for rate limiting alerts")
     last_escalated_at: Optional[datetime] = None
+    # optional project-level maintenance window (suppress alerts across project)
+    maintenance_starts_at: Optional[datetime] = None
+    maintenance_ends_at: Optional[datetime] = None
 
 
 class CheckType(str):
