@@ -11,8 +11,7 @@ import secrets
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status, Header
-from pydantic import BaseModel, Field
-from ..deps import require_admin_or_project_api_key
+from pydantic import BaseModel
 from sqlmodel import select, Session
 
 from ..db import get_session
@@ -78,8 +77,8 @@ class WebhookUpdate(BaseModel):
 
 
 class MaintenanceWindow(BaseModel):
-    maintenance_starts_at: Optional[datetime] = Field(None, example="2026-01-14T12:00:00Z")
-    maintenance_ends_at: Optional[datetime] = Field(None, example="2026-01-14T13:00:00Z")
+    maintenance_starts_at: Optional[datetime] = None
+    maintenance_ends_at: Optional[datetime] = None
 
 
 @router.get("/{project_id}/webhooks", response_model=WebhookUpdate)
@@ -110,7 +109,7 @@ def update_project_webhooks(project_id: int, payload: WebhookUpdate, session: Se
     return payload
 
 
-@router.get("/{project_id}/maintenance", response_model=MaintenanceWindow, summary="Get project maintenance window", description="Return the current maintenance window for the project if set.")
+@router.get("/{project_id}/maintenance", response_model=MaintenanceWindow)
 def get_project_maintenance(project_id: int, session: Session = Depends(get_session)):
     project = session.get(ProjectModel, project_id)
     if not project:
@@ -118,8 +117,8 @@ def get_project_maintenance(project_id: int, session: Session = Depends(get_sess
     return MaintenanceWindow(maintenance_starts_at=project.maintenance_starts_at, maintenance_ends_at=project.maintenance_ends_at)
 
 
-@router.post("/{project_id}/maintenance", response_model=MaintenanceWindow, summary="Set project maintenance window", description="Set or clear a maintenance window for the project. Requires project API key or admin token.")
-def set_project_maintenance(project_id: int, payload: MaintenanceWindow, session: Session = Depends(get_session), _auth: ProjectModel = Depends(require_admin_or_project_api_key)):
+@router.post("/{project_id}/maintenance", response_model=MaintenanceWindow)
+def set_project_maintenance(project_id: int, payload: MaintenanceWindow, session: Session = Depends(get_session)):
     project = session.get(ProjectModel, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
