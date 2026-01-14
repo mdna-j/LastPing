@@ -15,7 +15,7 @@ from sqlmodel import Session, select
 
 from ..db import get_session
 from ..models import Check as CheckModel, CheckType, CheckStatus, Project
-from ..deps import require_project_api_key
+from ..deps import require_project_api_key, limit_by_api_key
 
 
 router = APIRouter(prefix="/projects/{project_id}/checks", tags=["checks"])
@@ -46,7 +46,7 @@ class CheckRead(BaseModel):
 
 
 @router.post("/", status_code=status.HTTP_201_CREATED, response_model=CheckRead)
-def create_check(project_id: int, payload: CheckCreate, _proj: Project = Depends(require_project_api_key), session: Session = Depends(get_session)):
+def create_check(project_id: int, payload: CheckCreate, _proj: Project = Depends(require_project_api_key), _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
     """Create a check for the given project.
 
     Names must be unique within a project. HTTP checks should provide a

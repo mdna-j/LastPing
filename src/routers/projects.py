@@ -17,6 +17,7 @@ from sqlmodel import select, Session
 from ..db import get_session
 from ..models import Project as ProjectModel
 from ..security import generate_api_key, hash_api_key
+from ..deps import limit_by_api_key
 import os
 
 
@@ -95,7 +96,7 @@ def get_project_webhooks(project_id: int, session: Session = Depends(get_session
 
 
 @router.post("/{project_id}/webhooks", response_model=WebhookUpdate)
-def update_project_webhooks(project_id: int, payload: WebhookUpdate, session: Session = Depends(get_session)):
+def update_project_webhooks(project_id: int, payload: WebhookUpdate, _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
     project = session.get(ProjectModel, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -118,7 +119,7 @@ def get_project_maintenance(project_id: int, session: Session = Depends(get_sess
 
 
 @router.post("/{project_id}/maintenance", response_model=MaintenanceWindow)
-def set_project_maintenance(project_id: int, payload: MaintenanceWindow, session: Session = Depends(get_session)):
+def set_project_maintenance(project_id: int, payload: MaintenanceWindow, _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
     project = session.get(ProjectModel, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -131,7 +132,7 @@ def set_project_maintenance(project_id: int, payload: MaintenanceWindow, session
 
 
 @router.post("/{project_id}/rotate-key")
-def rotate_api_key(project_id: int, session: Session = Depends(get_session)):
+def rotate_api_key(project_id: int, session: Session = Depends(get_session), _rl = Depends(limit_by_api_key)):
     project = session.get(ProjectModel, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -151,6 +152,14 @@ def rotate_api_key(project_id: int, session: Session = Depends(get_session)):
     session.add(project)
     session.commit()
     session.refresh(project)
+    # audit
+    try:
+        from ..models import AuditLog
+        al = AuditLog(actor="project_api", action="rotate_primary_api_key", target_type="project", target_id=project_id, details=None)
+        session.add(al)
+        session.commit()
+    except Exception:
+        pass
     return {"api_key": new_key}
 
 

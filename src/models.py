@@ -9,6 +9,7 @@ Alembic migrations and worker behaviour.
 
 from datetime import datetime
 from typing import List, Optional
+from enum import Enum
 
 from sqlmodel import Field, Relationship, SQLModel
 
@@ -31,6 +32,10 @@ class Project(SQLModel, table=True):
 
     # Relationship to checks owned by this project (one-to-many)
     checks: List["Check"] = Relationship(back_populates="project")
+    # API keys issued for this project
+    api_keys: List["ApiKey"] = Relationship(back_populates="project")
+    # Project membership (users and roles)
+    memberships: List["ProjectMembership"] = Relationship(back_populates="project")
     # per-project alert throttling/escalation
     alert_rate_limit_count: int = Field(default=100, description="max alerts in window before escalation/suppression")
     alert_rate_limit_window: int = Field(default=3600, description="window in seconds for rate limiting alerts")
@@ -90,6 +95,69 @@ class Check(SQLModel, table=True):
     events: List["Event"] = Relationship(back_populates="check")
 
 
+class ApiKey(SQLModel, table=True):
+    __tablename__ = "api_key"
+    """API keys scoped to a project with optional rate limits."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id")
+    key_hash: str = Field(index=True)
+    rate_limit_per_minute: Optional[int] = Field(default=0, description="requests per minute allowed for this key; 0 = unlimited")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    project: Optional[Project] = Relationship(back_populates="api_keys")
+
+
+class Role(str, Enum):
+    OWNER = "owner"
+    VIEWER = "viewer"
+
+
+class User(SQLModel, table=True):
+    __tablename__ = "user"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    email: str = Field(index=True)
+    hashed_password: str
+    is_active: bool = Field(default=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    memberships: List["ProjectMembership"] = Relationship(back_populates="user")
+
+
+class ProjectMembership(SQLModel, table=True):
+    __tablename__ = "project_membership"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id")
+    project_id: int = Field(foreign_key="project.id")
+    role: str = Field(default=Role.VIEWER.value)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    user: Optional[User] = Relationship(back_populates="memberships")
+    project: Optional[Project] = Relationship(back_populates="memberships")
+
+
+class UserToken(SQLModel, table=True):
+    __tablename__ = "user_token"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id")
+    token: str = Field(index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    expires_at: Optional[datetime] = None
+
+    user: Optional[User] = Relationship()
+
+
+class ApiKeyUsage(SQLModel, table=True):
+    __tablename__ = "api_key_usage"
+    """Simple per-minute counter for API key usage enforcement."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    api_key_id: int = Field(foreign_key="api_key.id")
+    minute_start: datetime = Field(description="UTC minute window start (seconds=0, micros=0)")
+    count: int = Field(default=0)
+
+    # relationship back to ApiKey (not strictly necessary for queries)
+    # api_key: Optional[ApiKey] = Relationship()
+
+
 class Heartbeat(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     check_id: int = Field(foreign_key="check.id")
@@ -115,3 +183,22 @@ class Event(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
     check: Optional[Check] = Relationship(back_populates="events")
+
+
+class AuditLog(SQLModel, table=True):
+    __tablename__ = "audit_log"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    actor: Optional[str] = None
+    action: str = Field(description="Action performed, e.g. 'create_apikey', 'rotate_apikey', 'revoke_apikey'")
+    target_type: Optional[str] = None
+    target_id: Optional[int] = None
+    details: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class AdminCsrf(SQLModel, table=True):
+    __tablename__ = "admin_csrf"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    token: str = Field(index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    expires_at: Optional[datetime] = None

@@ -7,14 +7,14 @@ from sqlmodel import Session, select
 
 from ..db import get_session
 from ..models import Check as CheckModel, Heartbeat as HeartbeatModel, Event as EventModel, CheckType, EventType
-from ..deps import require_project_api_key
+from ..deps import require_project_api_key, limit_by_api_key
 
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["heartbeats"])
 
 
 @router.post("/heartbeat/{name}")
-def post_heartbeat(project_id: int, name: str, payload: Optional[Dict[str, Any]] = Body(None), _proj = Depends(require_project_api_key), session: Session = Depends(get_session)):
+def post_heartbeat(project_id: int, name: str, payload: Optional[Dict[str, Any]] = Body(None), _proj = Depends(require_project_api_key), _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
     """Ingest a heartbeat for `project_id`/`name`.
 
     - Creates a `Check` automatically the first time a heartbeat for

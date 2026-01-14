@@ -65,6 +65,18 @@ via environment or a secrets mechanism.
 Unit tests live under `tests/`. Run `python -m pytest -q` to run them locally. The project includes
 basic tests for alerts and worker behaviour; expand tests when adding features.
 
+**Admin bypass & distributed rate limiting**
+
+- Admin bypass: an `X-ADMIN-TOKEN` header matching the `ADMIN_TOKEN` env var will bypass project API key checks and rate limits for management endpoints.
+- Distributed deployments: to enable robust per-API-key rate limiting across multiple worker instances, set `REDIS_URL` and install the `redis` package. The worker will use Redis counters when available; otherwise it falls back to a DB-backed per-minute counter.
+  Install Redis and set `REDIS_URL` in production:
+
+```bash
+pip install redis
+# example env var for local redis
+export REDIS_URL=redis://localhost:6379/0
+```
+
 **Contributing**
 
 Please open issues or PRs. Follow the existing coding style and run tests + linters before submitting.
