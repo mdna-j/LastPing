@@ -55,9 +55,9 @@ def upgrade() -> None:
             res = conn.execute(text("PRAGMA table_info('check')")).fetchall()
             cols = [r[1] for r in res]
             if 'maintenance_starts_at' not in cols or 'maintenance_ends_at' not in cols:
-                conn.execute(text('DROP TABLE IF EXISTS check_new'))
+                conn.execute(text('DROP TABLE IF EXISTS "check_new"'))
                 conn.execute(text(
-                    'CREATE TABLE check_new ('
+                    'CREATE TABLE "check_new" ('
                     'id INTEGER PRIMARY KEY,'
                     'project_id INTEGER,'
                     'name TEXT NOT NULL,'
@@ -87,9 +87,9 @@ def upgrade() -> None:
                     'url','timeout','retries','interval','next_run','status','last_ping','consecutive_failures','created_at'
                 )]
                 cols_csv = ','.join(keep)
-                conn.execute(text(f"INSERT INTO check_new ({cols_csv}) SELECT {cols_csv} FROM check"))
-                conn.execute(text('DROP TABLE check'))
-                conn.execute(text('ALTER TABLE check_new RENAME TO check'))
+                conn.execute(text(f"INSERT INTO \"check_new\" ({cols_csv}) SELECT {cols_csv} FROM \"check\""))
+                conn.execute(text('DROP TABLE "check"'))
+                conn.execute(text('ALTER TABLE "check_new" RENAME TO "check"'))
         else:
             # for databases that support ALTER TABLE ADD COLUMN
             try:
