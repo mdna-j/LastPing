@@ -131,4 +131,3 @@ def downgrade() -> None:
                 conn.execute(text('ALTER TABLE "check" DROP COLUMN maintenance_ends_at'))
             except Exception:
                 pass
-*** End Patch
