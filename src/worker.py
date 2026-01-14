@@ -13,6 +13,7 @@ stable.
 from datetime import datetime, timedelta
 import urllib.request
 import urllib.error
+from typing import Tuple
 
 from sqlmodel import Session, select
 
@@ -28,7 +29,7 @@ def _now() -> datetime:
     return datetime.utcnow()
 
 
-def _http_check(url: str, timeout: int, retries: int) -> (bool, str):
+def _http_check(url: str, timeout: int, retries: int) -> Tuple[bool, str]:
     """Perform a simple HTTP GET with retries.
 
     Returns (ok: bool, reason: str). The reason is a short diagnostic
