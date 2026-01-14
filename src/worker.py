@@ -29,26 +29,6 @@ def _now() -> datetime:
     return datetime.utcnow()
 
 
-def _in_maintenance(check: Check, project: Project, now: datetime) -> bool:
-    """Return True if the given check is within a maintenance window.
-
-    Maintenance window is optional and defined by `maintenance_starts_at`
-    and `maintenance_ends_at` on the `Check` model. If both are set and
-    `now` falls between them, alerts should be suppressed.
-    """
-    # check-level window
-    start = getattr(check, "maintenance_starts_at", None)
-    end = getattr(check, "maintenance_ends_at", None)
-    if start is not None and end is not None and start <= now <= end:
-        return True
-    # project-level window
-    pstart = getattr(project, "maintenance_starts_at", None)
-    pend = getattr(project, "maintenance_ends_at", None)
-    if pstart is not None and pend is not None and pstart <= now <= pend:
-        return True
-    return False
-
-
 def _http_check(url: str, timeout: int, retries: int) -> Tuple[bool, str]:
     """Perform a simple HTTP GET with retries.
 
@@ -134,13 +114,6 @@ def scan_checks_once(session: Session):
                     # alerting: only send if enabled and threshold reached and cooldown passed
                     should_alert = check.alert_enabled and (check.consecutive_failures >= (check.alert_after or 1))
                     if should_alert:
-                        # suppress alerts during a maintenance window
-                        if _in_maintenance(check, project, now):
-                            event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.DOWN, message="missed heartbeat (suppressed due to maintenance)")
-                            session.add(event)
-                            session.add(check)
-                            session.commit()
-                            continue
                         # project-level throttling/escalation
                         throttled = _project_is_throttled(session, project, now)
                         if throttled:
@@ -254,20 +227,6 @@ def scan_checks_once(session: Session):
                     session.add(event)
                     should_alert = check.alert_enabled and (check.consecutive_failures >= (check.alert_after or 1))
                     if should_alert:
-                        # suppress alerts during a maintenance window
-                        if _in_maintenance(check, project, now):
-                            event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.HTTP_FAILURE, message=f"{reason} (suppressed due to maintenance)")
-                            session.add(event)
-                            session.add(check)
-                            session.commit()
-                            # persist next_run below as usual
-                            try:
-                                check.next_run = now + timedelta(seconds=interval)
-                                session.add(check)
-                                session.commit()
-                            except Exception:
-                                logger.exception("Error persisting next_run for check %s", getattr(check, 'id', None))
-                            continue
                         throttled = _project_is_throttled(session, project, now)
                         if throttled:
                             _trigger_escalation(session, project, now, reason)
