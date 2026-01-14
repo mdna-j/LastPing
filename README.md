@@ -56,9 +56,9 @@ via environment or a secrets mechanism.
 
 - Formatting: use `black` and `isort`.
 - Linting & type checks: use `ruff` and `mypy` (or `ruff`'s type checks) and run them in CI.
--- Add `pre-commit` with hooks for `black`, `isort`, and `ruff` to catch issues locally.
--- This repository now includes a GitHub Actions workflow at `.github/workflows/ci.yml` which
-	runs `ruff`, `black --check`, and the test suite on push and PR to `main`.
+  -- Add `pre-commit` with hooks for `black`, `isort`, and `ruff` to catch issues locally.
+  -- This repository now includes a GitHub Actions workflow at `.github/workflows/ci.yml` which
+  runs `ruff`, `black --check`, and the test suite on push and PR to `main`.
 
 **Tests**
 
