@@ -8,6 +8,8 @@ from .routers.alerts import router as alerts_router
 from .routers.admin_apikeys import router as admin_apikeys_router
 from .routers.users import router as users_router
 from .routers.metrics import router as metrics_router
+from .routers.incidents import router as incidents_router, public_router as incidents_public_router
+from .routers.ui import router as ui_router
 
 
 app = FastAPI(title="LastPing API")
@@ -38,3 +40,6 @@ app.include_router(alerts_router)
 app.include_router(admin_apikeys_router)
 app.include_router(users_router)
 app.include_router(metrics_router)
+app.include_router(incidents_router)
+app.include_router(incidents_public_router)
+app.include_router(ui_router)

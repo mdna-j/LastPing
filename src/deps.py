@@ -35,6 +35,9 @@ if os.environ.get('REDIS_URL'):
     except Exception:
         _redis = None
 
+# In-memory fallback counters for user-token rate limiting when Redis is not configured.
+_user_counters: dict = {}
+
 
 def require_admin_or_project_api_key(project_id: int, x_admin_token: Optional[str] = Header(None), authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), session: Session = Depends(get_session)) -> Project:
     """Allow access when either a valid project API key is supplied or the admin token matches.
@@ -113,6 +116,48 @@ def limit_by_api_key(project_id: int, authorization: Optional[str] = Header(None
             matched = ak
             break
     if not matched:
+        # If no API key matched, allow bearer user tokens and apply per-user rate limits.
+        if authorization and authorization.lower().startswith('bearer '):
+            token = authorization.split(None, 1)[1].strip()
+            ut = session.exec(select(UserToken).where(UserToken.token == token)).first()
+            if not ut:
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+            if ut.expires_at and ut.expires_at < datetime.utcnow():
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
+
+            # Rate limit per-user (configurable via env var USER_RATE_LIMIT_PER_MINUTE)
+            limit = int(os.environ.get('USER_RATE_LIMIT_PER_MINUTE', '60'))
+            if not limit:
+                return ut
+
+            # Prefer Redis when available
+            if _redis is not None:
+                minute = datetime.utcnow().strftime('%Y%m%d%H%M')
+                rkey = f"user:{ut.user_id}:{minute}"
+                try:
+                    val = _redis.incr(rkey)
+                    if val == 1:
+                        _redis.expire(rkey, 70)
+                    if val > limit:
+                        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+                    return ut
+                except HTTPException:
+                    raise
+                except Exception:
+                    pass
+
+            # In-memory fallback (per-process)
+            minute = datetime.utcnow().strftime('%Y%m%d%H%M')
+            rkey = f"user:{ut.user_id}:{minute}"
+            cur = _user_counters.get(rkey, 0)
+            if cur >= limit:
+                raise HTTPException(status_code=429, detail="Rate limit exceeded")
+            _user_counters[rkey] = cur + 1
+            # prune old keys occasionally
+            if len(_user_counters) > 10000:
+                _user_counters.clear()
+            return ut
+
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API key")
 
     limit = getattr(matched, 'rate_limit_per_minute', 0) or 0

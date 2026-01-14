@@ -146,6 +146,18 @@ class UserToken(SQLModel, table=True):
     user: Optional[User] = Relationship()
 
 
+class UptimeSnapshot(SQLModel, table=True):
+    __tablename__ = "uptime_snapshot"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id")
+    check_id: int = Field(foreign_key="check.id")
+    window_start: datetime
+    window_end: datetime
+    uptime_percent: float
+    mttr_seconds: Optional[float] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class ApiKeyUsage(SQLModel, table=True):
     __tablename__ = "api_key_usage"
     """Simple per-minute counter for API key usage enforcement."""
@@ -180,9 +192,25 @@ class Event(SQLModel, table=True):
     project_id: int = Field(foreign_key="project.id")
     event_type: str
     message: Optional[str] = None
+    incident_id: Optional[int] = Field(default=None, foreign_key="incident.id")
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
     check: Optional[Check] = Relationship(back_populates="events")
+
+
+class Incident(SQLModel, table=True):
+    __tablename__ = "incident"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id")
+    check_id: int = Field(foreign_key="check.id")
+    started_at: datetime = Field(default_factory=datetime.utcnow)
+    resolved_at: Optional[datetime] = None
+    status: str = Field(default="open")
+    share_token: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    # relationships
+    # events relationship is available via Event.incident_id
 
 
 class AuditLog(SQLModel, table=True):

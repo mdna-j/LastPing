@@ -75,6 +75,24 @@ def me(authorization: Optional[str] = Header(None), session: Session = Depends(g
     return {"id": user.id, "email": user.email}
 
 
+@router.get('/projects/{project_id}/role')
+def my_role(project_id: int, authorization: Optional[str] = Header(None), session: Session = Depends(get_session)):
+    # Return current user's role on the project (requires bearer token)
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token")
+    token = authorization.split(None, 1)[1].strip()
+    ut = session.exec(select(UserToken).where(UserToken.token == token)).first()
+    if not ut:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    if ut.expires_at and ut.expires_at < datetime.utcnow():
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
+    user = session.get(User, ut.user_id)
+    pm = session.exec(select(ProjectMembership).where(ProjectMembership.user_id == user.id, ProjectMembership.project_id == project_id)).first()
+    if not pm:
+        return {"role": None}
+    return {"role": pm.role}
+
+
 @router.get("/projects/{project_id}/membership")
 def list_members(project_id: int, authorization: Optional[str] = Header(None), session: Session = Depends(get_session)):
     # only allow project owners to list members
@@ -96,3 +114,63 @@ def list_members(project_id: int, authorization: Optional[str] = Header(None), s
         u = session.get(User, m.user_id)
         out.append({"id": u.id, "email": u.email, "role": m.role})
     return out
+
+
+class MembershipIn(BaseModel):
+    email: EmailStr
+    role: str = "viewer"
+
+
+@router.post("/projects/{project_id}/membership")
+def add_member(project_id: int, payload: MembershipIn, authorization: Optional[str] = Header(None), session: Session = Depends(get_session)):
+    # only owners may add members
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token")
+    token = authorization.split(None, 1)[1].strip()
+    ut = session.exec(select(UserToken).where(UserToken.token == token)).first()
+    if not ut:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    user = session.get(User, ut.user_id)
+    pm = session.exec(select(ProjectMembership).where(ProjectMembership.user_id == user.id, ProjectMembership.project_id == project_id)).first()
+    if not pm or pm.role != 'owner':
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Owner role required")
+
+    # find or create the invited user
+    target = session.exec(select(User).where(User.email == payload.email)).first()
+    if not target:
+        # create a disabled user record with random password (admin will send invite externally)
+        target = User(email=payload.email, hashed_password=hash_password(secrets.token_urlsafe(16)), is_active=False)
+        session.add(target)
+        session.commit()
+        session.refresh(target)
+
+    # ensure membership
+    existing = session.exec(select(ProjectMembership).where(ProjectMembership.user_id == target.id, ProjectMembership.project_id == project_id)).first()
+    if existing:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="User already a member")
+    membership = ProjectMembership(user_id=target.id, project_id=project_id, role=payload.role)
+    session.add(membership)
+    session.commit()
+    return {"user_id": target.id, "email": target.email, "role": payload.role}
+
+
+@router.delete("/projects/{project_id}/membership/{user_id}")
+def remove_member(project_id: int, user_id: int, authorization: Optional[str] = Header(None), session: Session = Depends(get_session)):
+    # only owners may remove members
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token")
+    token = authorization.split(None, 1)[1].strip()
+    ut = session.exec(select(UserToken).where(UserToken.token == token)).first()
+    if not ut:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    user = session.get(User, ut.user_id)
+    pm = session.exec(select(ProjectMembership).where(ProjectMembership.user_id == user.id, ProjectMembership.project_id == project_id)).first()
+    if not pm or pm.role != 'owner':
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Owner role required")
+
+    target_pm = session.exec(select(ProjectMembership).where(ProjectMembership.user_id == user_id, ProjectMembership.project_id == project_id)).first()
+    if not target_pm:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Membership not found")
+    session.delete(target_pm)
+    session.commit()
+    return {"status": "removed"}

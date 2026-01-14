@@ -9,13 +9,13 @@ drive scheduling and detection logic.
 from typing import List, Optional
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Header
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from ..db import get_session
 from ..models import Check as CheckModel, CheckType, CheckStatus, Project
-from ..deps import require_project_api_key, limit_by_api_key
+from ..deps import require_admin_or_project_api_key, get_current_user, require_project_role, limit_by_api_key
 
 
 router = APIRouter(prefix="/projects/{project_id}/checks", tags=["checks"])
@@ -46,13 +46,21 @@ class CheckRead(BaseModel):
 
 
 @router.post("/", status_code=status.HTTP_201_CREATED, response_model=CheckRead)
-def create_check(project_id: int, payload: CheckCreate, _proj: Project = Depends(require_project_api_key), _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
+def create_check(project_id: int, payload: CheckCreate, x_admin_token: Optional[str] = Header(None), authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
     """Create a check for the given project.
 
     Names must be unique within a project. HTTP checks should provide a
     `url`; heartbeat checks are created automatically by the heartbeat
     endpoint on first use as well.
     """
+    # allow either admin/project API key OR a user with owner role
+    try:
+        project = require_admin_or_project_api_key(project_id, x_admin_token=x_admin_token, authorization=authorization, x_api_key=x_api_key, session=session)
+    except HTTPException:
+        # fallback to user token + project membership (owner)
+        user = get_current_user(authorization=authorization, session=session)
+        require_project_role(project_id, 'owner', current_user=user, session=session)
+
     # ensure name uniqueness within project
     existing = session.exec(select(CheckModel).where(CheckModel.project_id == project_id, CheckModel.name == payload.name)).first()
     if existing:
@@ -73,6 +81,60 @@ def create_check(project_id: int, payload: CheckCreate, _proj: Project = Depends
     session.commit()
     session.refresh(check)
     return check
+
+
+class CheckUpdate(BaseModel):
+    name: Optional[str] = None
+    url: Optional[str] = None
+    interval: Optional[int] = None
+    expected_interval: Optional[int] = None
+    grace_period: Optional[int] = None
+
+
+@router.put("/{check_id}", response_model=CheckRead)
+def update_check(project_id: int, check_id: int, payload: CheckUpdate, x_admin_token: Optional[str] = Header(None), authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), session: Session = Depends(get_session)):
+    # require owner/admin/api-key
+    try:
+        project = require_admin_or_project_api_key(project_id, x_admin_token=x_admin_token, authorization=authorization, x_api_key=x_api_key, session=session)
+    except HTTPException:
+        user = get_current_user(authorization=authorization, session=session)
+        require_project_role(project_id, 'owner', current_user=user, session=session)
+    check = session.get(CheckModel, check_id)
+    if not check or check.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Check not found")
+    if payload.name is not None:
+        # ensure name uniqueness
+        existing = session.exec(select(CheckModel).where(CheckModel.project_id == project_id, CheckModel.name == payload.name, CheckModel.id != check_id)).first()
+        if existing:
+            raise HTTPException(status_code=409, detail="Check with that name already exists")
+        check.name = payload.name
+    if payload.url is not None:
+        check.url = payload.url
+    if payload.interval is not None:
+        check.interval = payload.interval
+    if payload.expected_interval is not None:
+        check.expected_interval = payload.expected_interval
+    if payload.grace_period is not None:
+        check.grace_period = payload.grace_period
+    session.add(check)
+    session.commit()
+    session.refresh(check)
+    return check
+
+
+@router.delete("/{check_id}")
+def delete_check(project_id: int, check_id: int, x_admin_token: Optional[str] = Header(None), authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), session: Session = Depends(get_session)):
+    try:
+        project = require_admin_or_project_api_key(project_id, x_admin_token=x_admin_token, authorization=authorization, x_api_key=x_api_key, session=session)
+    except HTTPException:
+        user = get_current_user(authorization=authorization, session=session)
+        require_project_role(project_id, 'owner', current_user=user, session=session)
+    check = session.get(CheckModel, check_id)
+    if not check or check.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Check not found")
+    session.delete(check)
+    session.commit()
+    return {"status": "deleted"}
 
 
 @router.get("/", response_model=List[CheckRead])
@@ -104,7 +166,12 @@ def get_check_maintenance(project_id: int, check_id: int, session: Session = Dep
 
 
 @router.post("/{check_id}/maintenance", response_model=MaintenanceWindow)
-def set_check_maintenance(project_id: int, check_id: int, payload: MaintenanceWindow, _proj: Project = Depends(require_project_api_key), session: Session = Depends(get_session)):
+def set_check_maintenance(project_id: int, check_id: int, payload: MaintenanceWindow, x_admin_token: Optional[str] = Header(None), authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), session: Session = Depends(get_session)):
+    try:
+        project = require_admin_or_project_api_key(project_id, x_admin_token=x_admin_token, authorization=authorization, x_api_key=x_api_key, session=session)
+    except HTTPException:
+        user = get_current_user(authorization=authorization, session=session)
+        require_project_role(project_id, 'owner', current_user=user, session=session)
     check = session.get(CheckModel, check_id)
     if not check or check.project_id != project_id:
         raise HTTPException(status_code=404, detail="Check not found")

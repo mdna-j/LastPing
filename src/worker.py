@@ -18,8 +18,9 @@ from typing import Tuple
 from sqlmodel import Session, select
 
 from .db import engine
-from .models import Check, CheckType, CheckStatus, Event, EventType, Project
+from .models import Check, CheckType, CheckStatus, Event, EventType, Project, Incident
 from .alerts import notify_down, notify_recovery
+from .models import UptimeSnapshot
 
 logger = logging.getLogger("lastping.worker")
 
@@ -129,14 +130,21 @@ def scan_checks_once(session: Session):
                 if check.status != CheckStatus.DOWN:
                     check.status = CheckStatus.DOWN
                     check.consecutive_failures = (check.consecutive_failures or 0) + 1
-                    event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.DOWN, message="missed heartbeat")
+                    # find or create open incident for this check
+                    open_inc = session.exec(select(Incident).where(Incident.check_id == check.id, Incident.resolved_at == None)).first()
+                    if not open_inc:
+                        open_inc = Incident(project_id=check.project_id, check_id=check.id, started_at=now, status="open")
+                        session.add(open_inc)
+                        session.commit()
+                        session.refresh(open_inc)
+                    event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.DOWN, message="missed heartbeat", incident_id=open_inc.id)
                     session.add(event)
                     # alerting: only send if enabled and threshold reached and cooldown passed
                     should_alert = check.alert_enabled and (check.consecutive_failures >= (check.alert_after or 1))
                     if should_alert:
                         # suppress alerts during a maintenance window
                         if _in_maintenance(check, project, now):
-                            event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.DOWN, message="missed heartbeat (suppressed due to maintenance)")
+                            event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.DOWN, message="missed heartbeat (suppressed due to maintenance)", incident_id=(open_inc.id if 'open_inc' in locals() and open_inc else None))
                             session.add(event)
                             session.add(check)
                             session.commit()
@@ -175,7 +183,14 @@ def scan_checks_once(session: Session):
                 if check.status == CheckStatus.DOWN:
                     check.status = CheckStatus.UP
                     check.consecutive_failures = 0
-                    event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.UP, message="recovered")
+                    # close open incident if present
+                    open_inc = session.exec(select(Incident).where(Incident.check_id == check.id, Incident.resolved_at == None)).first()
+                    if open_inc:
+                        open_inc.resolved_at = now
+                        open_inc.status = "resolved"
+                        session.add(open_inc)
+                        session.commit()
+                    event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.UP, message="recovered", incident_id=(open_inc.id if open_inc else None))
                     session.add(event)
                     # recovery alert: respect cooldown and enabled
                     if check.alert_enabled:
@@ -218,7 +233,14 @@ def scan_checks_once(session: Session):
                 if check.status == CheckStatus.DOWN:
                     check.status = CheckStatus.UP
                     check.consecutive_failures = 0
-                    event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.UP, message=f"http success ({reason})")
+                    # close incident if exists
+                    open_inc = session.exec(select(Incident).where(Incident.check_id == check.id, Incident.resolved_at == None)).first()
+                    if open_inc:
+                        open_inc.resolved_at = now
+                        open_inc.status = "resolved"
+                        session.add(open_inc)
+                        session.commit()
+                    event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.UP, message=f"http success ({reason})", incident_id=(open_inc.id if open_inc else None))
                     session.add(event)
                     # recovery alert: respect cooldown and enabled
                     if check.alert_enabled:
@@ -250,7 +272,14 @@ def scan_checks_once(session: Session):
                 check.consecutive_failures = (check.consecutive_failures or 0) + 1
                 if check.status != CheckStatus.DOWN:
                     check.status = CheckStatus.DOWN
-                    event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.HTTP_FAILURE, message=f"{reason}")
+                    # find or create open incident for this check
+                    open_inc = session.exec(select(Incident).where(Incident.check_id == check.id, Incident.resolved_at == None)).first()
+                    if not open_inc:
+                        open_inc = Incident(project_id=check.project_id, check_id=check.id, started_at=now, status="open")
+                        session.add(open_inc)
+                        session.commit()
+                        session.refresh(open_inc)
+                    event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.HTTP_FAILURE, message=f"{reason}", incident_id=open_inc.id)
                     session.add(event)
                     should_alert = check.alert_enabled and (check.consecutive_failures >= (check.alert_after or 1))
                     if should_alert:
@@ -303,6 +332,61 @@ def scan_checks_once(session: Session):
                 session.commit()
             except Exception:
                 logger.exception("Error persisting next_run for check %s", getattr(check, 'id', None))
+
+        # After processing checks, compute a short-term uptime/MTTR snapshot (last 24h)
+        try:
+            window_end = now
+            window_start = now - timedelta(hours=24)
+            # for each check, compute uptime and mttr similar to metrics logic
+            stmt = select(Check)
+            all_checks = session.exec(stmt).all()
+            for c in all_checks:
+                # load events in window
+                ev_stmt = select(Event).where(Event.project_id == c.project_id, Event.check_id == c.id, Event.created_at >= window_start, Event.created_at <= window_end).order_by(Event.created_at)
+                events = session.exec(ev_stmt).all()
+                # determine initial state
+                prev_stmt = select(Event).where(Event.project_id == c.project_id, Event.check_id == c.id, Event.created_at < window_start).order_by(Event.created_at.desc())
+                prev = session.exec(prev_stmt).first()
+                current_state = "up"
+                if prev and prev.event_type in ("down", "http_failure"):
+                    current_state = "down"
+                downtime = 0.0
+                last_change = window_start
+                for ev in events:
+                    if ev.event_type in ("down", "http_failure") and current_state == "up":
+                        current_state = "down"
+                        last_change = ev.created_at
+                    elif ev.event_type == "up" and current_state == "down":
+                        downtime += (ev.created_at - last_change).total_seconds()
+                        current_state = "up"
+                        last_change = ev.created_at
+                if current_state == "down":
+                    downtime += (window_end - last_change).total_seconds()
+                total = (window_end - window_start).total_seconds()
+                uptime_pct = max(0.0, (total - downtime) / total * 100.0) if total > 0 else 100.0
+
+                # compute MTTR for the window
+                downs = []
+                for i, ev in enumerate(events):
+                    if ev.event_type in ("down", "http_failure"):
+                        for j in range(i+1, len(events)):
+                            if events[j].event_type == "up":
+                                dur = (events[j].created_at - ev.created_at).total_seconds()
+                                downs.append(dur)
+                                break
+                mttr = None
+                if downs:
+                    mttr = sum(downs) / len(downs)
+
+                snap = UptimeSnapshot(project_id=c.project_id, check_id=c.id, window_start=window_start, window_end=window_end, uptime_percent=uptime_pct, mttr_seconds=mttr)
+                try:
+                    session.add(snap)
+                    session.commit()
+                except Exception:
+                    session.rollback()
+                    logger.exception("Failed to persist uptime snapshot for check %s", c.id)
+        except Exception:
+            logger.exception("Error computing uptime snapshots")
 
 
 def main():
