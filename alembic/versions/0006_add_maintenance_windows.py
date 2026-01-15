@@ -41,14 +41,20 @@ def upgrade() -> None:
                     'maintenance_starts_at DATETIME,'
                     'maintenance_ends_at DATETIME'
                     ')' ))
-                keep = [c for c in cols if c in (
+                # Only copy columns that exist in both the old table and the new table
+                new_cols = {
                     'id', 'name', 'api_key_hash', 'created_at', 'owner_email',
                     'alert_rate_limit_count', 'alert_rate_limit_window', 'last_escalated_at',
                     'discord_webhook_url', 'slack_webhook_url', 'pagerduty_integration_key', 'generic_webhook_url'
-                )]
-                cols_csv = ','.join(keep)
-                conn.execute(text(f"INSERT INTO project_new ({cols_csv}) SELECT {cols_csv} FROM project"))
-                conn.execute(text('DROP TABLE project'))
+                }
+                keep = [c for c in cols if c in new_cols]
+                if keep:
+                    cols_csv = ','.join(keep)
+                    conn.execute(text(f"INSERT INTO project_new ({cols_csv}) SELECT {cols_csv} FROM project"))
+                else:
+                    # No overlapping columns to copy; skip migrating data for SQLite to avoid malformed SQL
+                    pass
+                conn.execute(text('DROP TABLE IF EXISTS project'))
                 conn.execute(text('ALTER TABLE project_new RENAME TO project'))
 
             # Check table
@@ -81,14 +87,19 @@ def upgrade() -> None:
                     'maintenance_starts_at DATETIME,'
                     'maintenance_ends_at DATETIME'
                     ')' ))
-                keep = [c for c in cols if c in (
+                new_check_cols = {
                     'id','project_id','name','type','expected_interval','grace_period',
                     'alert_enabled','alert_after','alert_cooldown','last_alerted_at','last_alert_type',
                     'url','timeout','retries','interval','next_run','status','last_ping','consecutive_failures','created_at'
-                )]
-                cols_csv = ','.join(keep)
-                conn.execute(text(f"INSERT INTO \"check_new\" ({cols_csv}) SELECT {cols_csv} FROM \"check\""))
-                conn.execute(text('DROP TABLE "check"'))
+                }
+                keep = [c for c in cols if c in new_check_cols]
+                if keep:
+                    cols_csv = ','.join(keep)
+                    conn.execute(text(f"INSERT INTO \"check_new\" ({cols_csv}) SELECT {cols_csv} FROM \"check\""))
+                else:
+                    # No overlapping columns to copy; skip migrating data for SQLite to avoid malformed SQL
+                    pass
+                conn.execute(text('DROP TABLE IF EXISTS "check"'))
                 conn.execute(text('ALTER TABLE "check_new" RENAME TO "check"'))
         else:
             # for databases that support ALTER TABLE ADD COLUMN
