@@ -1,0 +1,14 @@
+// Client-side script for /ui/checks/{id}
+function getCheckId(){ const el = document.getElementById('checkIdHolder'); return el ? el.dataset.checkId : null; }
+function headersManage(){ const at=document.getElementById('adminToken').value; const ut=document.getElementById('userToken')?document.getElementById('userToken').value:null; const h={'Content-Type':'application/json'}; if(at) h['X-ADMIN-TOKEN']=at; if(ut) h['Authorization']='Bearer '+ut; return h; }
+async function loadManage(){ const CHECK_ID = getCheckId(); const pid=document.getElementById('projectId').value||'1'; let isOwner=false; try{ const r=await fetch(`/users/projects/${pid}/role`, {headers: headersManage()}); if(r.ok){ const jr=await r.json(); isOwner = jr.role === 'owner'; }}catch(e){}; const resp=await fetch(`/projects/${pid}/checks/${CHECK_ID}`, {headers: headersManage()}); if(!resp.ok){document.getElementById('status').innerText='Failed';return} const js=await resp.json(); document.getElementById('name').value=js.name; document.getElementById('url').value=js.url||''; if(isOwner || document.getElementById('adminToken').value) document.getElementById('delBtn').style.display='inline-block'; }
+async function updateManage(){ const CHECK_ID = getCheckId(); const pid=document.getElementById('projectId').value||'1'; const body={name:document.getElementById('name').value, url:document.getElementById('url').value}; const resp=await fetch(`/projects/${pid}/checks/${CHECK_ID}`, {method:'PUT', headers: headersManage(), body: JSON.stringify(body)}); if(resp.ok){ alert('Saved'); } else { alert('Save failed'); }}
+async function delCheck(){ const CHECK_ID = getCheckId(); if(!confirm('Delete check '+CHECK_ID+'?')) return; const pid=document.getElementById('projectId').value||'1'; const resp = await fetch(`/projects/${pid}/checks/${CHECK_ID}`, {method:'DELETE', headers: headersManage()}); if(resp.ok){ alert('Deleted'); location.href = '/ui/checks'; } else { alert('Delete failed'); }}
+async function setM(){ const CHECK_ID = getCheckId(); const pid=document.getElementById('projectId').value||'1'; const body={maintenance_starts_at: document.getElementById('mstart').value || null, maintenance_ends_at: document.getElementById('mend').value || null}; const resp=await fetch(`/projects/${pid}/checks/${CHECK_ID}/maintenance`, {method:'POST', headers: headersManage(), body: JSON.stringify(body)}); if(resp.ok){ alert('Set'); } else { alert('Failed'); }}
+
+window.updateManage = updateManage;
+window.delCheck = delCheck;
+window.setM = setM;
+window.loadManage = loadManage;
+
+document.addEventListener('DOMContentLoaded', ()=>{ loadManage(); const saveBtn = document.getElementById('saveBtn'); if(saveBtn) saveBtn.addEventListener('click', updateManage); const delBtn = document.getElementById('delBtn'); if(delBtn) delBtn.addEventListener('click', delCheck); const mBtn = document.getElementById('setMBtn'); if(mBtn) mBtn.addEventListener('click', setM); });

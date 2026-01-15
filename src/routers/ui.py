@@ -14,9 +14,9 @@ def incidents_page():
     </head>
     <body>
     <h1>Incidents</h1>
-    <div class="row">
+      <div class="row">
       <label>Project: <input id="projectId" value="1" style="width:80px"/></label>
-      <button class="btn" onclick="load()">Load</button>
+      <button id="loadIncidentsBtn" class="btn">Load</button>
       <a href="/ui/snapshots" style="margin-left:12px">Snapshots</a>
     </div>
     <div id="list">Loading...</div>
@@ -40,7 +40,7 @@ def checks_page():
     <div class="row"><label>Project: <input id="projectId" value="1" style="width:80px"/></label>
       <label>Admin token: <input id="adminToken" placeholder="optional" style="width:240px"/></label>
       <label>User token: <input id="userToken" placeholder="optional" style="width:240px"/></label>
-      <button onclick="load()">Load</button>
+      <button id="loadChecksBtn">Load</button>
     </div>
     <h2>Create Check</h2>
     <div>
@@ -74,14 +74,14 @@ def checks_manage_page(check_id: int):
     <div>
       <input id="name" placeholder="Name"/>
       <input id="url" placeholder="URL" style="width:320px"/>
-      <button onclick="update()">Save</button>
-      <button id="delBtn" onclick="delCheck()" style="margin-left:8px;display:none">Delete</button>
+      <button id="saveBtn">Save</button>
+      <button id="delBtn" style="margin-left:8px;display:none">Delete</button>
     </div>
     <h2>Maintenance</h2>
     <div>
       <label>Start: <input id="mstart" placeholder="2026-01-14T12:00:00"/></label>
       <label>End: <input id="mend" placeholder="2026-01-14T13:00:00"/></label>
-      <button onclick="setM()">Set Maintenance</button>
+      <button id="setMBtn">Set Maintenance</button>
     </div>
     <div id="status">Loading...</div>
     <div id="checkIdHolder" data-check-id="__CHECK_ID__" style="display:none"></div>
@@ -124,7 +124,7 @@ def snapshots_page():
     </head>
     <body>
     <h1>Snapshots (last 24h)</h1>
-    <div class="row"><label>Project: <input id="projectId" value="1" style="width:80px"/></label> <button onclick="load()" class="btn">Load</button></div>
+    <div class="row"><label>Project: <input id="projectId" value="1" style="width:80px"/></label> <button id="loadSnapshotsBtn" class="btn">Load</button></div>
     <div id="list">Loading...</div>
     <script src="/static/js/snapshots.js"></script>
     </body>
