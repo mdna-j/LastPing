@@ -18,7 +18,7 @@ import os
 from fastapi import Header
 from datetime import datetime
 from sqlmodel import select
-from .models import ApiKey, ApiKeyUsage
+from .models import ApiKey, ApiKeyUsage, UserUsage
 import importlib
 from .models import User, UserToken, ProjectMembership
 from datetime import datetime
@@ -146,17 +146,31 @@ def limit_by_api_key(project_id: int, authorization: Optional[str] = Header(None
                 except Exception:
                     pass
 
-            # In-memory fallback (per-process)
-            minute = datetime.utcnow().strftime('%Y%m%d%H%M')
-            rkey = f"user:{ut.user_id}:{minute}"
-            cur = _user_counters.get(rkey, 0)
-            if cur >= limit:
-                raise HTTPException(status_code=429, detail="Rate limit exceeded")
-            _user_counters[rkey] = cur + 1
-            # prune old keys occasionally
-            if len(_user_counters) > 10000:
-                _user_counters.clear()
-            return ut
+            now = datetime.utcnow().replace(second=0, microsecond=0)
+            try:
+                uu = session.exec(select(UserUsage).where(UserUsage.user_id == ut.user_id, UserUsage.minute_start == now)).first()
+                if uu:
+                    if uu.count >= limit:
+                        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+                    uu.count = uu.count + 1
+                    session.add(uu)
+                    session.commit()
+                else:
+                    uu = UserUsage(user_id=ut.user_id, minute_start=now, count=1)
+                    session.add(uu)
+                    session.commit()
+                return ut
+            except Exception:
+                # fallback to in-memory counter if DB operations fail
+                minute = datetime.utcnow().strftime('%Y%m%d%H%M')
+                rkey = f"user:{ut.user_id}:{minute}"
+                cur = _user_counters.get(rkey, 0)
+                if cur >= limit:
+                    raise HTTPException(status_code=429, detail="Rate limit exceeded")
+                _user_counters[rkey] = cur + 1
+                if len(_user_counters) > 10000:
+                    _user_counters.clear()
+                return ut
 
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API key")
 

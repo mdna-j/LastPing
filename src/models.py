@@ -170,6 +170,15 @@ class ApiKeyUsage(SQLModel, table=True):
     # api_key: Optional[ApiKey] = Relationship()
 
 
+class UserUsage(SQLModel, table=True):
+    __tablename__ = "user_usage"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id")
+    minute_start: datetime = Field(description="UTC minute window start (seconds=0, micros=0)")
+    count: int = Field(default=0)
+
+
+
 class Heartbeat(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     check_id: int = Field(foreign_key="check.id")
