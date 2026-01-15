@@ -65,6 +65,21 @@ via environment or a secrets mechanism.
 Unit tests live under `tests/`. Run `python -m pytest -q` to run them locally. The project includes
 basic tests for alerts and worker behaviour; expand tests when adding features.
 
+Quick note: use the project virtualenv when available. You can run the tests using the provided
+helper scripts which prefer the repo `.venv`:
+
+Windows PowerShell:
+
+```powershell
+scripts\run_tests.ps1
+```
+
+macOS / Linux:
+
+```bash
+scripts/run_tests.sh
+```
+
 **Admin bypass & distributed rate limiting**
 
 - Admin bypass: an `X-ADMIN-TOKEN` header matching the `ADMIN_TOKEN` env var will bypass project API key checks and rate limits for management endpoints.
