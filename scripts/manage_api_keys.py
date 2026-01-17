@@ -32,7 +32,7 @@ def create_api_key(project_id: int, limit: int | None):
         session.commit()
         session.refresh(ak)
         # audit
-        al = AuditLog(actor="cli", action="create_apikey", target_type="project", target_id=project_id, details=f"apikey_id={ak.id}")
+        al = AuditLog(actor="cli", action="create_apikey", target_type="project", target_id=project_id, details=f"apikey_id={ak.id}", actor_ip=None, user_agent=None)
         session.add(al)
         session.commit()
         print(plain)
@@ -51,7 +51,7 @@ def rotate_primary(project_id: int):
         session.add(project)
         session.commit()
         # audit
-        al = AuditLog(actor="cli", action="rotate_primary_api_key", target_type="project", target_id=project_id, details=None)
+        al = AuditLog(actor="cli", action="rotate_primary_api_key", target_type="project", target_id=project_id, details=None, actor_ip=None, user_agent=None)
         session.add(al)
         session.commit()
         print(new)
