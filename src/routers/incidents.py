@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from ..db import get_session
 from ..models import Incident, Event, Project, AuditLog, UserToken
-from ..deps import require_project_api_key, require_admin_or_owner
+from ..deps import require_project_api_key, require_admin_or_owner, get_audit_context
 from sqlalchemy import update as sa_update
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["incidents"])
@@ -114,24 +114,7 @@ def merge_incident(project_id: int, incident_id: int, payload: MergePayload, req
     src.status = "merged"
     session.add(src)
     # record audit log with actor context
-    actor = 'unknown'
-    actor_ip = None
-    user_agent = None
-    admin_token = os.environ.get('ADMIN_TOKEN')
-    if admin_token and x_admin_token and x_admin_token == admin_token:
-        actor = 'admin'
-    elif authorization and authorization.lower().startswith('bearer '):
-        tok = authorization.split(None, 1)[1].strip()
-        ut = session.exec(select(UserToken).where(UserToken.token == tok)).first()
-        if ut:
-            actor = f"user:{ut.user_id}"
-    # capture request context if available
-    try:
-        actor_ip = request.client.host if request and request.client else None
-        user_agent = request.headers.get('user-agent') if request else None
-    except Exception:
-        actor_ip = None
-        user_agent = None
+    actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
     al = AuditLog(actor=actor, action='merge_incident', target_type='incident', target_id=src.id, details=f"merged_into={tgt.id}", actor_ip=actor_ip, user_agent=user_agent)
     session.add(al)
     session.commit()
@@ -168,23 +151,7 @@ def split_incident(project_id: int, incident_id: int, payload: SplitPayload, req
         raise
 
     # record audit log for split with actor + request context
-    actor = 'unknown'
-    actor_ip = None
-    user_agent = None
-    admin_token = os.environ.get('ADMIN_TOKEN')
-    if admin_token and x_admin_token and x_admin_token == admin_token:
-        actor = 'admin'
-    elif authorization and authorization.lower().startswith('bearer '):
-        tok = authorization.split(None, 1)[1].strip()
-        ut = session.exec(select(UserToken).where(UserToken.token == tok)).first()
-        if ut:
-            actor = f"user:{ut.user_id}"
-    try:
-        actor_ip = request.client.host if request and request.client else None
-        user_agent = request.headers.get('user-agent') if request else None
-    except Exception:
-        actor_ip = None
-        user_agent = None
+    actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
     al = AuditLog(actor=actor, action='split_incident', target_type='incident', target_id=src.id, details=f"split_into={new_inc.id}, events={[e.id for e in evs]}", actor_ip=actor_ip, user_agent=user_agent)
     session.add(al)
     session.commit()
