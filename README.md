@@ -8,6 +8,16 @@ go down. This repository contains the API, worker loop, alerting helpers, and te
 **Tech highlights**
 
 - Python 3.11
+# LastPing
+
+![CI](https://github.com/mdna-j/LastPing/actions/workflows/ci.yml/badge.svg)
+
+LastPing is a small uptime monitoring service that stores checks and alerts when services
+go down. This repository contains the API, worker loop, alerting helpers, and tests.
+
+**Tech highlights**
+
+- Python 3.11
 - FastAPI, Uvicorn
 - SQLModel / PostgreSQL
 - Docker / Docker Compose for local development
@@ -56,8 +66,8 @@ via environment or a secrets mechanism.
 
 - Formatting: use `black` and `isort`.
 - Linting & type checks: use `ruff` and `mypy` (or `ruff`'s type checks) and run them in CI.
-  -- Add `pre-commit` with hooks for `black`, `isort`, and `ruff` to catch issues locally.
-  -- This repository now includes a GitHub Actions workflow at `.github/workflows/ci.yml` which
+  - Add `pre-commit` with hooks for `black`, `isort`, and `ruff` to catch issues locally.
+  - This repository now includes a GitHub Actions workflow at `.github/workflows/ci.yml` which
   runs `ruff`, `black --check`, and the test suite on push and PR to `main`.
 
 **Tests**

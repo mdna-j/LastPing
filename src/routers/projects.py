@@ -10,14 +10,14 @@ from datetime import datetime
 import secrets
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status, Header
+from fastapi import APIRouter, Depends, HTTPException, status, Header, Request
 from pydantic import BaseModel
 from sqlmodel import select, Session
 
 from ..db import get_session
 from ..models import Project as ProjectModel
 from ..security import generate_api_key, hash_api_key
-from ..deps import limit_by_api_key
+from ..deps import limit_by_api_key, get_audit_context
 import os
 
 
@@ -132,7 +132,7 @@ def set_project_maintenance(project_id: int, payload: MaintenanceWindow, _rl = D
 
 
 @router.post("/{project_id}/rotate-key")
-def rotate_api_key(project_id: int, session: Session = Depends(get_session), _rl = Depends(limit_by_api_key)):
+def rotate_api_key(project_id: int, request: Request = None, session: Session = Depends(get_session), _rl = Depends(limit_by_api_key)):
     project = session.get(ProjectModel, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -155,7 +155,8 @@ def rotate_api_key(project_id: int, session: Session = Depends(get_session), _rl
     # audit
     try:
         from ..models import AuditLog
-        al = AuditLog(actor="project_api", action="rotate_primary_api_key", target_type="project", target_id=project_id, details=None)
+        actor, actor_ip, user_agent = get_audit_context(request, None, None, session)
+        al = AuditLog(actor=actor or "project_api", action="rotate_primary_api_key", target_type="project", target_id=project_id, details=None, actor_ip=actor_ip, user_agent=user_agent)
         session.add(al)
         session.commit()
     except Exception:

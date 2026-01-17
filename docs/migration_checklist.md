@@ -1,4 +1,4 @@
-Migration checklist for revisions 0007-0009
+﻿Migration checklist for revisions 0007-0009
 
 1. Backup your production database
 

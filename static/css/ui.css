@@ -1,0 +1,14 @@
+body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:20px;color:#222}
+.row{display:flex;gap:12px;align-items:center;margin-bottom:12px}
+input,button{padding:8px;border:1px solid #ddd;border-radius:6px}
+.card{border:1px solid #eee;padding:12px;border-radius:8px;margin-bottom:8px;background:#fafafa}
+.muted{color:#666;font-size:0.9em}
+.btn{background:#0366d6;color:#fff;padding:6px 10px;border-radius:6px;text-decoration:none;border:none}
+/* secondary button style for destructive/organizing actions */
+.btn-secondary{background:#6c757d;color:#fff;padding:6px 10px;border-radius:6px;border:none}
+.btn:disabled,.btn-secondary:disabled{opacity:0.6}
+table{width:100%;border-collapse:collapse}
+th,td{padding:8px;border:1px solid #eee}
+
+/* small helpers */
+.hidden{display:none}

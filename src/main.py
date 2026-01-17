@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from .db import create_db_and_tables
 from .routers.projects import router as projects_router
@@ -13,6 +14,9 @@ from .routers.ui import router as ui_router
 
 
 app = FastAPI(title="LastPing API")
+
+# Serve static assets (JS/CSS) from ./static
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 @app.on_event("startup")

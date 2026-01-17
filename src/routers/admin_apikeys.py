@@ -8,6 +8,7 @@ from datetime import datetime
 
 from ..db import get_session
 from ..models import ApiKey, Project, AuditLog
+from ..deps import get_audit_context
 from ..security import generate_api_key, hash_api_key
 import os
 import secrets
@@ -41,7 +42,7 @@ def list_apikeys(x_admin_token: Optional[str] = Header(None), session: Session =
 
 
 @router.post("/create", status_code=status.HTTP_201_CREATED)
-def create_apikey(project_id: int, rate_limit_per_minute: Optional[int] = 0, x_admin_token: Optional[str] = Header(None), x_csrf_token: Optional[str] = Header(None), admin_csrf: Optional[str] = Cookie(None), session: Session = Depends(get_session)):
+def create_apikey(project_id: int, rate_limit_per_minute: Optional[int] = 0, request: Request = None, x_admin_token: Optional[str] = Header(None), x_csrf_token: Optional[str] = Header(None), admin_csrf: Optional[str] = Cookie(None), session: Session = Depends(get_session)):
     admin_token = os.environ.get('ADMIN_TOKEN')
     if not admin_token or x_admin_token != admin_token:
         raise HTTPException(status_code=403, detail="Admin token required")
@@ -69,14 +70,15 @@ def create_apikey(project_id: int, rate_limit_per_minute: Optional[int] = 0, x_a
     session.commit()
     session.refresh(ak)
     # audit
-    al = AuditLog(actor="admin", action="create_apikey", target_type="project", target_id=project_id, details=f"apikey_id={ak.id}")
+    actor, actor_ip, user_agent = get_audit_context(request, None, x_admin_token, session)
+    al = AuditLog(actor=actor, action="create_apikey", target_type="project", target_id=project_id, details=f"apikey_id={ak.id}", actor_ip=actor_ip, user_agent=user_agent)
     session.add(al)
     session.commit()
     return {"api_key": plain, "id": ak.id}
 
 
 @router.post("/revoke", status_code=status.HTTP_200_OK)
-def revoke_apikey(api_key_id: int, x_admin_token: Optional[str] = Header(None), x_csrf_token: Optional[str] = Header(None), admin_csrf: Optional[str] = Cookie(None), session: Session = Depends(get_session)):
+def revoke_apikey(api_key_id: int, request: Request = None, x_admin_token: Optional[str] = Header(None), x_csrf_token: Optional[str] = Header(None), admin_csrf: Optional[str] = Cookie(None), session: Session = Depends(get_session)):
     admin_token = os.environ.get('ADMIN_TOKEN')
     if not admin_token or x_admin_token != admin_token:
         raise HTTPException(status_code=403, detail="Admin token required")
@@ -101,7 +103,8 @@ def revoke_apikey(api_key_id: int, x_admin_token: Optional[str] = Header(None), 
     pid = ak.project_id
     session.delete(ak)
     # audit
-    al = AuditLog(actor="admin", action="revoke_apikey", target_type="project", target_id=pid, details=f"apikey_id={api_key_id}")
+    actor, actor_ip, user_agent = get_audit_context(request, None, x_admin_token, session)
+    al = AuditLog(actor=actor, action="revoke_apikey", target_type="project", target_id=pid, details=f"apikey_id={api_key_id}", actor_ip=actor_ip, user_agent=user_agent)
     session.add(al)
     session.commit()
     return {"revoked": api_key_id}
@@ -156,7 +159,7 @@ def search_audit(
 
 
 @router.post('/rotate-project')
-def rotate_project_key(project_id: int, x_admin_token: Optional[str] = Header(None), x_csrf_token: Optional[str] = Header(None), admin_csrf: Optional[str] = Cookie(None), session: Session = Depends(get_session)):
+def rotate_project_key(project_id: int, request: Request = None, x_admin_token: Optional[str] = Header(None), x_csrf_token: Optional[str] = Header(None), admin_csrf: Optional[str] = Cookie(None), session: Session = Depends(get_session)):
     admin_token = os.environ.get('ADMIN_TOKEN')
     if not admin_token or x_admin_token != admin_token:
         raise HTTPException(status_code=403, detail="Admin token required")
@@ -181,7 +184,8 @@ def rotate_project_key(project_id: int, x_admin_token: Optional[str] = Header(No
     session.add(project)
     session.commit()
     # audit
-    al = AuditLog(actor="admin", action="rotate_project_key", target_type="project", target_id=project_id, details=None)
+    actor, actor_ip, user_agent = get_audit_context(request, None, x_admin_token, session)
+    al = AuditLog(actor=actor, action="rotate_project_key", target_type="project", target_id=project_id, details=None, actor_ip=actor_ip, user_agent=user_agent)
     session.add(al)
     session.commit()
     return {"api_key": new}

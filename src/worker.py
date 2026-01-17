@@ -24,6 +24,9 @@ from .models import UptimeSnapshot
 
 logger = logging.getLogger("lastping.worker")
 
+# Window (seconds) in which separate failures may be grouped into a single incident
+GROUP_WINDOW = int(os.environ.get("INCIDENT_GROUP_WINDOW", "600"))
+
 
 def _now() -> datetime:
     """Return current UTC datetime (extracted to ease testing)."""
@@ -133,10 +136,15 @@ def scan_checks_once(session: Session):
                     # find or create open incident for this check
                     open_inc = session.exec(select(Incident).where(Incident.check_id == check.id, Incident.resolved_at == None)).first()
                     if not open_inc:
-                        open_inc = Incident(project_id=check.project_id, check_id=check.id, started_at=now, status="open")
-                        session.add(open_inc)
-                        session.commit()
-                        session.refresh(open_inc)
+                        # try to reuse a recent open incident in the same project (grouping)
+                        candidate = session.exec(select(Incident).where(Incident.project_id == check.project_id, Incident.resolved_at == None).order_by(Incident.started_at.desc())).first()
+                        if candidate and (now - candidate.started_at).total_seconds() <= GROUP_WINDOW:
+                            open_inc = candidate
+                        else:
+                            open_inc = Incident(project_id=check.project_id, check_id=check.id, started_at=now, status="open")
+                            session.add(open_inc)
+                            session.commit()
+                            session.refresh(open_inc)
                     event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.DOWN, message="missed heartbeat", incident_id=open_inc.id)
                     session.add(event)
                     # alerting: only send if enabled and threshold reached and cooldown passed
@@ -275,10 +283,15 @@ def scan_checks_once(session: Session):
                     # find or create open incident for this check
                     open_inc = session.exec(select(Incident).where(Incident.check_id == check.id, Incident.resolved_at == None)).first()
                     if not open_inc:
-                        open_inc = Incident(project_id=check.project_id, check_id=check.id, started_at=now, status="open")
-                        session.add(open_inc)
-                        session.commit()
-                        session.refresh(open_inc)
+                        # try to reuse a recent open incident in the same project (grouping)
+                        candidate = session.exec(select(Incident).where(Incident.project_id == check.project_id, Incident.resolved_at == None).order_by(Incident.started_at.desc())).first()
+                        if candidate and (now - candidate.started_at).total_seconds() <= GROUP_WINDOW:
+                            open_inc = candidate
+                        else:
+                            open_inc = Incident(project_id=check.project_id, check_id=check.id, started_at=now, status="open")
+                            session.add(open_inc)
+                            session.commit()
+                            session.refresh(open_inc)
                     event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.HTTP_FAILURE, message=f"{reason}", incident_id=open_inc.id)
                     session.add(event)
                     should_alert = check.alert_enabled and (check.consecutive_failures >= (check.alert_after or 1))

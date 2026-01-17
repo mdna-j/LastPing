@@ -8,7 +8,7 @@ are authenticated using a project's API key. It accepts either an
 
 from typing import Optional
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status, Request
 from sqlmodel import Session
 
 from .db import get_session
@@ -234,3 +234,62 @@ def require_project_role(project_id: int, role: str, current_user: User = Depend
     if role == 'owner' and pm.role != 'owner':
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Owner role required")
     return pm
+
+
+def require_admin_or_owner(project_id: int, x_admin_token: Optional[str] = Header(None), authorization: Optional[str] = Header(None), session: Session = Depends(get_session)) -> Project:
+    """Allow access when admin token supplied or bearer user is project owner.
+
+    Admin token check is performed first to avoid requiring a bearer token.
+    """
+    admin_token = os.environ.get('ADMIN_TOKEN')
+    if admin_token and x_admin_token and x_admin_token == admin_token:
+        project = session.get(Project, project_id)
+        if not project:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        return project
+
+    # validate bearer token and ensure owner role
+    if not authorization or not authorization.lower().startswith('bearer '):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token")
+    token = authorization.split(None, 1)[1].strip()
+    ut = session.exec(select(UserToken).where(UserToken.token == token)).first()
+    if not ut:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    if ut.expires_at and ut.expires_at < datetime.utcnow():
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
+
+    pm = session.exec(select(ProjectMembership).where(ProjectMembership.user_id == ut.user_id, ProjectMembership.project_id == project_id)).first()
+    if not pm or pm.role != 'owner':
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Owner role required")
+
+    project = session.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    return project
+
+
+def get_audit_context(request: Optional[Request], authorization: Optional[str], x_admin_token: Optional[str], session: Session) -> tuple[str, Optional[str], Optional[str]]:
+    """Return (actor, actor_ip, user_agent) for audit logs.
+
+    - `actor` is 'admin' for admin token, 'user:<id>' for bearer user tokens, or 'unknown'.
+    - `actor_ip` and `user_agent` are extracted from the `Request` when available.
+    """
+    actor = 'unknown'
+    actor_ip = None
+    user_agent = None
+    admin_token = os.environ.get('ADMIN_TOKEN')
+    if admin_token and x_admin_token and x_admin_token == admin_token:
+        actor = 'admin'
+    elif authorization and authorization.lower().startswith('bearer '):
+        tok = authorization.split(None, 1)[1].strip()
+        ut = session.exec(select(UserToken).where(UserToken.token == tok)).first()
+        if ut:
+            actor = f"user:{ut.user_id}"
+    try:
+        if request:
+            actor_ip = request.client.host if request.client else None
+            user_agent = request.headers.get('user-agent')
+    except Exception:
+        actor_ip = None
+        user_agent = None
+    return actor, actor_ip, user_agent

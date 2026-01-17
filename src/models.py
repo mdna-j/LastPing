@@ -216,6 +216,13 @@ class Incident(SQLModel, table=True):
     resolved_at: Optional[datetime] = None
     status: str = Field(default="open")
     share_token: Optional[str] = None
+    # Optional grouping: incidents that are related can share a `group_id`.
+    # Pointing to another incident (the group's representative) allows
+    # grouping without creating a separate table. This is used by the
+    # worker to combine related failures into a single incident view.
+    group_id: Optional[int] = Field(default=None, foreign_key="incident.id", index=True)
+    # If an incident was merged into another, track the target here.
+    merged_into: Optional[int] = Field(default=None, foreign_key="incident.id", index=True)
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
     # relationships
@@ -230,6 +237,9 @@ class AuditLog(SQLModel, table=True):
     target_type: Optional[str] = None
     target_id: Optional[int] = None
     details: Optional[str] = None
+    # optional network context for the actor performing the action
+    actor_ip: Optional[str] = None
+    user_agent: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
