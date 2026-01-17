@@ -2,19 +2,6 @@
 
 ![CI](https://github.com/mdna-j/LastPing/actions/workflows/ci.yml/badge.svg)
 
-LastPing is a small uptime monitoring service that stores checks and alerts when services
-go down. This repository contains the API, worker loop, alerting helpers, and tests.
-
-**Tech highlights**
-
-- Python 3.11
-# LastPing
-
-![CI](https://github.com/mdna-j/LastPing/actions/workflows/ci.yml/badge.svg)
-
-LastPing is a small uptime monitoring service that stores checks and alerts when services
-go down. This repository contains the API, worker loop, alerting helpers, and tests.
-
 **Tech highlights**
 
 - Python 3.11
