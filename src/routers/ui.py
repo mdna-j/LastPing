@@ -126,6 +126,8 @@ def snapshots_page():
     <h1>Snapshots (last 24h)</h1>
     <div class="row"><label>Project: <input id="projectId" value="1" style="width:80px"/></label> <button id="loadSnapshotsBtn" class="btn">Load</button></div>
     <div id="list">Loading...</div>
+    <div style="margin-top:12px"><canvas id="uptimeChart" width="800" height="240"></canvas></div>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="/static/js/snapshots.js"></script>
     </body>
     </html>
