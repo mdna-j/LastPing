@@ -124,10 +124,18 @@ def snapshots_page():
     </head>
     <body>
     <h1>Snapshots (last 24h)</h1>
-    <div class="row"><label>Project: <input id="projectId" value="1" style="width:80px"/></label> <button id="loadSnapshotsBtn" class="btn">Load</button></div>
+    <div class="row">
+      <label>Project: <input id="projectId" value="1" style="width:80px"/></label>
+      <label>Check ID: <input id="checkId" placeholder="optional" style="width:80px"/></label>
+      <label>Start: <input id="start" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
+      <label>End: <input id="end" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
+      <button id="loadSnapshotsBtn" class="btn">Load</button>
+      <button id="savePrefsBtn" class="btn">Save Prefs</button>
+      <button id="exportCsvBtn" class="btn">Export CSV</button>
+    </div>
     <div id="list">Loading...</div>
     <div style="margin-top:12px"><canvas id="uptimeChart" width="800" height="240"></canvas></div>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="/static/js/vendor/chart.min.js"></script>
     <script src="/static/js/snapshots.js"></script>
     </body>
     </html>

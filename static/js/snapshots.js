@@ -1,13 +1,23 @@
 // /ui/snapshots client script
 async function loadSnapshots(){
   const pid = document.getElementById('projectId').value || '1';
+  const checkId = document.getElementById('checkId').value || null;
+  const start = document.getElementById('start').value || null;
+  const end = document.getElementById('end').value || null;
   const out = document.getElementById('list');
   out.innerText = 'Loading...';
   try{
+    const q = (url)=>{
+      const params = new URLSearchParams();
+      if(checkId) params.set('check_id', checkId);
+      if(start) params.set('start', start);
+      if(end) params.set('end', end);
+      return `${url}?${params.toString()}`;
+    };
     const [uptimeRes, mttrRes, snapsRes] = await Promise.all([
-      fetch(`/projects/${pid}/metrics/uptime`),
-      fetch(`/projects/${pid}/metrics/mttr`),
-      fetch(`/projects/${pid}/metrics/snapshots`),
+      fetch(q(`/projects/${pid}/metrics/uptime`)),
+      fetch(q(`/projects/${pid}/metrics/mttr`)),
+      fetch(q(`/projects/${pid}/metrics/snapshots`)),
     ]);
     if(!uptimeRes.ok || !mttrRes.ok || !snapsRes.ok){ out.innerText = 'Failed to load metrics'; return }
     const uptimeJson = await uptimeRes.json();
@@ -64,7 +74,59 @@ async function loadSnapshots(){
     }catch(e){ /* non-fatal */ }
 
     out.innerHTML = html;
+    // persist last used inputs locally
+    try{ localStorage.setItem('lastSnapshotsPrefs', JSON.stringify({projectId: pid, checkId: checkId, start: start, end: end})); }catch(e){}
   }catch(e){ out.innerText = 'Error loading snapshots'; }
+}
+
+function loadPrefs(){
+  try{
+    const raw = localStorage.getItem('lastSnapshotsPrefs');
+    if(!raw) return;
+    const p = JSON.parse(raw);
+    if(p.projectId) document.getElementById('projectId').value = p.projectId;
+    if(p.checkId) document.getElementById('checkId').value = p.checkId;
+    if(p.start) document.getElementById('start').value = p.start;
+    if(p.end) document.getElementById('end').value = p.end;
+  }catch(e){}
+}
+
+function savePrefs(){
+  try{
+    const pid = document.getElementById('projectId').value || '1';
+    const checkId = document.getElementById('checkId').value || null;
+    const start = document.getElementById('start').value || null;
+    const end = document.getElementById('end').value || null;
+    localStorage.setItem('lastSnapshotsPrefs', JSON.stringify({projectId: pid, checkId: checkId, start: start, end: end}));
+    alert('Preferences saved');
+  }catch(e){ alert('Failed to save prefs'); }
+}
+
+async function exportCsv(){
+  const pid = document.getElementById('projectId').value || '1';
+  const checkId = document.getElementById('checkId').value || null;
+  const start = document.getElementById('start').value || null;
+  const end = document.getElementById('end').value || null;
+  const params = new URLSearchParams();
+  if(checkId) params.set('check_id', checkId);
+  if(start) params.set('start', start);
+  if(end) params.set('end', end);
+  const res = await fetch(`/projects/${pid}/metrics/snapshots?${params.toString()}`);
+  if(!res.ok){ alert('Failed to fetch snapshots for CSV'); return }
+  const data = await res.json();
+  if(!data || !data.length){ alert('No snapshot data'); return }
+  // build CSV
+  const hdr = ['id','project_id','check_id','window_start','window_end','uptime_percent','mttr_seconds'];
+  const rows = [hdr.join(',')];
+  for(const r of data){
+    rows.push([r.id,r.project_id,r.check_id,`"${r.window_start}"`,`"${r.window_end}"`,r.uptime_percent,r.mttr_seconds].join(','));
+  }
+  const csv = rows.join('\n');
+  const blob = new Blob([csv], {type: 'text/csv'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `snapshots_${pid}.csv`; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
 }
 window.loadSnapshots = loadSnapshots;
 document.addEventListener('DOMContentLoaded', ()=>{ const b = document.getElementById('loadSnapshotsBtn'); if(b) b.addEventListener('click', loadSnapshots); loadSnapshots(); });
+document.addEventListener('DOMContentLoaded', ()=>{ loadPrefs(); const s = document.getElementById('savePrefsBtn'); if(s) s.addEventListener('click', savePrefs); const e = document.getElementById('exportCsvBtn'); if(e) e.addEventListener('click', exportCsv); });
