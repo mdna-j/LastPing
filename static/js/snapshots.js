@@ -2,6 +2,7 @@
 async function loadSnapshots(){
   const pid = document.getElementById('projectId').value || '1';
   const checkId = document.getElementById('checkId').value || null;
+  const apiKey = document.getElementById('apiKey').value || null;
   const start = document.getElementById('start').value || null;
   const end = document.getElementById('end').value || null;
   const out = document.getElementById('list');
@@ -14,10 +15,13 @@ async function loadSnapshots(){
       if(end) params.set('end', end);
       return `${url}?${params.toString()}`;
     };
+    const headers = {};
+    if(apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+    const fetchWith = (url)=> fetch(url, {headers});
     const [uptimeRes, mttrRes, snapsRes] = await Promise.all([
-      fetch(q(`/projects/${pid}/metrics/uptime`)),
-      fetch(q(`/projects/${pid}/metrics/mttr`)),
-      fetch(q(`/projects/${pid}/metrics/snapshots`)),
+      fetchWith(q(`/projects/${pid}/metrics/uptime`)),
+      fetchWith(q(`/projects/${pid}/metrics/mttr`)),
+      fetchWith(q(`/projects/${pid}/metrics/snapshots`)),
     ]);
     if(!uptimeRes.ok || !mttrRes.ok || !snapsRes.ok){ out.innerText = 'Failed to load metrics'; return }
     const uptimeJson = await uptimeRes.json();
@@ -75,7 +79,7 @@ async function loadSnapshots(){
 
     out.innerHTML = html;
     // persist last used inputs locally
-    try{ localStorage.setItem('lastSnapshotsPrefs', JSON.stringify({projectId: pid, checkId: checkId, start: start, end: end})); }catch(e){}
+    try{ localStorage.setItem('lastSnapshotsPrefs', JSON.stringify({projectId: pid, checkId: checkId, apiKey: apiKey, start: start, end: end})); }catch(e){}
   }catch(e){ out.innerText = 'Error loading snapshots'; }
 }
 
@@ -86,6 +90,7 @@ function loadPrefs(){
     const p = JSON.parse(raw);
     if(p.projectId) document.getElementById('projectId').value = p.projectId;
     if(p.checkId) document.getElementById('checkId').value = p.checkId;
+    if(p.apiKey) document.getElementById('apiKey').value = p.apiKey;
     if(p.start) document.getElementById('start').value = p.start;
     if(p.end) document.getElementById('end').value = p.end;
   }catch(e){}
@@ -95,9 +100,10 @@ function savePrefs(){
   try{
     const pid = document.getElementById('projectId').value || '1';
     const checkId = document.getElementById('checkId').value || null;
+    const apiKey = document.getElementById('apiKey').value || null;
     const start = document.getElementById('start').value || null;
     const end = document.getElementById('end').value || null;
-    localStorage.setItem('lastSnapshotsPrefs', JSON.stringify({projectId: pid, checkId: checkId, start: start, end: end}));
+    localStorage.setItem('lastSnapshotsPrefs', JSON.stringify({projectId: pid, checkId: checkId, apiKey: apiKey, start: start, end: end}));
     alert('Preferences saved');
   }catch(e){ alert('Failed to save prefs'); }
 }
@@ -105,13 +111,16 @@ function savePrefs(){
 async function exportCsv(){
   const pid = document.getElementById('projectId').value || '1';
   const checkId = document.getElementById('checkId').value || null;
+  const apiKey = document.getElementById('apiKey').value || null;
   const start = document.getElementById('start').value || null;
   const end = document.getElementById('end').value || null;
   const params = new URLSearchParams();
   if(checkId) params.set('check_id', checkId);
   if(start) params.set('start', start);
   if(end) params.set('end', end);
-  const res = await fetch(`/projects/${pid}/metrics/snapshots?${params.toString()}`);
+  const headers = {};
+  if(apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+  const res = await fetch(`/projects/${pid}/metrics/snapshots?${params.toString()}`, {headers});
   if(!res.ok){ alert('Failed to fetch snapshots for CSV'); return }
   const data = await res.json();
   if(!data || !data.length){ alert('No snapshot data'); return }
@@ -127,6 +136,41 @@ async function exportCsv(){
   const a = document.createElement('a');
   a.href = url; a.download = `snapshots_${pid}.csv`; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
 }
+
+async function loadChecks(){
+  const pid = document.getElementById('projectId').value || '1';
+  const apiKey = document.getElementById('apiKey').value || null;
+  const sel = document.getElementById('checkId');
+  // clear existing
+  sel.innerHTML = '<option value="">(all)</option>';
+  if(!apiKey) return; // cannot fetch checks without API key
+  try{
+    const res = await fetch(`/projects/${pid}/checks`, {headers: {'Authorization': `Bearer ${apiKey}`}});
+    if(!res.ok) return;
+    const arr = await res.json();
+    for(const c of arr){
+      const opt = document.createElement('option'); opt.value = c.id; opt.text = c.name; sel.appendChild(opt);
+    }
+  }catch(e){ }
+}
+
+function isIsoTimestamp(s){
+  if(!s) return false;
+  const t = Date.parse(s);
+  return !Number.isNaN(t);
+}
+
+function applyPreset(hours){
+  const end = new Date();
+  const start = new Date(end.getTime() - hours*3600*1000);
+  document.getElementById('start').value = start.toISOString().slice(0,19);
+  document.getElementById('end').value = end.toISOString().slice(0,19);
+}
 window.loadSnapshots = loadSnapshots;
-document.addEventListener('DOMContentLoaded', ()=>{ const b = document.getElementById('loadSnapshotsBtn'); if(b) b.addEventListener('click', loadSnapshots); loadSnapshots(); });
-document.addEventListener('DOMContentLoaded', ()=>{ loadPrefs(); const s = document.getElementById('savePrefsBtn'); if(s) s.addEventListener('click', savePrefs); const e = document.getElementById('exportCsvBtn'); if(e) e.addEventListener('click', exportCsv); });
+document.addEventListener('DOMContentLoaded', ()=>{ const b = document.getElementById('loadSnapshotsBtn'); if(b) b.addEventListener('click', ()=>{ if(!isIsoTimestamp(document.getElementById('start').value) || !isIsoTimestamp(document.getElementById('end').value)){ if(document.getElementById('start').value || document.getElementById('end').value){ alert('Start/end must be valid ISO timestamps (YYYY-MM-DDTHH:MM:SS)'); return } } loadSnapshots(); }); loadSnapshots(); });
+document.addEventListener('DOMContentLoaded', ()=>{ loadPrefs(); const s = document.getElementById('savePrefsBtn'); if(s) s.addEventListener('click', savePrefs); const e = document.getElementById('exportCsvBtn'); if(e) e.addEventListener('click', exportCsv); const api = document.getElementById('apiKey'); if(api) api.addEventListener('change', loadChecks); const pid = document.getElementById('projectId'); if(pid) pid.addEventListener('change', loadChecks); const presets = document.createElement('div'); presets.style.marginTop='8px'; presets.innerHTML = '<button class="btn" id="p1h">Last 1h</button> <button class="btn" id="p6h">Last 6h</button> <button class="btn" id="p24h">Last 24h</button> <button class="btn" id="p7d">Last 7d</button>'; document.body.insertBefore(presets, document.getElementById('list'));
+  document.getElementById('p1h').addEventListener('click', ()=>applyPreset(1));
+  document.getElementById('p6h').addEventListener('click', ()=>applyPreset(6));
+  document.getElementById('p24h').addEventListener('click', ()=>applyPreset(24));
+  document.getElementById('p7d').addEventListener('click', ()=>applyPreset(24*7));
+});
