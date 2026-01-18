@@ -7,6 +7,7 @@ from sqlmodel import Session, select
 from ..db import get_session
 from ..models import Event, Check, Project
 from ..deps import require_project_api_key
+from ..models import UptimeSnapshot
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["metrics"])
 
@@ -134,3 +135,25 @@ def mttr(project_id: int, check_id: Optional[int] = Query(None), start: Optional
         return {"project_id": project_id, "mttr_seconds": None}
     agg = sum(vals) / len(vals)
     return {"project_id": project_id, "mttr_seconds": agg}
+
+
+@router.get("/metrics/snapshots")
+def snapshots(project_id: int, check_id: Optional[int] = Query(None), limit: int = Query(100), session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
+    """Return recent UptimeSnapshot rows for a project (optionally filtered by check_id)."""
+    stmt = select(UptimeSnapshot).where(UptimeSnapshot.project_id == project_id)
+    if check_id:
+        stmt = stmt.where(UptimeSnapshot.check_id == check_id)
+    stmt = stmt.order_by(UptimeSnapshot.window_end.desc()).limit(limit)
+    rows = session.exec(stmt).all()
+    out = []
+    for r in rows:
+        out.append({
+            "id": r.id,
+            "project_id": r.project_id,
+            "check_id": r.check_id,
+            "window_start": r.window_start.isoformat(),
+            "window_end": r.window_end.isoformat(),
+            "uptime_percent": r.uptime_percent,
+            "mttr_seconds": r.mttr_seconds,
+        })
+    return out
