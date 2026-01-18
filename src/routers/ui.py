@@ -127,6 +127,8 @@ def snapshots_page():
     <div class="row">
       <label>Project: <input id="projectId" value="1" style="width:80px"/></label>
       <label>API Key: <input id="apiKey" placeholder="optional" style="width:240px"/></label>
+      <label><input type="checkbox" id="rememberApiKey" /> Remember API Key</label>
+      <button id="showApiKeyBtn" class="btn">Show</button>
       <label>Check: <select id="checkId" style="width:120px"><option value="">(all)</option></select></label>
       <label>Start: <input id="start" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
       <label>End: <input id="end" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
