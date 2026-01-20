@@ -30,10 +30,21 @@ jobs:
         run: |
           python -m pip install --upgrade pip build twine
 
-      - name: Build package
-        working-directory: ./lastping_sdk
+      - name: Debug repo contents
         run: |
-          python -m build --sdist --wheel
+          echo "PWD: $(pwd)"
+          echo "Listing repo root:"; ls -la
+
+      - name: Build package
+        run: |
+          if [ -d "./lastping_sdk" ]; then
+            echo "Found lastping_sdk; building package..."
+            python -m build --sdist --wheel --outdir ./lastping_sdk/dist ./lastping_sdk
+          else
+            echo "Error: lastping_sdk directory not found at repo root." >&2
+            echo "Listing current directory:"; ls -la
+            exit 1
+          fi
 
       - name: Publish to PyPI
         if: github.event_name == 'release' || github.ref == 'refs/heads/main'
