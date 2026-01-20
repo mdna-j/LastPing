@@ -26,6 +26,11 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
+      - name: Validate `lastping_sdk/pyproject.toml`
+        run: |
+          echo "Validating lastping_sdk/pyproject.toml"
+          python -c "import tomllib,sys; tomllib.loads(open('lastping_sdk/pyproject.toml','rb').read())"
+
       - name: Install build dependencies
         run: |
           python -m pip install --upgrade pip build twine
