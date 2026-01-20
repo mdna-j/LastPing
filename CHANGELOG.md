@@ -1,3 +1,12 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+## [Unreleased]
+
+- Added inbound webhook ingestion endpoint and tests.
+- Added `lastping_sdk` minimal Python SDK (sync + async clients, helpers, examples).
+- Added packaging for SDK (`lastping_sdk/pyproject.toml`) and GitHub Actions workflow to publish the SDK.
 ## Unreleased
 
 - Persist scheduling for HTTP checks: add `interval` and `next_run` to `Check` and have worker persist `next_run` after running checks. See:
