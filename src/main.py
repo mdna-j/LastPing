@@ -11,6 +11,7 @@ from .routers.users import router as users_router
 from .routers.metrics import router as metrics_router
 from .routers.incidents import router as incidents_router, public_router as incidents_public_router
 from .routers.ui import router as ui_router
+from .routers.webhooks_fixed import router as webhooks_router
 
 
 app = FastAPI(title="LastPing API")
@@ -47,3 +48,4 @@ app.include_router(metrics_router)
 app.include_router(incidents_router)
 app.include_router(incidents_public_router)
 app.include_router(ui_router)
+app.include_router(webhooks_router)

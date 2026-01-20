@@ -1,12 +1,13 @@
 $out = "static/js/vendor/chart.min.js"
-$urls = @("https://cdn.jsdelivr.net/npm/chart.js/dist/chart.min.js","https://unpkg.com/chart.js/dist/chart.min.js")
-foreach($u in $urls){
-    try{
+$urls = @("https://cdn.jsdelivr.net/npm/chart.js/dist/chart.min.js", "https://unpkg.com/chart.js/dist/chart.min.js")
+foreach ($u in $urls) {
+    try {
         Write-Host "Downloading $u"
         Invoke-WebRequest -Uri $u -OutFile $out -UseBasicParsing -ErrorAction Stop
         Write-Host "Saved to $out"
         exit 0
-    }catch{
+    }
+    catch {
         Write-Host "Failed to download $u"
     }
 }
