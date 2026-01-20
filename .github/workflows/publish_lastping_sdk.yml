@@ -29,7 +29,8 @@ jobs:
       - name: Validate `lastping_sdk/pyproject.toml`
         run: |
           echo "Validating lastping_sdk/pyproject.toml"
-          python -c "import tomllib,sys; tomllib.loads(open('lastping_sdk/pyproject.toml','rb').read())"
+          # Use tomllib.load on the file object to avoid bytes/str decoding issues
+          python -c "import tomllib; tomllib.load(open('lastping_sdk/pyproject.toml','rb'))"
 
       - name: Install build dependencies
         run: |
