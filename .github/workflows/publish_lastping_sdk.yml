@@ -35,14 +35,27 @@ jobs:
           echo "PWD: $(pwd)"
           echo "Listing repo root:"; ls -la
 
-      - name: Build package
+      - name: Build package (try multiple locations)
         run: |
-          if [ -d "./lastping_sdk" ]; then
-            echo "Found lastping_sdk; building package..."
-            python -m build --sdist --wheel --outdir ./lastping_sdk/dist ./lastping_sdk
-          else
-            echo "Error: lastping_sdk directory not found at repo root." >&2
-            echo "Listing current directory:"; ls -la
+          set -e
+          CANDIDATES=("./lastping_sdk" "./src/lastping_sdk" ".")
+          BUILT=0
+          for d in "${CANDIDATES[@]}"; do
+            if [ -d "$d" ]; then
+              if [ -f "$d/pyproject.toml" ] || [ -f "./pyproject.toml" ]; then
+                echo "Attempting build from: $d"
+                python -m build --sdist --wheel --outdir "$d/dist" "$d" || true
+                if [ -d "$d/dist" ] && [ "$(ls -A $d/dist)" ]; then
+                  echo "Build succeeded into $d/dist"
+                  BUILT=1
+                  break
+                fi
+              fi
+            fi
+          done
+          if [ "$BUILT" -ne 1 ]; then
+            echo "Error: could not locate a buildable package directory among: ${CANDIDATES[*]}" >&2
+            echo "Repo root listing:"; ls -la
             exit 1
           fi
 
