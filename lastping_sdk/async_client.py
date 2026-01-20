@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Any
 
 
 class AsyncHeartbeatClient:
@@ -14,7 +14,8 @@ class AsyncHeartbeatClient:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
-        self._session: Optional[aiohttp.ClientSession] = None
+        # use a generic Any annotation to avoid importing aiohttp at module import time
+        self._session: Optional[Any] = None
 
     async def __aenter__(self):
         try:
@@ -43,6 +44,7 @@ class AsyncHeartbeatClient:
         if timestamp is not None:
             payload["timestamp"] = timestamp.isoformat()
 
-        async with self._session.post(url, headers=headers, json=payload or None, timeout=self.timeout) as resp:
-            resp.raise_for_status()
-            return await resp.text()
+        # Await the post coroutine to get a response object (works with real aiohttp and with test fakes)
+        resp = await self._session.post(url, headers=headers, json=payload or None, timeout=self.timeout)
+        resp.raise_for_status()
+        return await resp.text()
