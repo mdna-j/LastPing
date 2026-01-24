@@ -29,6 +29,15 @@ class CheckCreate(BaseModel):
     url: Optional[str] = None
     timeout: Optional[int] = 5
     retries: Optional[int] = 1
+    host: Optional[str] = None
+    port: Optional[int] = None
+    dns_record_type: Optional[str] = None
+    interval: Optional[int] = 60
+    latency_threshold_ms: Optional[int] = None
+    region: Optional[str] = None
+    alert_enabled: Optional[bool] = True
+    alert_after: Optional[int] = 1
+    alert_cooldown: Optional[int] = 3600
 
 
 class CheckRead(BaseModel):
@@ -40,6 +49,17 @@ class CheckRead(BaseModel):
     last_ping: Optional[datetime]
     maintenance_starts_at: Optional[datetime] = None
     maintenance_ends_at: Optional[datetime] = None
+    url: Optional[str] = None
+    host: Optional[str] = None
+    port: Optional[int] = None
+    dns_record_type: Optional[str] = None
+    interval: Optional[int] = None
+    latency_threshold_ms: Optional[int] = None
+    last_latency_ms: Optional[float] = None
+    region: Optional[str] = None
+    alert_enabled: Optional[bool] = None
+    alert_after: Optional[int] = None
+    alert_cooldown: Optional[int] = None
 
     class Config:
         orm_mode = True
@@ -73,8 +93,17 @@ def create_check(project_id: int, payload: CheckCreate, request: Request = None,
         expected_interval=payload.expected_interval,
         grace_period=payload.grace_period,
         url=payload.url,
+        host=payload.host,
+        port=payload.port,
+        dns_record_type=payload.dns_record_type,
         timeout=payload.timeout,
         retries=payload.retries,
+        interval=payload.interval,
+        latency_threshold_ms=payload.latency_threshold_ms,
+        region=payload.region,
+        alert_enabled=payload.alert_enabled if payload.alert_enabled is not None else True,
+        alert_after=payload.alert_after,
+        alert_cooldown=payload.alert_cooldown,
         status=CheckStatus.UP,
     )
     session.add(check)
@@ -96,6 +125,14 @@ class CheckUpdate(BaseModel):
     interval: Optional[int] = None
     expected_interval: Optional[int] = None
     grace_period: Optional[int] = None
+    host: Optional[str] = None
+    port: Optional[int] = None
+    dns_record_type: Optional[str] = None
+    latency_threshold_ms: Optional[int] = None
+    region: Optional[str] = None
+    alert_enabled: Optional[bool] = None
+    alert_after: Optional[int] = None
+    alert_cooldown: Optional[int] = None
 
 
 @router.put("/{check_id}", response_model=CheckRead)
@@ -123,6 +160,22 @@ def update_check(project_id: int, check_id: int, payload: CheckUpdate, request: 
         check.expected_interval = payload.expected_interval
     if payload.grace_period is not None:
         check.grace_period = payload.grace_period
+    if payload.host is not None:
+        check.host = payload.host
+    if payload.port is not None:
+        check.port = payload.port
+    if payload.dns_record_type is not None:
+        check.dns_record_type = payload.dns_record_type
+    if payload.latency_threshold_ms is not None:
+        check.latency_threshold_ms = payload.latency_threshold_ms
+    if payload.region is not None:
+        check.region = payload.region
+    if payload.alert_enabled is not None:
+        check.alert_enabled = payload.alert_enabled
+    if payload.alert_after is not None:
+        check.alert_after = payload.alert_after
+    if payload.alert_cooldown is not None:
+        check.alert_cooldown = payload.alert_cooldown
     session.add(check)
     session.commit()
     session.refresh(check)

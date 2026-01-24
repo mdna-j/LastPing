@@ -1,5 +1,5 @@
 body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:20px;color:#222}
-.row{display:flex;gap:12px;align-items:center;margin-bottom:12px}
+.row{display:flex;gap:12px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
 input,button{padding:8px;border:1px solid #ddd;border-radius:6px}
 .card{border:1px solid #eee;padding:12px;border-radius:8px;margin-bottom:8px;background:#fafafa}
 .muted{color:#666;font-size:0.9em}

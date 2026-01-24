@@ -20,6 +20,15 @@ from lastping_sdk import heartbeat
 def job():
     pass
 ```
+
+Context manager example
+
+```python
+from lastping_sdk import heartbeat_context
+
+with heartbeat_context(1, "my-check", "https://example.com", "API_KEY"):
+    run_job()
+```
 # LastPing Python SDK (minimal)
 
 Small helper for sending heartbeats to a LastPing server.

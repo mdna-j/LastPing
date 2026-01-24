@@ -40,6 +40,9 @@ class Project(SQLModel, table=True):
     alert_rate_limit_count: int = Field(default=100, description="max alerts in window before escalation/suppression")
     alert_rate_limit_window: int = Field(default=3600, description="window in seconds for rate limiting alerts")
     last_escalated_at: Optional[datetime] = None
+    # default SLO/SLA targets for reporting
+    slo_target: Optional[float] = Field(default=99.9, description="target uptime percentage for SLO reporting")
+    sla_target: Optional[float] = Field(default=99.5, description="target uptime percentage for SLA reporting")
     # optional project-level maintenance window (suppress alerts across project)
     maintenance_starts_at: Optional[datetime] = None
     maintenance_ends_at: Optional[datetime] = None
@@ -48,11 +51,14 @@ class Project(SQLModel, table=True):
 class CheckType(str):
     HEARTBEAT = "heartbeat"
     HTTP = "http"
+    TCP = "tcp"
+    DNS = "dns"
 
 
 class CheckStatus(str):
     UP = "UP"
     DOWN = "DOWN"
+    DEGRADED = "DEGRADED"
 
 
 class Check(SQLModel, table=True):
@@ -80,9 +86,17 @@ class Check(SQLModel, table=True):
     url: Optional[str] = None
     timeout: Optional[int] = Field(default=5)
     retries: Optional[int] = Field(default=1)
+    # tcp/dns shared
+    host: Optional[str] = None
+    port: Optional[int] = None
+    dns_record_type: Optional[str] = None
     # scheduling for HTTP checks
     interval: Optional[int] = Field(default=60, description="interval in seconds for HTTP checks")
     next_run: Optional[datetime] = None
+    # latency tracking
+    latency_threshold_ms: Optional[int] = Field(default=None, description="latency threshold in ms for degraded state")
+    last_latency_ms: Optional[float] = None
+    region: Optional[str] = Field(default=None, description="optional region label for distributed workers")
 
     status: str = Field(default=CheckStatus.UP)
     last_ping: Optional[datetime] = None
@@ -193,6 +207,7 @@ class EventType(str):
     UP = "up"
     HEARTBEAT = "heartbeat"
     HTTP_FAILURE = "http_failure"
+    DEGRADED = "degraded"
 
 
 class Event(SQLModel, table=True):

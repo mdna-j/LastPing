@@ -37,6 +37,8 @@ class ProjectRead(BaseModel):
     slack_webhook_url: Optional[str] = None
     pagerduty_integration_key: Optional[str] = None
     generic_webhook_url: Optional[str] = None
+    slo_target: Optional[float] = None
+    sla_target: Optional[float] = None
 
     class Config:
         orm_mode = True
@@ -82,6 +84,11 @@ class WebhookUpdate(BaseModel):
     slack_webhook_url: Optional[str] = None
     pagerduty_integration_key: Optional[str] = None
     generic_webhook_url: Optional[str] = None
+
+
+class SloSettings(BaseModel):
+    slo_target: Optional[float] = None
+    sla_target: Optional[float] = None
 
 
 class MaintenanceWindow(BaseModel):
@@ -216,3 +223,33 @@ def rotate_all_keys(x_admin_token: Optional[str] = Header(None), session: Sessio
             pass
     session.commit()
     return result
+
+
+@router.get("/{project_id}/slo", response_model=SloSettings)
+def get_project_slo(project_id: int, session: Session = Depends(get_session)):
+    project = session.get(ProjectModel, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return SloSettings(slo_target=project.slo_target, sla_target=project.sla_target)
+
+
+@router.post("/{project_id}/slo", response_model=SloSettings)
+def set_project_slo(project_id: int, payload: SloSettings, request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
+    project = session.get(ProjectModel, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if payload.slo_target is not None:
+        project.slo_target = payload.slo_target
+    if payload.sla_target is not None:
+        project.sla_target = payload.sla_target
+    session.add(project)
+    session.commit()
+    session.refresh(project)
+    try:
+        actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
+        al = AuditLog(actor=actor, action="set_project_slo", target_type="project", target_id=project_id, details=None, actor_ip=actor_ip, user_agent=user_agent)
+        session.add(al)
+        session.commit()
+    except Exception:
+        pass
+    return SloSettings(slo_target=project.slo_target, sla_target=project.sla_target)

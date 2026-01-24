@@ -364,3 +364,44 @@ def test_http_check_scheduling(tmp_path, monkeypatch):
         session.refresh(check)
         assert check.last_ping is not None
         assert check.next_run is not None and check.next_run > datetime.utcnow()
+
+
+def test_degraded_latency_transition(tmp_path, monkeypatch):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_deg.sqlite'}"
+
+    from sqlmodel import Session, select
+    from src import db as dbmod
+    from src.models import Project, Check, CheckType, CheckStatus, Event, EventType
+    from src import worker
+
+    dbmod.create_db_and_tables()
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="proj_deg")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        check = Check(
+            project_id=project.id,
+            name="http_deg",
+            type=CheckType.HTTP,
+            url="http://example.ok/health",
+            timeout=1,
+            retries=1,
+            status=CheckStatus.UP,
+            latency_threshold_ms=10,
+        )
+        session.add(check)
+        session.commit()
+        session.refresh(check)
+
+        monkeypatch.setattr(worker, "_http_check", lambda url, timeout, retries: (True, "status=200", 55.0))
+        monkeypatch.setattr(worker, "notify_degraded", lambda chk, proj, reason=None: None)
+
+        worker.scan_checks_once(session)
+
+        session.refresh(check)
+        assert check.status == CheckStatus.DEGRADED
+        events = session.exec(select(Event).where(Event.check_id == check.id)).all()
+        assert any(e.event_type == EventType.DEGRADED for e in events)

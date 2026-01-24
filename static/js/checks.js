@@ -21,11 +21,26 @@ async function loadChecks(){
   const adminPresent = !!document.getElementById('adminToken').value;
   const cb = document.getElementById('createBtn');
   if(cb) cb.style.display = (isOwner || adminPresent) ? 'inline-block' : 'none';
-  el.innerHTML = json.map(c=>`<div class="card"><div><strong>${c.name}</strong> (${c.type}) <span class="muted">status:${c.status}</span></div><div style="margin-top:8px"> <a href="/ui/checks/${c.id}">Manage</a>${(isOwner||adminPresent)? ' <button onclick="del('+pid+','+c.id+')" style="margin-left:8px">Delete</button>':''}</div></div>`).join('');
+  el.innerHTML = json.map(c=>`<div class="card"><div><strong>${c.name}</strong> (${c.type}) <span class="muted">status:${c.status}</span> ${c.region?'<span class="muted">region:'+c.region+'</span>':''}</div><div style="margin-top:8px"> <a href="/ui/checks/${c.id}">Manage</a>${(isOwner||adminPresent)? ' <button onclick="del('+pid+','+c.id+')" style="margin-left:8px">Delete</button>':''}</div></div>`).join('');
 }
 async function createCheck(){
   const pid = document.getElementById('projectId').value || '1';
-  const body = {name: document.getElementById('name').value, type: document.getElementById('type').value, url: document.getElementById('url').value};
+  const body = {
+    name: document.getElementById('name').value,
+    type: document.getElementById('type').value,
+    url: document.getElementById('url').value,
+    host: document.getElementById('host').value || null,
+    port: parseInt(document.getElementById('port').value || '0') || null,
+    dns_record_type: document.getElementById('dnsRecordType').value || null,
+    interval: parseInt(document.getElementById('interval').value || '0') || null,
+    expected_interval: parseInt(document.getElementById('expectedInterval').value || '0') || null,
+    grace_period: parseInt(document.getElementById('gracePeriod').value || '0') || null,
+    latency_threshold_ms: parseInt(document.getElementById('latencyThreshold').value || '0') || null,
+    region: document.getElementById('region').value || null,
+    alert_enabled: !!document.getElementById('alertEnabled').checked,
+    alert_after: parseInt(document.getElementById('alertAfter').value || '0') || null,
+    alert_cooldown: parseInt(document.getElementById('alertCooldown').value || '0') || null
+  };
   const resp = await fetch(`/projects/${pid}/checks`, {method:'POST', headers: headers(), body: JSON.stringify(body)});
   if(resp.status==201){ alert('Created'); loadChecks(); } else { alert('Create failed'); }
 }

@@ -13,13 +13,14 @@ stable.
 from datetime import datetime, timedelta
 import urllib.request
 import urllib.error
-from typing import Tuple
+import socket
+from typing import Tuple, Optional
 
 from sqlmodel import Session, select
 
 from .db import engine
 from .models import Check, CheckType, CheckStatus, Event, EventType, Project, Incident
-from .alerts import notify_down, notify_recovery
+from .alerts import notify_down, notify_recovery, notify_degraded
 from .models import UptimeSnapshot
 
 logger = logging.getLogger("lastping.worker")
@@ -53,20 +54,21 @@ def _in_maintenance(check: Check, project: Project, now: datetime) -> bool:
     return False
 
 
-def _http_check(url: str, timeout: int, retries: int) -> Tuple[bool, str]:
+def _http_check(url: str, timeout: int, retries: int) -> Tuple[bool, str, Optional[float]]:
     """Perform a simple HTTP GET with retries.
 
-    Returns (ok: bool, reason: str). The reason is a short diagnostic
-    such as `status=200` or an error string for logging/alerting.
+    Returns (ok: bool, reason: str, latency_ms: Optional[float]).
     """
     last_exc = None
     for attempt in range(max(1, retries)):
         try:
+            start = time.time()
             req = urllib.request.Request(url, headers={"User-Agent": "LastPing/1.0"})
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 code = resp.getcode()
                 if 200 <= code < 300:
-                    return True, f"status={code}"
+                    latency_ms = (time.time() - start) * 1000.0
+                    return True, f"status={code}", latency_ms
                 else:
                     last_exc = f"status={code}"
         except urllib.error.HTTPError as he:
@@ -76,7 +78,34 @@ def _http_check(url: str, timeout: int, retries: int) -> Tuple[bool, str]:
             last_exc = str(e)
         # small backoff between retries
         time.sleep(0.5)
-    return False, last_exc or "unknown"
+    return False, last_exc or "unknown", None
+
+
+def _tcp_check(host: str, port: int, timeout: int) -> Tuple[bool, str, Optional[float]]:
+    try:
+        start = time.time()
+        with socket.create_connection((host, port), timeout=timeout):
+            latency_ms = (time.time() - start) * 1000.0
+            return True, "tcp_ok", latency_ms
+    except Exception as exc:
+        return False, str(exc), None
+
+
+def _dns_check(host: str, record_type: Optional[str] = None) -> Tuple[bool, str, Optional[float]]:
+    try:
+        family = 0
+        if record_type:
+            rt = record_type.upper()
+            if rt == "A":
+                family = socket.AF_INET
+            elif rt == "AAAA":
+                family = socket.AF_INET6
+        start = time.time()
+        socket.getaddrinfo(host, None, family=family)
+        latency_ms = (time.time() - start) * 1000.0
+        return True, "dns_ok", latency_ms
+    except Exception as exc:
+        return False, str(exc), None
 
 
 def _project_is_throttled(session: Session, project: Project, now: datetime) -> bool:
@@ -107,6 +136,13 @@ def _trigger_escalation(session: Session, project: Project, now: datetime, reaso
     return False
 
 
+def _is_degraded(check: Check, latency_ms: Optional[float]) -> bool:
+    thr = getattr(check, "latency_threshold_ms", None)
+    if thr is None or latency_ms is None:
+        return False
+    return latency_ms > thr
+
+
 def scan_checks_once(session: Session):
     # Load all checks and process each synchronously. The worker is
     # intentionally simple (single-threaded) to avoid race conditions
@@ -114,7 +150,10 @@ def scan_checks_once(session: Session):
     stmt = select(Check)
     results = session.exec(stmt).all()
     now = _now()
+    worker_region = os.environ.get("WORKER_REGION")
     for check in results:
+        if worker_region and getattr(check, "region", None) and check.region != worker_region:
+            continue
         project = session.get(Project, check.project_id)
 
         # HEARTBEAT checks are driven by client pings; worker only
@@ -252,68 +291,115 @@ def scan_checks_once(session: Session):
                         session.add(check)
                         session.commit()
 
-        # HTTP checks are actively polled according to `interval` and
-        # `next_run`. The worker executes `_http_check`, updates status
-        # and persists `next_run` for scheduling.
-        elif check.type == CheckType.HTTP:
-            if not check.url:
-                continue
+        # HTTP/TCP/DNS checks are actively polled according to `interval` and `next_run`.
+        elif check.type in (CheckType.HTTP, CheckType.TCP, CheckType.DNS):
             timeout = check.timeout or 5
             retries = check.retries or 1
-            # scheduling: skip until next_run for HTTP checks
             interval = getattr(check, "interval", None) or 60
             if check.next_run is not None and now < check.next_run:
-                # not yet time to run this check
                 continue
-            ok, reason = _http_check(check.url, timeout, retries)
+
+            ok = False
+            reason = "unknown"
+            latency_ms = None
+            if check.type == CheckType.HTTP:
+                if not check.url:
+                    continue
+                ok, reason, latency_ms = _http_check(check.url, timeout, retries)
+            elif check.type == CheckType.TCP:
+                if not check.host or not check.port:
+                    continue
+                ok, reason, latency_ms = _tcp_check(check.host, check.port, timeout)
+            elif check.type == CheckType.DNS:
+                if not check.host:
+                    continue
+                ok, reason, latency_ms = _dns_check(check.host, check.dns_record_type)
+
             if ok:
                 check.last_ping = now
-                if check.status == CheckStatus.DOWN:
-                    check.status = CheckStatus.UP
-                    check.consecutive_failures = 0
-                    # close incident if exists
-                    open_inc = session.exec(select(Incident).where(Incident.check_id == check.id, Incident.resolved_at == None)).first()
-                    if open_inc:
-                        open_inc.resolved_at = now
-                        open_inc.status = "resolved"
-                        session.add(open_inc)
-                        session.commit()
-                    event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.UP, message=f"http success ({reason})", incident_id=(open_inc.id if open_inc else None))
-                    session.add(event)
-                    # recovery alert: respect cooldown and enabled
-                    if check.alert_enabled:
-                        last_alert = check.last_alerted_at
-                        cooldown = check.alert_cooldown or 0
-                        if (last_alert is None) or ((now - last_alert).total_seconds() > cooldown):
-                            session.add(check)
+                check.last_latency_ms = latency_ms
+                is_degraded = _is_degraded(check, latency_ms)
+                if is_degraded:
+                    # degrade state
+                    if check.status != CheckStatus.DEGRADED:
+                        # close open incident if exists
+                        open_inc = session.exec(select(Incident).where(Incident.check_id == check.id, Incident.resolved_at == None)).first()
+                        if open_inc:
+                            open_inc.resolved_at = now
+                            open_inc.status = "resolved"
+                            session.add(open_inc)
                             session.commit()
-                            try:
-                                notify_recovery(check, project)
-                                check.last_alerted_at = now
-                                check.last_alert_type = EventType.UP
+                        check.status = CheckStatus.DEGRADED
+                        check.consecutive_failures = 0
+                        event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.DEGRADED, message=f"latency_ms={latency_ms:.1f}" if latency_ms is not None else "degraded")
+                        session.add(event)
+                        if check.alert_enabled:
+                            last_alert = check.last_alerted_at
+                            cooldown = check.alert_cooldown or 0
+                            if (last_alert is None) or ((now - last_alert).total_seconds() > cooldown):
                                 session.add(check)
                                 session.commit()
-                            except Exception:
-                                logger.exception("Error sending recovery alert")
-                        else:
-                            session.add(check)
-                            session.commit()
+                                try:
+                                    notify_degraded(check, project, reason=f"latency_ms={latency_ms:.1f}" if latency_ms is not None else None)
+                                    check.last_alerted_at = now
+                                    check.last_alert_type = EventType.DEGRADED
+                                    session.add(check)
+                                    session.commit()
+                                except Exception:
+                                    logger.exception("Error sending DEGRADED alert")
                     else:
+                        # still degraded: allow re-alerts after cooldown
+                        if check.alert_enabled:
+                            last_alert = check.last_alerted_at
+                            cooldown = check.alert_cooldown or 0
+                            if (last_alert is None) or ((now - last_alert).total_seconds() > cooldown):
+                                session.add(check)
+                                session.commit()
+                                try:
+                                    notify_degraded(check, project, reason="still degraded")
+                                    check.last_alerted_at = now
+                                    check.last_alert_type = EventType.DEGRADED
+                                    session.add(check)
+                                    session.commit()
+                                except Exception:
+                                    logger.exception("Error sending repeated DEGRADED alert")
+                else:
+                    if check.status in (CheckStatus.DOWN, CheckStatus.DEGRADED):
+                        check.status = CheckStatus.UP
+                        check.consecutive_failures = 0
+                        open_inc = session.exec(select(Incident).where(Incident.check_id == check.id, Incident.resolved_at == None)).first()
+                        if open_inc:
+                            open_inc.resolved_at = now
+                            open_inc.status = "resolved"
+                            session.add(open_inc)
+                            session.commit()
+                        event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.UP, message=f"check ok ({reason})", incident_id=(open_inc.id if open_inc else None))
+                        session.add(event)
+                        if check.alert_enabled:
+                            last_alert = check.last_alerted_at
+                            cooldown = check.alert_cooldown or 0
+                            if (last_alert is None) or ((now - last_alert).total_seconds() > cooldown):
+                                session.add(check)
+                                session.commit()
+                                try:
+                                    notify_recovery(check, project)
+                                    check.last_alerted_at = now
+                                    check.last_alert_type = EventType.UP
+                                    session.add(check)
+                                    session.commit()
+                                except Exception:
+                                    logger.exception("Error sending recovery alert")
+                    else:
+                        check.consecutive_failures = 0
                         session.add(check)
                         session.commit()
-                else:
-                    check.consecutive_failures = 0
-                    session.add(check)
-                    session.commit()
             else:
                 # failure
                 check.consecutive_failures = (check.consecutive_failures or 0) + 1
                 if check.status != CheckStatus.DOWN:
                     check.status = CheckStatus.DOWN
-                    # find or create open incident for this check
                     open_inc = session.exec(select(Incident).where(Incident.check_id == check.id, Incident.resolved_at == None)).first()
                     if not open_inc:
-                        # try to reuse a recent open incident in the same project (grouping)
                         candidate = session.exec(select(Incident).where(Incident.project_id == check.project_id, Incident.resolved_at == None).order_by(Incident.started_at.desc())).first()
                         if candidate and (now - candidate.started_at).total_seconds() <= GROUP_WINDOW:
                             open_inc = candidate
@@ -322,17 +408,16 @@ def scan_checks_once(session: Session):
                             session.add(open_inc)
                             session.commit()
                             session.refresh(open_inc)
-                    event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.HTTP_FAILURE, message=f"{reason}", incident_id=open_inc.id)
+                    event_type = EventType.HTTP_FAILURE if check.type == CheckType.HTTP else EventType.DOWN
+                    event = Event(check_id=check.id, project_id=check.project_id, event_type=event_type, message=f"{reason}", incident_id=open_inc.id)
                     session.add(event)
                     should_alert = check.alert_enabled and (check.consecutive_failures >= (check.alert_after or 1))
                     if should_alert:
-                        # suppress alerts during a maintenance window
                         if _in_maintenance(check, project, now):
-                            event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.HTTP_FAILURE, message=f"{reason} (suppressed due to maintenance)")
+                            event = Event(check_id=check.id, project_id=check.project_id, event_type=event_type, message=f"{reason} (suppressed due to maintenance)")
                             session.add(event)
                             session.add(check)
                             session.commit()
-                            # persist next_run below as usual
                             try:
                                 check.next_run = now + timedelta(seconds=interval)
                                 session.add(check)
@@ -354,19 +439,15 @@ def scan_checks_once(session: Session):
                                 try:
                                     notify_down(check, project, reason=reason)
                                     check.last_alerted_at = now
-                                    check.last_alert_type = EventType.HTTP_FAILURE
+                                    check.last_alert_type = event_type
                                     session.add(check)
                                     session.commit()
                                 except Exception:
                                     logger.exception("Error sending DOWN alert")
-                            else:
-                                session.add(check)
-                                session.commit()
                     else:
                         session.add(check)
                         session.commit()
                 else:
-                    # still failing: allow re-alerts after cooldown if threshold met
                     should_alert = check.alert_enabled and (check.consecutive_failures >= (check.alert_after or 1))
                     if should_alert:
                         if _in_maintenance(check, project, now):
@@ -375,7 +456,7 @@ def scan_checks_once(session: Session):
                         else:
                             throttled = _project_is_throttled(session, project, now)
                             if throttled:
-                                _trigger_escalation(session, project, now, "still down (http failure)", check=check)
+                                _trigger_escalation(session, project, now, "still down", check=check)
                                 session.add(check)
                                 session.commit()
                             else:
@@ -385,20 +466,16 @@ def scan_checks_once(session: Session):
                                     session.add(check)
                                     session.commit()
                                     try:
-                                        notify_down(check, project, reason="still down (http failure)")
+                                        notify_down(check, project, reason="still down")
                                         check.last_alerted_at = now
-                                        check.last_alert_type = EventType.HTTP_FAILURE
+                                        check.last_alert_type = event_type
                                         session.add(check)
                                         session.commit()
                                     except Exception:
                                         logger.exception("Error sending repeated DOWN alert")
-                                else:
-                                    session.add(check)
-                                    session.commit()
                     else:
                         session.add(check)
                         session.commit()
-            # persist next_run after executing the HTTP check
             try:
                 check.next_run = now + timedelta(seconds=interval)
                 session.add(check)

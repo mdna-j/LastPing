@@ -49,8 +49,19 @@ def checks_page():
     <h2>Create Check</h2>
     <div>
       <input id="name" placeholder="Name" />
-      <select id="type"><option value="heartbeat">heartbeat</option><option value="http">http</option></select>
+      <select id="type"><option value="heartbeat">heartbeat</option><option value="http">http</option><option value="tcp">tcp</option><option value="dns">dns</option></select>
       <input id="url" placeholder="URL (for http)" style="width:320px" />
+      <input id="host" placeholder="Host (for tcp/dns)" style="width:200px" />
+      <input id="port" placeholder="Port (tcp)" style="width:100px" />
+      <input id="dnsRecordType" placeholder="DNS type (A/AAAA)" style="width:140px" />
+      <input id="interval" placeholder="Interval (s)" style="width:120px" />
+      <input id="expectedInterval" placeholder="Expected (s)" style="width:140px" />
+      <input id="gracePeriod" placeholder="Grace (s)" style="width:120px" />
+      <input id="latencyThreshold" placeholder="Latency threshold ms" style="width:180px" />
+      <input id="region" placeholder="Region" style="width:140px" />
+      <label><input type="checkbox" id="alertEnabled" checked /> Alerts</label>
+      <input id="alertAfter" placeholder="Alert after" style="width:120px" />
+      <input id="alertCooldown" placeholder="Cooldown (s)" style="width:140px" />
       <button id="createBtn" onclick="createCheck()">Create</button>
     </div>
     <h2>Existing Checks</h2>
@@ -78,6 +89,17 @@ def checks_manage_page(check_id: int):
     <div>
       <input id="name" placeholder="Name"/>
       <input id="url" placeholder="URL" style="width:320px"/>
+      <input id="host" placeholder="Host" style="width:200px"/>
+      <input id="port" placeholder="Port" style="width:100px"/>
+      <input id="dnsRecordType" placeholder="DNS type (A/AAAA)" style="width:140px" />
+      <input id="interval" placeholder="Interval (s)" style="width:120px" />
+      <input id="expectedInterval" placeholder="Expected (s)" style="width:140px" />
+      <input id="gracePeriod" placeholder="Grace (s)" style="width:120px" />
+      <input id="latencyThreshold" placeholder="Latency threshold ms" style="width:180px" />
+      <input id="region" placeholder="Region" style="width:140px" />
+      <label><input type="checkbox" id="alertEnabled" /> Alerts</label>
+      <input id="alertAfter" placeholder="Alert after" style="width:120px" />
+      <input id="alertCooldown" placeholder="Cooldown (s)" style="width:140px" />
       <button id="saveBtn">Save</button>
       <button id="delBtn" style="margin-left:8px;display:none">Delete</button>
     </div>

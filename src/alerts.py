@@ -11,8 +11,10 @@ import json
 import logging
 import urllib.request
 import urllib.error
+import urllib.parse
 import time
 import smtplib
+import base64
 from email.message import EmailMessage
 from typing import Optional
 from datetime import datetime
@@ -56,6 +58,28 @@ def send_slack_message(content: str) -> bool:
 
 def send_generic_webhook(url: str, payload: dict) -> bool:
     return _post_json(url, payload)
+
+
+def send_sms(message: str, to: Optional[str] = None) -> bool:
+    """Send SMS via Twilio when configured."""
+    sid = os.environ.get("TWILIO_ACCOUNT_SID")
+    token = os.environ.get("TWILIO_AUTH_TOKEN")
+    from_num = os.environ.get("TWILIO_FROM")
+    to_num = to or os.environ.get("ALERT_SMS_TO")
+    if not sid or not token or not from_num or not to_num:
+        logger.debug("SMS not configured")
+        return False
+    url = f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json"
+    data = urllib.parse.urlencode({"From": from_num, "To": to_num, "Body": message}).encode("utf-8")
+    auth = base64.b64encode(f"{sid}:{token}".encode("utf-8")).decode("utf-8")
+    req = urllib.request.Request(url, data=data)
+    req.add_header("Authorization", f"Basic {auth}")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return 200 <= resp.getcode() < 300
+    except Exception:
+        logger.exception("Failed to send SMS")
+    return False
 
 
 def send_pagerduty_event(routing_key: str, summary: str, severity: str = "critical") -> bool:
@@ -197,8 +221,48 @@ def notify_down(check, project, reason: str = None) -> None:
             )
             send_discord_message(msg)
             send_slack_message(msg)
+        try:
+            sms_msg = f"[LastPing] DOWN: {project.name}/{check.name} {reason or ''}".strip()
+            send_sms(sms_msg)
+        except Exception:
+            pass
     except Exception:
         logger.exception("Failed to send DOWN notification")
+
+
+def notify_degraded(check, project, reason: str = None) -> None:
+    try:
+        now_iso = datetime.utcnow().isoformat() + "Z"
+        summary = f"Project {project.name} -- Check {check.name} is DEGRADED"
+        sent = False
+        if getattr(project, "discord_webhook_url", None):
+            embed = {"title": ":warning: DEGRADED", "description": summary, "color": 16753920, "timestamp": now_iso}
+            if reason:
+                embed["fields"] = [{"name": "Reason", "value": reason, "inline": False}]
+            _post_json(project.discord_webhook_url, {"embeds": [embed]})
+            sent = True
+        if getattr(project, "slack_webhook_url", None):
+            blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": f":warning: *{summary}*"}}]
+            if reason:
+                blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"*Reason:* {reason}"}]})
+            attachment = {"color": "#F5A623", "blocks": blocks}
+            _post_json(project.slack_webhook_url, {"attachments": [attachment]})
+            sent = True
+        if getattr(project, "generic_webhook_url", None):
+            payload = {"event": "degraded", "summary": summary, "details": {"reason": reason}, "timestamp": now_iso}
+            send_generic_webhook(project.generic_webhook_url, payload)
+            sent = True
+        if not sent:
+            msg = f":warning: **DEGRADED** -- Project `{project.name}` Check `{check.name}` {reason or ''}".strip()
+            send_discord_message(msg)
+            send_slack_message(msg)
+        try:
+            sms_msg = f"[LastPing] DEGRADED: {project.name}/{check.name} {reason or ''}".strip()
+            send_sms(sms_msg)
+        except Exception:
+            pass
+    except Exception:
+        logger.exception("Failed to send DEGRADED notification")
 
 
 def notify_recovery(check, project) -> None:
@@ -378,6 +442,11 @@ def notify_escalation(project, reason: str, check=None):
         subj = f"[LastPing] Escalation: project {project.name} alert threshold exceeded"
         body = f"Project {project.name} has exceeded its alert threshold. Latest reason: {reason}"
         sent = send_email(subj, body, to=esc) or sent
+    try:
+        sms_msg = f"[LastPing] ESCALATION: {project.name} {reason or ''}".strip()
+        sent = send_sms(sms_msg) or sent
+    except Exception:
+        pass
 
     if not sent:
         logger.debug("No escalation channels configured")
