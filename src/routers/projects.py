@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from sqlmodel import select, Session
 
 from ..db import get_session
-from ..models import Project as ProjectModel
+from ..models import Project as ProjectModel, AuditLog
 from ..security import generate_api_key, hash_api_key
 from ..deps import limit_by_api_key, get_audit_context
 import os
@@ -43,7 +43,7 @@ class ProjectRead(BaseModel):
 
 
 @router.post("/", status_code=status.HTTP_201_CREATED)
-def create_project(payload: ProjectCreate, session: Session = Depends(get_session)):
+def create_project(payload: ProjectCreate, request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), session: Session = Depends(get_session)):
     """Create a new project and return the project and API key."""
     # generate one-time plaintext API key and store only the hash
     api_key = generate_api_key()
@@ -52,6 +52,13 @@ def create_project(payload: ProjectCreate, session: Session = Depends(get_sessio
     session.add(project)
     session.commit()
     session.refresh(project)
+    try:
+        actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
+        al = AuditLog(actor=actor, action="create_project", target_type="project", target_id=project.id, details=None, actor_ip=actor_ip, user_agent=user_agent)
+        session.add(al)
+        session.commit()
+    except Exception:
+        pass
     # Caller must securely persist `api_key` — it will not be shown again.
     return {"project": ProjectRead.from_orm(project), "api_key": api_key}
 
@@ -96,7 +103,7 @@ def get_project_webhooks(project_id: int, session: Session = Depends(get_session
 
 
 @router.post("/{project_id}/webhooks", response_model=WebhookUpdate)
-def update_project_webhooks(project_id: int, payload: WebhookUpdate, _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
+def update_project_webhooks(project_id: int, payload: WebhookUpdate, request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
     project = session.get(ProjectModel, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -107,6 +114,13 @@ def update_project_webhooks(project_id: int, payload: WebhookUpdate, _rl = Depen
     session.add(project)
     session.commit()
     session.refresh(project)
+    try:
+        actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
+        al = AuditLog(actor=actor, action="update_project_webhooks", target_type="project", target_id=project_id, details=None, actor_ip=actor_ip, user_agent=user_agent)
+        session.add(al)
+        session.commit()
+    except Exception:
+        pass
     return payload
 
 
@@ -119,7 +133,7 @@ def get_project_maintenance(project_id: int, session: Session = Depends(get_sess
 
 
 @router.post("/{project_id}/maintenance", response_model=MaintenanceWindow)
-def set_project_maintenance(project_id: int, payload: MaintenanceWindow, _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
+def set_project_maintenance(project_id: int, payload: MaintenanceWindow, request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
     project = session.get(ProjectModel, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -128,6 +142,13 @@ def set_project_maintenance(project_id: int, payload: MaintenanceWindow, _rl = D
     session.add(project)
     session.commit()
     session.refresh(project)
+    try:
+        actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
+        al = AuditLog(actor=actor, action="set_project_maintenance", target_type="project", target_id=project_id, details=None, actor_ip=actor_ip, user_agent=user_agent)
+        session.add(al)
+        session.commit()
+    except Exception:
+        pass
     return payload
 
 

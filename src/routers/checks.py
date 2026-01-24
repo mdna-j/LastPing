@@ -9,13 +9,13 @@ drive scheduling and detection logic.
 from typing import List, Optional
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, status, Header
+from fastapi import APIRouter, Depends, HTTPException, status, Header, Request
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from ..db import get_session
-from ..models import Check as CheckModel, CheckType, CheckStatus, Project
-from ..deps import require_admin_or_project_api_key, get_current_user, require_project_role, limit_by_api_key
+from ..models import Check as CheckModel, CheckType, CheckStatus, Project, AuditLog
+from ..deps import require_admin_or_project_api_key, get_current_user, require_project_role, limit_by_api_key, get_audit_context
 
 
 router = APIRouter(prefix="/projects/{project_id}/checks", tags=["checks"])
@@ -46,7 +46,7 @@ class CheckRead(BaseModel):
 
 
 @router.post("/", status_code=status.HTTP_201_CREATED, response_model=CheckRead)
-def create_check(project_id: int, payload: CheckCreate, x_admin_token: Optional[str] = Header(None), authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
+def create_check(project_id: int, payload: CheckCreate, request: Request = None, x_admin_token: Optional[str] = Header(None), authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
     """Create a check for the given project.
 
     Names must be unique within a project. HTTP checks should provide a
@@ -80,6 +80,13 @@ def create_check(project_id: int, payload: CheckCreate, x_admin_token: Optional[
     session.add(check)
     session.commit()
     session.refresh(check)
+    try:
+        actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
+        al = AuditLog(actor=actor, action="create_check", target_type="check", target_id=check.id, details=None, actor_ip=actor_ip, user_agent=user_agent)
+        session.add(al)
+        session.commit()
+    except Exception:
+        pass
     return check
 
 
@@ -92,7 +99,7 @@ class CheckUpdate(BaseModel):
 
 
 @router.put("/{check_id}", response_model=CheckRead)
-def update_check(project_id: int, check_id: int, payload: CheckUpdate, x_admin_token: Optional[str] = Header(None), authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), session: Session = Depends(get_session)):
+def update_check(project_id: int, check_id: int, payload: CheckUpdate, request: Request = None, x_admin_token: Optional[str] = Header(None), authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), session: Session = Depends(get_session)):
     # require owner/admin/api-key
     try:
         project = require_admin_or_project_api_key(project_id, x_admin_token=x_admin_token, authorization=authorization, x_api_key=x_api_key, session=session)
@@ -119,11 +126,18 @@ def update_check(project_id: int, check_id: int, payload: CheckUpdate, x_admin_t
     session.add(check)
     session.commit()
     session.refresh(check)
+    try:
+        actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
+        al = AuditLog(actor=actor, action="update_check", target_type="check", target_id=check.id, details=None, actor_ip=actor_ip, user_agent=user_agent)
+        session.add(al)
+        session.commit()
+    except Exception:
+        pass
     return check
 
 
 @router.delete("/{check_id}")
-def delete_check(project_id: int, check_id: int, x_admin_token: Optional[str] = Header(None), authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), session: Session = Depends(get_session)):
+def delete_check(project_id: int, check_id: int, request: Request = None, x_admin_token: Optional[str] = Header(None), authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), session: Session = Depends(get_session)):
     try:
         project = require_admin_or_project_api_key(project_id, x_admin_token=x_admin_token, authorization=authorization, x_api_key=x_api_key, session=session)
     except HTTPException:
@@ -134,6 +148,13 @@ def delete_check(project_id: int, check_id: int, x_admin_token: Optional[str] = 
         raise HTTPException(status_code=404, detail="Check not found")
     session.delete(check)
     session.commit()
+    try:
+        actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
+        al = AuditLog(actor=actor, action="delete_check", target_type="check", target_id=check_id, details=None, actor_ip=actor_ip, user_agent=user_agent)
+        session.add(al)
+        session.commit()
+    except Exception:
+        pass
     return {"status": "deleted"}
 
 
@@ -166,7 +187,7 @@ def get_check_maintenance(project_id: int, check_id: int, session: Session = Dep
 
 
 @router.post("/{check_id}/maintenance", response_model=MaintenanceWindow)
-def set_check_maintenance(project_id: int, check_id: int, payload: MaintenanceWindow, x_admin_token: Optional[str] = Header(None), authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), session: Session = Depends(get_session)):
+def set_check_maintenance(project_id: int, check_id: int, payload: MaintenanceWindow, request: Request = None, x_admin_token: Optional[str] = Header(None), authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), session: Session = Depends(get_session)):
     try:
         project = require_admin_or_project_api_key(project_id, x_admin_token=x_admin_token, authorization=authorization, x_api_key=x_api_key, session=session)
     except HTTPException:
@@ -180,4 +201,11 @@ def set_check_maintenance(project_id: int, check_id: int, payload: MaintenanceWi
     session.add(check)
     session.commit()
     session.refresh(check)
+    try:
+        actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
+        al = AuditLog(actor=actor, action="set_check_maintenance", target_type="check", target_id=check.id, details=None, actor_ip=actor_ip, user_agent=user_agent)
+        session.add(al)
+        session.commit()
+    except Exception:
+        pass
     return payload

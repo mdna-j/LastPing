@@ -320,12 +320,66 @@ def send_email(subject: str, body: str, to: Optional[str] = None) -> bool:
     return False
 
 
-def notify_escalation(project, reason: str):
+def notify_escalation(project, reason: str, check=None):
+    """Notify escalation via project webhooks and optional email."""
+    sent = False
+    now_iso = datetime.utcnow().isoformat() + "Z"
+    summary = f"Escalation: project {project.name} alert threshold exceeded"
+    details = {"project": project.name, "reason": reason, "timestamp": now_iso}
+    if check is not None:
+        details.update({"check": getattr(check, "name", None), "check_id": getattr(check, "id", None)})
+
+    if getattr(project, "discord_webhook_url", None):
+        embed = {
+            "title": ":warning: ESCALATION",
+            "description": summary,
+            "color": 16753920,
+            "timestamp": now_iso,
+            "fields": [{"name": "Reason", "value": reason or "n/a", "inline": False}],
+        }
+        if check is not None:
+            embed["fields"].append({"name": "Check", "value": getattr(check, "name", "n/a"), "inline": True})
+        _post_json(project.discord_webhook_url, {"embeds": [embed]})
+        sent = True
+
+    if getattr(project, "slack_webhook_url", None):
+        blocks = [
+            {"type": "section", "text": {"type": "mrkdwn", "text": f":warning: *{summary}*"}},
+            {"type": "section", "fields": [{"type": "mrkdwn", "text": f"*Reason:* {reason or 'n/a'}"}]},
+        ]
+        if check is not None:
+            blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"*Check:* {getattr(check, 'name', 'n/a')}"}]})
+        attachment = {"color": "#F5A623", "blocks": blocks}
+        _post_json(project.slack_webhook_url, {"attachments": [attachment]})
+        sent = True
+
+    if getattr(project, "pagerduty_integration_key", None):
+        pd_payload = {
+            "routing_key": project.pagerduty_integration_key,
+            "event_action": "trigger",
+            "payload": {
+                "summary": summary,
+                "severity": "critical",
+                "source": project.name,
+                "timestamp": now_iso,
+                "custom_details": details,
+            },
+        }
+        _post_json("https://events.pagerduty.com/v2/enqueue", pd_payload)
+        sent = True
+
+    if getattr(project, "generic_webhook_url", None):
+        payload = {"event": "escalation", "summary": summary, "details": details}
+        send_generic_webhook(project.generic_webhook_url, payload)
+        sent = True
+
     esc = os.environ.get("ALERT_ESCALATION_EMAIL")
-    if not esc:
-        logger.debug("No escalation email configured")
-        return False
-    subj = f"[LastPing] Escalation: project {project.name} alert threshold exceeded"
-    body = f"Project {project.name} has exceeded its alert threshold. Latest reason: {reason}"
-    return send_email(subj, body, to=esc)
+    if esc:
+        subj = f"[LastPing] Escalation: project {project.name} alert threshold exceeded"
+        body = f"Project {project.name} has exceeded its alert threshold. Latest reason: {reason}"
+        sent = send_email(subj, body, to=esc) or sent
+
+    if not sent:
+        logger.debug("No escalation channels configured")
+    return sent
     

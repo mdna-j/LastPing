@@ -90,14 +90,14 @@ def _project_is_throttled(session: Session, project: Project, now: datetime) -> 
     return len(recent_bad) >= pr_count
 
 
-def _trigger_escalation(session: Session, project: Project, now: datetime, reason: str):
+def _trigger_escalation(session: Session, project: Project, now: datetime, reason: str, check: Check | None = None):
     try:
         from .alerts import notify_escalation
 
         last_es = getattr(project, "last_escalated_at", None)
         window = getattr(project, "alert_rate_limit_window", 0) or 0
         if (last_es is None) or ((now - last_es).total_seconds() > window):
-            ok = notify_escalation(project, reason)
+            ok = notify_escalation(project, reason, check=check)
             project.last_escalated_at = now
             session.add(project)
             session.commit()
@@ -160,7 +160,7 @@ def scan_checks_once(session: Session):
                         # project-level throttling/escalation
                         throttled = _project_is_throttled(session, project, now)
                         if throttled:
-                            _trigger_escalation(session, project, now, "missed heartbeat")
+                            _trigger_escalation(session, project, now, "missed heartbeat", check=check)
                             session.add(check)
                             session.commit()
                         else:
@@ -194,7 +194,7 @@ def scan_checks_once(session: Session):
                             continue
                         throttled = _project_is_throttled(session, project, now)
                         if throttled:
-                            _trigger_escalation(session, project, now, "still down (missed heartbeat)")
+                            _trigger_escalation(session, project, now, "still down (missed heartbeat)", check=check)
                             session.add(check)
                             session.commit()
                         else:
@@ -342,7 +342,7 @@ def scan_checks_once(session: Session):
                             continue
                         throttled = _project_is_throttled(session, project, now)
                         if throttled:
-                            _trigger_escalation(session, project, now, reason)
+                            _trigger_escalation(session, project, now, reason, check=check)
                             session.add(check)
                             session.commit()
                         else:
@@ -375,7 +375,7 @@ def scan_checks_once(session: Session):
                         else:
                             throttled = _project_is_throttled(session, project, now)
                             if throttled:
-                                _trigger_escalation(session, project, now, "still down (http failure)")
+                                _trigger_escalation(session, project, now, "still down (http failure)", check=check)
                                 session.add(check)
                                 session.commit()
                             else:

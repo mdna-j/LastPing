@@ -244,6 +244,52 @@ def test_alert_suppression(tmp_path, monkeypatch):
         assert calls['n'] == 1
 
 
+def test_realert_still_down(tmp_path, monkeypatch):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_realert.sqlite'}"
+
+    from sqlmodel import Session
+    from src import db as dbmod
+    from src.models import Project, Check, CheckType, CheckStatus
+    from src import worker
+
+    dbmod.create_db_and_tables()
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="proj_realert")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        old = datetime.utcnow() - timedelta(hours=2)
+        check = Check(
+            project_id=project.id,
+            name="hb_realert",
+            type=CheckType.HEARTBEAT,
+            expected_interval=60,
+            grace_period=10,
+            last_ping=old,
+            status=CheckStatus.UP,
+            alert_enabled=True,
+            alert_after=1,
+            alert_cooldown=0,
+        )
+        session.add(check)
+        session.commit()
+
+        calls = []
+
+        def fake_notify_down(chk, proj, reason=None):
+            calls.append(reason)
+
+        monkeypatch.setattr(worker, 'notify_down', fake_notify_down)
+
+        worker.scan_checks_once(session)
+        worker.scan_checks_once(session)
+
+        assert len(calls) >= 2
+        assert any("still down" in (r or "") for r in calls)
+
+
 def test_http_check_scheduling(tmp_path, monkeypatch):
     os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db5.sqlite'}"
 

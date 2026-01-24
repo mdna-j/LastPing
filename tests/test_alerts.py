@@ -71,7 +71,7 @@ def test_project_throttle_escalation(tmp_path, monkeypatch):
 
         called = {}
 
-        def fake_notify_escalation(proj, reason):
+        def fake_notify_escalation(proj, reason, check=None):
             called['esc'] = reason
             return True
 
@@ -80,3 +80,26 @@ def test_project_throttle_escalation(tmp_path, monkeypatch):
         worker.scan_checks_once(session)
 
         assert 'esc' in called
+
+
+def test_notify_escalation_uses_project_webhooks(monkeypatch):
+    from src import alerts
+
+    calls = []
+
+    def fake_post_json(url, payload, timeout=10):
+        calls.append((url, payload))
+        return True
+
+    monkeypatch.setattr(alerts, "_post_json", fake_post_json)
+
+    class DummyProject:
+        name = "projx"
+        discord_webhook_url = "https://discord.test/hook"
+        slack_webhook_url = None
+        pagerduty_integration_key = None
+        generic_webhook_url = None
+
+    ok = alerts.notify_escalation(DummyProject(), "threshold exceeded")
+    assert ok
+    assert calls
