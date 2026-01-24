@@ -1,4 +1,8 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, HTTPException
+from sqlmodel import Session, select
+
+from ..db import get_session
+from ..models import Project, Check, Event, Incident
 
 router = APIRouter(prefix="/ui", tags=["ui"])
 
@@ -143,3 +147,64 @@ def snapshots_page():
     </body>
     </html>
     """
+
+
+@router.get("/status/{project_id}")
+def public_status_page(project_id: int):
+    return f"""
+    <html>
+    <head>
+      <title>Project Status</title>
+      <meta name="viewport" content="width=device-width,initial-scale=1" />
+      <link rel="stylesheet" href="/static/css/ui.css" />
+    </head>
+    <body>
+    <h1>Project Status</h1>
+    <div id="statusRoot" data-project-id="{project_id}"></div>
+    <script src="/static/js/status.js"></script>
+    </body>
+    </html>
+    """
+
+
+@router.get("/status/{project_id}/data")
+def public_status_data(project_id: int, session: Session = Depends(get_session)):
+    project = session.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    checks = session.exec(select(Check).where(Check.project_id == project_id)).all()
+    open_incidents = session.exec(select(Incident).where(Incident.project_id == project_id, Incident.resolved_at == None)).all()
+
+    out_checks = []
+    for c in checks:
+        last_event = session.exec(
+            select(Event).where(Event.project_id == project_id, Event.check_id == c.id).order_by(Event.created_at.desc())
+        ).first()
+        out_checks.append({
+            "id": c.id,
+            "name": c.name,
+            "type": c.type,
+            "status": c.status,
+            "last_ping": c.last_ping.isoformat() if c.last_ping else None,
+            "last_event": {
+                "type": last_event.event_type,
+                "message": last_event.message,
+                "created_at": last_event.created_at.isoformat(),
+            } if last_event else None,
+        })
+
+    incidents_out = []
+    for inc in open_incidents:
+        incidents_out.append({
+            "id": inc.id,
+            "check_id": inc.check_id,
+            "started_at": inc.started_at.isoformat(),
+            "status": inc.status,
+        })
+
+    return {
+        "project": {"id": project.id, "name": project.name},
+        "checks": out_checks,
+        "open_incidents": incidents_out,
+    }

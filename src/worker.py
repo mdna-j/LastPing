@@ -185,8 +185,38 @@ def scan_checks_once(session: Session):
                         session.commit()
                 else:
                     check.consecutive_failures = (check.consecutive_failures or 0) + 1
-                    session.add(check)
-                    session.commit()
+                    # still down: allow re-alerts after cooldown if threshold met
+                    should_alert = check.alert_enabled and (check.consecutive_failures >= (check.alert_after or 1))
+                    if should_alert:
+                        if _in_maintenance(check, project, now):
+                            session.add(check)
+                            session.commit()
+                            continue
+                        throttled = _project_is_throttled(session, project, now)
+                        if throttled:
+                            _trigger_escalation(session, project, now, "still down (missed heartbeat)")
+                            session.add(check)
+                            session.commit()
+                        else:
+                            last_alert = check.last_alerted_at
+                            cooldown = check.alert_cooldown or 0
+                            if (last_alert is None) or ((now - last_alert).total_seconds() > cooldown):
+                                session.add(check)
+                                session.commit()
+                                try:
+                                    notify_down(check, project, reason="still down (missed heartbeat)")
+                                    check.last_alerted_at = now
+                                    check.last_alert_type = EventType.DOWN
+                                    session.add(check)
+                                    session.commit()
+                                except Exception:
+                                    logger.exception("Error sending repeated DOWN alert")
+                            else:
+                                session.add(check)
+                                session.commit()
+                    else:
+                        session.add(check)
+                        session.commit()
             else:
                 if check.status == CheckStatus.DOWN:
                     check.status = CheckStatus.UP
@@ -336,8 +366,38 @@ def scan_checks_once(session: Session):
                         session.add(check)
                         session.commit()
                 else:
-                    session.add(check)
-                    session.commit()
+                    # still failing: allow re-alerts after cooldown if threshold met
+                    should_alert = check.alert_enabled and (check.consecutive_failures >= (check.alert_after or 1))
+                    if should_alert:
+                        if _in_maintenance(check, project, now):
+                            session.add(check)
+                            session.commit()
+                        else:
+                            throttled = _project_is_throttled(session, project, now)
+                            if throttled:
+                                _trigger_escalation(session, project, now, "still down (http failure)")
+                                session.add(check)
+                                session.commit()
+                            else:
+                                last_alert = check.last_alerted_at
+                                cooldown = check.alert_cooldown or 0
+                                if (last_alert is None) or ((now - last_alert).total_seconds() > cooldown):
+                                    session.add(check)
+                                    session.commit()
+                                    try:
+                                        notify_down(check, project, reason="still down (http failure)")
+                                        check.last_alerted_at = now
+                                        check.last_alert_type = EventType.HTTP_FAILURE
+                                        session.add(check)
+                                        session.commit()
+                                    except Exception:
+                                        logger.exception("Error sending repeated DOWN alert")
+                                else:
+                                    session.add(check)
+                                    session.commit()
+                    else:
+                        session.add(check)
+                        session.commit()
             # persist next_run after executing the HTTP check
             try:
                 check.next_run = now + timedelta(seconds=interval)
