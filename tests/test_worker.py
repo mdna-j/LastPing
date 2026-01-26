@@ -405,3 +405,68 @@ def test_degraded_latency_transition(tmp_path, monkeypatch):
         assert check.status == CheckStatus.DEGRADED
         events = session.exec(select(Event).where(Event.check_id == check.id)).all()
         assert any(e.event_type == EventType.DEGRADED for e in events)
+
+
+def test_tcp_and_dns_checks(tmp_path, monkeypatch):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_tcp_dns.sqlite'}"
+
+    from sqlmodel import Session
+    from src import db as dbmod
+    from src.models import Project, Check, CheckType, CheckStatus
+    from src import worker
+
+    dbmod.create_db_and_tables()
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="proj_tcp_dns")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        tcp_check = Check(project_id=project.id, name="tcp1", type=CheckType.TCP, host="example.com", port=443, status=CheckStatus.UP)
+        dns_check = Check(project_id=project.id, name="dns1", type=CheckType.DNS, host="example.com", dns_record_type="A", status=CheckStatus.UP)
+        session.add(tcp_check)
+        session.add(dns_check)
+        session.commit()
+
+        monkeypatch.setattr(worker, "_tcp_check", lambda host, port, timeout: (True, "tcp_ok", 10.0))
+        monkeypatch.setattr(worker, "_dns_check", lambda host, record_type=None: (True, "dns_ok", 5.0))
+
+        worker.scan_checks_once(session)
+
+        session.refresh(tcp_check)
+        session.refresh(dns_check)
+        assert tcp_check.last_ping is not None
+        assert dns_check.last_ping is not None
+
+
+def test_region_filtering(tmp_path, monkeypatch):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_region.sqlite'}"
+    os.environ["WORKER_REGION"] = "us-east"
+
+    from sqlmodel import Session
+    from src import db as dbmod
+    from src.models import Project, Check, CheckType, CheckStatus
+    from src import worker
+
+    dbmod.create_db_and_tables()
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="proj_region")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        skip_check = Check(project_id=project.id, name="http_skip", type=CheckType.HTTP, url="http://example.ok/health", region="eu-west", status=CheckStatus.UP)
+        session.add(skip_check)
+        session.commit()
+
+        def fail_if_called(*args, **kwargs):
+            raise AssertionError("Check should have been skipped for region mismatch")
+
+        monkeypatch.setattr(worker, "_http_check", fail_if_called)
+
+        worker.scan_checks_once(session)
+
+        session.refresh(skip_check)
+        assert skip_check.last_ping is None

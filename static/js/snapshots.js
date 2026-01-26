@@ -189,6 +189,23 @@ function showApiKey(){
   if(!raw){ alert('No saved API key'); return }
   document.getElementById('apiKey').value = raw;
 }
+async function openAvailability(){
+  const pid = document.getElementById('projectId').value || '1';
+  const rawApi = document.getElementById('apiKey').value || null;
+  const apiKey = (rawApi === '******' || rawApi === 'â€¢â€¢â€¢â€¢â€¢â€¢') ? window._savedApiKey || null : rawApi;
+  const start = document.getElementById('start').value || null;
+  const end = document.getElementById('end').value || null;
+  const params = new URLSearchParams();
+  if(start) params.set('start', start);
+  if(end) params.set('end', end);
+  const headers = {};
+  if(apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+  const res = await fetch(`/projects/${pid}/metrics/availability?${params.toString()}`, {headers});
+  if(!res.ok){ alert('Failed to load availability'); return }
+  const data = await res.json();
+  const w = window.open('about:blank');
+  if(w){ w.document.write('<pre>' + JSON.stringify(data, null, 2) + '</pre>'); }
+}
 window.loadSnapshots = loadSnapshots;
 document.addEventListener('DOMContentLoaded', ()=>{ const b = document.getElementById('loadSnapshotsBtn'); if(b) b.addEventListener('click', ()=>{ if(!isIsoTimestamp(document.getElementById('start').value) || !isIsoTimestamp(document.getElementById('end').value)){ if(document.getElementById('start').value || document.getElementById('end').value){ alert('Start/end must be valid ISO timestamps (YYYY-MM-DDTHH:MM:SS)'); return } } loadSnapshots(); }); loadSnapshots(); });
 document.addEventListener('DOMContentLoaded', ()=>{ loadPrefs(); const s = document.getElementById('savePrefsBtn'); if(s) s.addEventListener('click', savePrefs); const e = document.getElementById('exportCsvBtn'); if(e) e.addEventListener('click', exportCsv); const api = document.getElementById('apiKey'); if(api) api.addEventListener('change', loadChecks); const pid = document.getElementById('projectId'); if(pid) pid.addEventListener('change', loadChecks); const presets = document.createElement('div'); presets.style.marginTop='8px'; presets.innerHTML = '<button class="btn" id="p1h">Last 1h</button> <button class="btn" id="p6h">Last 6h</button> <button class="btn" id="p24h">Last 24h</button> <button class="btn" id="p7d">Last 7d</button>'; document.body.insertBefore(presets, document.getElementById('list'));
@@ -196,4 +213,6 @@ document.addEventListener('DOMContentLoaded', ()=>{ loadPrefs(); const s = docum
   document.getElementById('p6h').addEventListener('click', ()=>applyPreset(6));
   document.getElementById('p24h').addEventListener('click', ()=>applyPreset(24));
   document.getElementById('p7d').addEventListener('click', ()=>applyPreset(24*7));
+  const avail = document.getElementById('availabilityBtn');
+  if(avail) avail.addEventListener('click', openAvailability);
 });

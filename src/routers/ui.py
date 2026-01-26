@@ -159,6 +159,7 @@ def snapshots_page():
       <label>Start: <input id="start" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
       <label>End: <input id="end" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
       <button id="loadSnapshotsBtn" class="btn">Load</button>
+      <button id="availabilityBtn" class="btn">Availability</button>
       <button id="savePrefsBtn" class="btn">Save Prefs</button>
       <button id="exportCsvBtn" class="btn">Export CSV</button>
     </div>
