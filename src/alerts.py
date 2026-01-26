@@ -22,6 +22,26 @@ from datetime import datetime
 logger = logging.getLogger("lastping.alerts")
 
 
+def _sms_allowed(project) -> bool:
+    enabled = getattr(project, "sms_enabled", None)
+    if enabled is None:
+        return bool(os.environ.get("ALERT_SMS_TO"))
+    return bool(enabled)
+
+
+def _sms_to(project) -> Optional[str]:
+    return getattr(project, "sms_to", None)
+
+
+def _oncall_allowed(project) -> bool:
+    enabled = getattr(project, "oncall_enabled", None)
+    return bool(enabled)
+
+
+def _oncall_email(project) -> Optional[str]:
+    return getattr(project, "oncall_email", None)
+
+
 def _post_json(url: str, payload: dict, timeout: int = 10) -> bool:
     if not url:
         logger.debug("No webhook URL configured")
@@ -222,8 +242,16 @@ def notify_down(check, project, reason: str = None) -> None:
             send_discord_message(msg)
             send_slack_message(msg)
         try:
-            sms_msg = f"[LastPing] DOWN: {project.name}/{check.name} {reason or ''}".strip()
-            send_sms(sms_msg)
+            if _sms_allowed(project):
+                sms_msg = f"[LastPing] DOWN: {project.name}/{check.name} {reason or ''}".strip()
+                send_sms(sms_msg, to=_sms_to(project))
+        except Exception:
+            pass
+        try:
+            if _oncall_allowed(project) and _oncall_email(project):
+                subj = f"[LastPing] DOWN: {project.name}/{check.name}"
+                body = f"Project {project.name} check {check.name} is DOWN. {reason or ''}".strip()
+                send_email(subj, body, to=_oncall_email(project))
         except Exception:
             pass
     except Exception:
@@ -257,8 +285,16 @@ def notify_degraded(check, project, reason: str = None) -> None:
             send_discord_message(msg)
             send_slack_message(msg)
         try:
-            sms_msg = f"[LastPing] DEGRADED: {project.name}/{check.name} {reason or ''}".strip()
-            send_sms(sms_msg)
+            if _sms_allowed(project):
+                sms_msg = f"[LastPing] DEGRADED: {project.name}/{check.name} {reason or ''}".strip()
+                send_sms(sms_msg, to=_sms_to(project))
+        except Exception:
+            pass
+        try:
+            if _oncall_allowed(project) and _oncall_email(project):
+                subj = f"[LastPing] DEGRADED: {project.name}/{check.name}"
+                body = f"Project {project.name} check {check.name} is DEGRADED. {reason or ''}".strip()
+                send_email(subj, body, to=_oncall_email(project))
         except Exception:
             pass
     except Exception:
@@ -443,8 +479,16 @@ def notify_escalation(project, reason: str, check=None):
         body = f"Project {project.name} has exceeded its alert threshold. Latest reason: {reason}"
         sent = send_email(subj, body, to=esc) or sent
     try:
-        sms_msg = f"[LastPing] ESCALATION: {project.name} {reason or ''}".strip()
-        sent = send_sms(sms_msg) or sent
+        if _sms_allowed(project):
+            sms_msg = f"[LastPing] ESCALATION: {project.name} {reason or ''}".strip()
+            sent = send_sms(sms_msg, to=_sms_to(project)) or sent
+    except Exception:
+        pass
+    try:
+        if _oncall_allowed(project) and _oncall_email(project):
+            subj = f"[LastPing] ESCALATION: {project.name}"
+            body = f"Project {project.name} escalation: {reason}"
+            sent = send_email(subj, body, to=_oncall_email(project)) or sent
     except Exception:
         pass
 

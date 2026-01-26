@@ -91,6 +91,13 @@ class SloSettings(BaseModel):
     sla_target: Optional[float] = None
 
 
+class AlertSettings(BaseModel):
+    sms_enabled: Optional[bool] = None
+    sms_to: Optional[str] = None
+    oncall_enabled: Optional[bool] = None
+    oncall_email: Optional[str] = None
+
+
 class MaintenanceWindow(BaseModel):
     maintenance_starts_at: Optional[datetime] = None
     maintenance_ends_at: Optional[datetime] = None
@@ -253,3 +260,47 @@ def set_project_slo(project_id: int, payload: SloSettings, request: Request = No
     except Exception:
         pass
     return SloSettings(slo_target=project.slo_target, sla_target=project.sla_target)
+
+
+@router.get("/{project_id}/alert-settings", response_model=AlertSettings)
+def get_project_alert_settings(project_id: int, session: Session = Depends(get_session)):
+    project = session.get(ProjectModel, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return AlertSettings(
+        sms_enabled=project.sms_enabled,
+        sms_to=project.sms_to,
+        oncall_enabled=project.oncall_enabled,
+        oncall_email=project.oncall_email,
+    )
+
+
+@router.post("/{project_id}/alert-settings", response_model=AlertSettings)
+def set_project_alert_settings(project_id: int, payload: AlertSettings, request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
+    project = session.get(ProjectModel, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if payload.sms_enabled is not None:
+        project.sms_enabled = payload.sms_enabled
+    if payload.sms_to is not None:
+        project.sms_to = payload.sms_to
+    if payload.oncall_enabled is not None:
+        project.oncall_enabled = payload.oncall_enabled
+    if payload.oncall_email is not None:
+        project.oncall_email = payload.oncall_email
+    session.add(project)
+    session.commit()
+    session.refresh(project)
+    try:
+        actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
+        al = AuditLog(actor=actor, action="set_project_alert_settings", target_type="project", target_id=project_id, details=None, actor_ip=actor_ip, user_agent=user_agent)
+        session.add(al)
+        session.commit()
+    except Exception:
+        pass
+    return AlertSettings(
+        sms_enabled=project.sms_enabled,
+        sms_to=project.sms_to,
+        oncall_enabled=project.oncall_enabled,
+        oncall_email=project.oncall_email,
+    )

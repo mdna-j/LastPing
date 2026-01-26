@@ -155,6 +155,7 @@ def snapshots_page():
       <label>API Key: <input id="apiKey" placeholder="optional" style="width:240px"/></label>
       <label><input type="checkbox" id="rememberApiKey" /> Remember API Key</label>
       <button id="showApiKeyBtn" class="btn">Show</button>
+      <a id="settingsLink" class="btn" href="/ui/projects/1/settings">Settings</a>
       <label>Check: <select id="checkId" style="width:120px"><option value="">(all)</option></select></label>
       <label>Start: <input id="start" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
       <label>End: <input id="end" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
@@ -167,6 +168,43 @@ def snapshots_page():
     <div style="margin-top:12px"><canvas id="uptimeChart" width="800" height="240"></canvas></div>
     <script src="/static/js/vendor/chart.min.js"></script>
     <script src="/static/js/snapshots.js"></script>
+    </body>
+    </html>
+    """
+
+
+@router.get("/projects/{project_id}/settings")
+def project_settings_page(project_id: int):
+    return f"""
+    <html>
+    <head>
+      <title>Project Settings</title>
+      <meta name="viewport" content="width=device-width,initial-scale=1" />
+      <link rel="stylesheet" href="/static/css/ui.css" />
+    </head>
+    <body>
+    <h1>Project Settings</h1>
+    <div class="row">
+      <label>Project: <input id="projectId" value="{project_id}" style="width:80px"/></label>
+      <label>API Key: <input id="apiKey" placeholder="optional" style="width:240px"/></label>
+      <label>Admin token: <input id="adminToken" placeholder="optional" style="width:240px"/></label>
+      <button id="loadBtn" class="btn">Load</button>
+      <button id="saveBtn" class="btn">Save</button>
+    </div>
+    <h2>SLO / SLA</h2>
+    <div class="row">
+      <label>SLO target (%): <input id="sloTarget" placeholder="99.9" style="width:120px"/></label>
+      <label>SLA target (%): <input id="slaTarget" placeholder="99.5" style="width:120px"/></label>
+    </div>
+    <h2>On-call / SMS</h2>
+    <div class="row">
+      <label><input type="checkbox" id="smsEnabled" /> SMS enabled</label>
+      <label>SMS To: <input id="smsTo" placeholder="+15551234567" style="width:180px"/></label>
+      <label><input type="checkbox" id="oncallEnabled" /> On-call email enabled</label>
+      <label>On-call Email: <input id="oncallEmail" placeholder="oncall@example.com" style="width:240px"/></label>
+    </div>
+    <div class="muted">SMS requires Twilio env vars (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM).</div>
+    <script src="/static/js/project_settings.js"></script>
     </body>
     </html>
     """

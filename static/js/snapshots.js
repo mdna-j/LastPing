@@ -189,6 +189,11 @@ function showApiKey(){
   if(!raw){ alert('No saved API key'); return }
   document.getElementById('apiKey').value = raw;
 }
+function updateSettingsLink(){
+  const pid = document.getElementById('projectId').value || '1';
+  const link = document.getElementById('settingsLink');
+  if(link) link.href = `/ui/projects/${pid}/settings`;
+}
 async function openAvailability(){
   const pid = document.getElementById('projectId').value || '1';
   const rawApi = document.getElementById('apiKey').value || null;
@@ -215,4 +220,6 @@ document.addEventListener('DOMContentLoaded', ()=>{ loadPrefs(); const s = docum
   document.getElementById('p7d').addEventListener('click', ()=>applyPreset(24*7));
   const avail = document.getElementById('availabilityBtn');
   if(avail) avail.addEventListener('click', openAvailability);
+  updateSettingsLink();
+  if(pid) pid.addEventListener('change', updateSettingsLink);
 });

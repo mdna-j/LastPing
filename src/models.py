@@ -43,6 +43,11 @@ class Project(SQLModel, table=True):
     # default SLO/SLA targets for reporting
     slo_target: Optional[float] = Field(default=99.9, description="target uptime percentage for SLO reporting")
     sla_target: Optional[float] = Field(default=99.5, description="target uptime percentage for SLA reporting")
+    # on-call and SMS alert settings (optional; when None fall back to env defaults)
+    sms_enabled: Optional[bool] = Field(default=None, description="enable SMS alerts for this project")
+    sms_to: Optional[str] = Field(default=None, description="destination phone number for SMS alerts")
+    oncall_enabled: Optional[bool] = Field(default=None, description="enable on-call email alerts for this project")
+    oncall_email: Optional[str] = Field(default=None, description="destination email address for on-call alerts")
     # optional project-level maintenance window (suppress alerts across project)
     maintenance_starts_at: Optional[datetime] = None
     maintenance_ends_at: Optional[datetime] = None
