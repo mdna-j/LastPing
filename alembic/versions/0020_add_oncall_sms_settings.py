@@ -1,7 +1,7 @@
 """add oncall and sms settings
 
-Revision ID: d2f1a3b4c5d6
-Revises: 95c78d065a98
+Revision ID: 0020_add_oncall_sms_settings
+Revises: 0019_add_advanced_checks_and_slo
 Create Date: 2026-01-25 22:05:00.000000
 
 """
@@ -10,8 +10,8 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision = 'd2f1a3b4c5d6'
-down_revision = '95c78d065a98'
+revision = '0020_add_oncall_sms_settings'
+down_revision = '0019_add_advanced_checks_and_slo'
 branch_labels = None
 depends_on = None
 

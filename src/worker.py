@@ -1,6 +1,7 @@
 import os
 import time
 import logging
+import json
 """
 Background worker: scans checks and executes monitoring logic.
 
@@ -20,8 +21,8 @@ from sqlmodel import Session, select
 
 from .db import engine
 from .models import Check, CheckType, CheckStatus, Event, EventType, Project, Incident
-from .alerts import notify_down, notify_recovery, notify_degraded
-from .models import UptimeSnapshot
+from .alerts import notify_down, notify_recovery, notify_degraded, send_email, send_sms
+from .models import UptimeSnapshot, CheckLease, RemediationHook, RemediationLog, OnCallAlert, OnCallEscalation, OnCallRotation, OnCallMember, AuditLog
 
 logger = logging.getLogger("lastping.worker")
 
@@ -143,6 +144,202 @@ def _is_degraded(check: Check, latency_ms: Optional[float]) -> bool:
     return latency_ms > thr
 
 
+def _worker_id() -> str:
+    return os.environ.get("WORKER_ID") or os.environ.get("WORKER_REGION") or socket.gethostname()
+
+
+def _acquire_lease(session: Session, check: Check, now: datetime) -> bool:
+    if os.environ.get("WORKER_LEASES", "1") == "0":
+        return True
+    lease_seconds = int(os.environ.get("WORKER_LEASE_SECONDS", "120"))
+    owner = _worker_id()
+    expires_at = now + timedelta(seconds=lease_seconds)
+    try:
+        lease = session.get(CheckLease, check.id)
+        if lease is None:
+            lease = CheckLease(check_id=check.id, lease_owner=owner, lease_expires_at=expires_at, updated_at=now)
+            session.add(lease)
+            session.commit()
+            return True
+        if lease.lease_expires_at is None or lease.lease_expires_at <= now or lease.lease_owner == owner:
+            lease.lease_owner = owner
+            lease.lease_expires_at = expires_at
+            lease.updated_at = now
+            session.add(lease)
+            session.commit()
+            return True
+        return False
+    except Exception:
+        logger.exception("Failed to acquire lease for check %s", getattr(check, "id", None))
+        return False
+
+
+def _trigger_remediation(session: Session, project: Project, check: Check, event_type: str, reason: Optional[str], now: datetime):
+    try:
+        hooks = session.exec(
+            select(RemediationHook).where(
+                RemediationHook.project_id == project.id,
+                RemediationHook.enabled == True,
+                RemediationHook.event_type == event_type,
+            )
+        ).all()
+        for hook in hooks:
+            if hook.check_id and hook.check_id != check.id:
+                continue
+            if hook.last_triggered_at and (now - hook.last_triggered_at).total_seconds() < (hook.cooldown_seconds or 0):
+                continue
+            payload = {
+                "project_id": project.id,
+                "project": project.name,
+                "check_id": check.id,
+                "check": check.name,
+                "event": event_type,
+                "reason": reason,
+                "timestamp": now.isoformat(),
+            }
+            status = "error"
+            code = None
+            msg = None
+            try:
+                method = (hook.method or "POST").upper()
+                data = json.dumps(payload).encode("utf-8") if method in ("POST", "PUT", "PATCH") else None
+                req = urllib.request.Request(hook.url, data=data, method=method)
+                req.add_header("Content-Type", "application/json")
+                if hook.secret:
+                    req.add_header("X-REMEDIATION-SECRET", hook.secret)
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    code = resp.getcode()
+                status = "ok" if code and 200 <= code < 300 else "error"
+            except Exception as exc:
+                msg = str(exc)
+            hook.last_triggered_at = now
+            session.add(hook)
+            log = RemediationLog(
+                hook_id=hook.id,
+                project_id=project.id,
+                check_id=check.id,
+                event_type=event_type,
+                status=status,
+                response_code=code,
+                message=msg,
+            )
+            session.add(log)
+            try:
+                al = AuditLog(actor="worker", action="trigger_remediation", target_type="remediation_hook", target_id=hook.id, details=f"check_id={check.id}", actor_ip=None, user_agent=None)
+                session.add(al)
+            except Exception:
+                pass
+            session.commit()
+    except Exception:
+        logger.exception("Error triggering remediation hooks for check %s", getattr(check, "id", None))
+
+
+def _current_rotation_member(session: Session, rotation: OnCallRotation, now: datetime) -> Optional[OnCallMember]:
+    members = session.exec(
+        select(OnCallMember).where(OnCallMember.rotation_id == rotation.id, OnCallMember.active == True).order_by(OnCallMember.order)
+    ).all()
+    if not members:
+        return None
+    interval = max(1, rotation.interval_minutes or 1)
+    elapsed = (now - rotation.start_at).total_seconds()
+    idx = int(elapsed // (interval * 60)) % len(members)
+    return members[idx]
+
+
+def _send_oncall_target(session: Session, project: Project, check: Check, alert: OnCallAlert, esc: OnCallEscalation, now: datetime) -> bool:
+    msg = f"[LastPing] {alert.event_type.upper()}: {project.name}/{check.name} {alert.message or ''}".strip()
+    try:
+        if esc.target_type == "rotation":
+            if not esc.rotation_id:
+                return False
+            rotation = session.get(OnCallRotation, esc.rotation_id)
+            if not rotation or not rotation.enabled:
+                return False
+            member = _current_rotation_member(session, rotation, now)
+            if not member:
+                return False
+            ok = False
+            if member.email:
+                ok = send_email(f"[LastPing] {project.name} alert", msg, to=member.email) or ok
+            if member.phone:
+                ok = send_sms(msg, to=member.phone) or ok
+            return ok
+        if esc.target_type == "email" and esc.target_value:
+            return send_email(f"[LastPing] {project.name} alert", msg, to=esc.target_value)
+        if esc.target_type == "sms" and esc.target_value:
+            return send_sms(msg, to=esc.target_value)
+    except Exception:
+        logger.exception("Error sending on-call notification")
+    return False
+
+
+def _ensure_oncall_alert(session: Session, project: Project, check: Check, event_type: str, message: Optional[str], now: datetime):
+    if not getattr(project, "oncall_enabled", False):
+        return
+    escs = session.exec(select(OnCallEscalation).where(OnCallEscalation.project_id == project.id, OnCallEscalation.enabled == True)).all()
+    if not escs:
+        return
+    existing = session.exec(select(OnCallAlert).where(OnCallAlert.project_id == project.id, OnCallAlert.check_id == check.id, OnCallAlert.status == "open")).first()
+    if existing:
+        return
+    alert = OnCallAlert(
+        project_id=project.id,
+        check_id=check.id,
+        event_type=event_type,
+        message=message,
+        status="open",
+        created_at=now,
+        escalation_level=0,
+        next_escalation_at=now,
+    )
+    session.add(alert)
+    session.commit()
+
+
+def _close_oncall_alerts(session: Session, check_id: int):
+    alerts = session.exec(select(OnCallAlert).where(OnCallAlert.check_id == check_id, OnCallAlert.status == "open")).all()
+    for alert in alerts:
+        alert.status = "closed"
+        session.add(alert)
+    session.commit()
+
+
+def _process_oncall_alerts(session: Session, now: datetime):
+    alerts = session.exec(select(OnCallAlert).where(OnCallAlert.status == "open", OnCallAlert.next_escalation_at <= now)).all()
+    for alert in alerts:
+        project = session.get(Project, alert.project_id)
+        check = session.get(Check, alert.check_id)
+        if not project or not check:
+            alert.status = "closed"
+            session.add(alert)
+            session.commit()
+            continue
+        escs = session.exec(
+            select(OnCallEscalation).where(OnCallEscalation.project_id == project.id, OnCallEscalation.enabled == True).order_by(OnCallEscalation.level)
+        ).all()
+        if not escs or alert.escalation_level >= len(escs):
+            alert.status = "closed"
+            session.add(alert)
+            session.commit()
+            continue
+        esc = escs[alert.escalation_level]
+        ok = _send_oncall_target(session, project, check, alert, esc, now)
+        if ok:
+            alert.last_notified_at = now
+            alert.escalation_level = alert.escalation_level + 1
+            delay = esc.delay_minutes or 0
+            alert.next_escalation_at = now + timedelta(minutes=max(delay, 1))
+            try:
+                al = AuditLog(actor="worker", action="oncall_notify", target_type="oncall_escalation", target_id=esc.id, details=f"alert_id={alert.id}", actor_ip=None, user_agent=None)
+                session.add(al)
+            except Exception:
+                pass
+        else:
+            alert.next_escalation_at = now + timedelta(minutes=5)
+        session.add(alert)
+        session.commit()
+
+
 def scan_checks_once(session: Session):
     # Load all checks and process each synchronously. The worker is
     # intentionally simple (single-threaded) to avoid race conditions
@@ -150,11 +347,16 @@ def scan_checks_once(session: Session):
     stmt = select(Check)
     results = session.exec(stmt).all()
     now = _now()
+    processed_oncall = False
     worker_region = os.environ.get("WORKER_REGION")
     for check in results:
         if worker_region and getattr(check, "region", None) and check.region != worker_region:
             continue
         project = session.get(Project, check.project_id)
+        if not project:
+            continue
+        if not _acquire_lease(session, check, now):
+            continue
 
         # HEARTBEAT checks are driven by client pings; worker only
         # marks them DOWN when the expected interval + grace window
@@ -186,6 +388,8 @@ def scan_checks_once(session: Session):
                             session.refresh(open_inc)
                     event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.DOWN, message="missed heartbeat", incident_id=open_inc.id)
                     session.add(event)
+                    _trigger_remediation(session, project, check, EventType.DOWN, "missed heartbeat", now)
+                    _ensure_oncall_alert(session, project, check, EventType.DOWN, "missed heartbeat", now)
                     # alerting: only send if enabled and threshold reached and cooldown passed
                     should_alert = check.alert_enabled and (check.consecutive_failures >= (check.alert_after or 1))
                     if should_alert:
@@ -269,6 +473,7 @@ def scan_checks_once(session: Session):
                         session.commit()
                     event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.UP, message="recovered", incident_id=(open_inc.id if open_inc else None))
                     session.add(event)
+                    _close_oncall_alerts(session, check.id)
                     # recovery alert: respect cooldown and enabled
                     if check.alert_enabled:
                         last_alert = check.last_alerted_at
@@ -333,6 +538,8 @@ def scan_checks_once(session: Session):
                         check.consecutive_failures = 0
                         event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.DEGRADED, message=f"latency_ms={latency_ms:.1f}" if latency_ms is not None else "degraded")
                         session.add(event)
+                        _trigger_remediation(session, project, check, EventType.DEGRADED, event.message, now)
+                        _ensure_oncall_alert(session, project, check, EventType.DEGRADED, event.message, now)
                         if check.alert_enabled:
                             last_alert = check.last_alerted_at
                             cooldown = check.alert_cooldown or 0
@@ -375,6 +582,7 @@ def scan_checks_once(session: Session):
                             session.commit()
                         event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.UP, message=f"check ok ({reason})", incident_id=(open_inc.id if open_inc else None))
                         session.add(event)
+                        _close_oncall_alerts(session, check.id)
                         if check.alert_enabled:
                             last_alert = check.last_alerted_at
                             cooldown = check.alert_cooldown or 0
@@ -411,6 +619,9 @@ def scan_checks_once(session: Session):
                     event_type = EventType.HTTP_FAILURE if check.type == CheckType.HTTP else EventType.DOWN
                     event = Event(check_id=check.id, project_id=check.project_id, event_type=event_type, message=f"{reason}", incident_id=open_inc.id)
                     session.add(event)
+                    rem_event = EventType.DOWN if event_type == EventType.HTTP_FAILURE else event_type
+                    _trigger_remediation(session, project, check, rem_event, reason, now)
+                    _ensure_oncall_alert(session, project, check, rem_event, reason, now)
                     should_alert = check.alert_enabled and (check.consecutive_failures >= (check.alert_after or 1))
                     if should_alert:
                         if _in_maintenance(check, project, now):
@@ -482,6 +693,13 @@ def scan_checks_once(session: Session):
                 session.commit()
             except Exception:
                 logger.exception("Error persisting next_run for check %s", getattr(check, 'id', None))
+
+        if not processed_oncall:
+            processed_oncall = True
+            try:
+                _process_oncall_alerts(session, now)
+            except Exception:
+                logger.exception("Error processing on-call alerts")
 
         # After processing checks, compute a short-term uptime/MTTR snapshot (last 24h)
         try:

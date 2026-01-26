@@ -269,3 +269,92 @@ class AdminCsrf(SQLModel, table=True):
     token: str = Field(index=True)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     expires_at: Optional[datetime] = None
+
+
+class CheckLease(SQLModel, table=True):
+    __tablename__ = "check_lease"
+    check_id: int = Field(primary_key=True, foreign_key="check.id")
+    lease_owner: Optional[str] = Field(default=None, index=True)
+    lease_expires_at: Optional[datetime] = Field(default=None)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class RemediationHook(SQLModel, table=True):
+    __tablename__ = "remediation_hook"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id")
+    check_id: Optional[int] = Field(default=None, foreign_key="check.id")
+    event_type: str = Field(description="down or degraded")
+    url: str
+    method: str = Field(default="POST")
+    enabled: bool = Field(default=True)
+    cooldown_seconds: int = Field(default=900)
+    last_triggered_at: Optional[datetime] = None
+    secret: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class RemediationLog(SQLModel, table=True):
+    __tablename__ = "remediation_log"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    hook_id: int = Field(foreign_key="remediation_hook.id")
+    project_id: int = Field(foreign_key="project.id")
+    check_id: Optional[int] = Field(default=None, foreign_key="check.id")
+    event_type: str
+    status: str
+    response_code: Optional[int] = None
+    message: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class EscalationTarget(str, Enum):
+    ROTATION = "rotation"
+    EMAIL = "email"
+    SMS = "sms"
+
+
+class OnCallRotation(SQLModel, table=True):
+    __tablename__ = "oncall_rotation"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id")
+    name: str
+    interval_minutes: int = Field(default=1440, description="rotation interval in minutes")
+    start_at: datetime = Field(default_factory=datetime.utcnow)
+    enabled: bool = Field(default=True)
+
+
+class OnCallMember(SQLModel, table=True):
+    __tablename__ = "oncall_member"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    rotation_id: int = Field(foreign_key="oncall_rotation.id")
+    name: str
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    order: int = Field(default=0)
+    active: bool = Field(default=True)
+
+
+class OnCallEscalation(SQLModel, table=True):
+    __tablename__ = "oncall_escalation"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id")
+    level: int = Field(default=0, index=True)
+    delay_minutes: int = Field(default=15)
+    target_type: str = Field(default=EscalationTarget.ROTATION.value)
+    rotation_id: Optional[int] = Field(default=None, foreign_key="oncall_rotation.id")
+    target_value: Optional[str] = None
+    enabled: bool = Field(default=True)
+
+
+class OnCallAlert(SQLModel, table=True):
+    __tablename__ = "oncall_alert"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id")
+    check_id: int = Field(foreign_key="check.id")
+    event_type: str
+    message: Optional[str] = None
+    status: str = Field(default="open")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    last_notified_at: Optional[datetime] = None
+    escalation_level: int = Field(default=0)
+    next_escalation_at: Optional[datetime] = None

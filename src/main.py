@@ -13,6 +13,8 @@ from .routers.incidents import router as incidents_router, public_router as inci
 from .routers.ui import router as ui_router
 from .routers.webhooks_fixed import router as webhooks_router
 from .routers.analytics import router as analytics_router
+from .routers.oncall import router as oncall_router
+from .routers.remediation import router as remediation_router
 
 
 app = FastAPI(title="LastPing API")
@@ -51,3 +53,5 @@ app.include_router(incidents_public_router)
 app.include_router(ui_router)
 app.include_router(webhooks_router)
 app.include_router(analytics_router)
+app.include_router(oncall_router)
+app.include_router(remediation_router)

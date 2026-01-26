@@ -1,6 +1,6 @@
 """add check fields and slo targets
 
-Revision ID: 95c78d065a98
+Revision ID: 0019_add_advanced_checks_and_slo
 Revises: 0018_add_audit_fields_and_backfill_group_id
 Create Date: 2026-01-25 21:16:02.415969
 
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision = '95c78d065a98'
+revision = '0019_add_advanced_checks_and_slo'
 down_revision = '0018_add_audit_fields_and_backfill_group_id'
 branch_labels = None
 depends_on = None

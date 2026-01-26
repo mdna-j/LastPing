@@ -190,6 +190,8 @@ def project_settings_page(project_id: int):
       <label>Admin token: <input id="adminToken" placeholder="optional" style="width:240px"/></label>
       <button id="loadBtn" class="btn">Load</button>
       <button id="saveBtn" class="btn">Save</button>
+      <a class="btn" href="/ui/projects/{project_id}/oncall">On-call</a>
+      <a class="btn" href="/ui/projects/{project_id}/remediation">Remediation</a>
     </div>
     <h2>SLO / SLA</h2>
     <div class="row">
@@ -205,6 +207,103 @@ def project_settings_page(project_id: int):
     </div>
     <div class="muted">SMS requires Twilio env vars (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM).</div>
     <script src="/static/js/project_settings.js"></script>
+    </body>
+    </html>
+    """
+
+
+@router.get("/projects/{project_id}/oncall")
+def oncall_page(project_id: int):
+    return f"""
+    <html>
+    <head>
+      <title>On-call</title>
+      <meta name="viewport" content="width=device-width,initial-scale=1" />
+      <link rel="stylesheet" href="/static/css/ui.css" />
+    </head>
+    <body>
+    <h1>On-call Management</h1>
+    <div class="row">
+      <label>Project: <input id="projectId" value="{project_id}" style="width:80px"/></label>
+      <label>API Key: <input id="apiKey" placeholder="optional" style="width:240px"/></label>
+      <label>Admin token: <input id="adminToken" placeholder="optional" style="width:240px"/></label>
+      <button id="refreshBtn" class="btn">Refresh</button>
+    </div>
+    <h2>Rotations</h2>
+    <div class="row">
+      <input id="rotName" placeholder="Rotation name" />
+      <input id="rotInterval" placeholder="Interval (min)" style="width:140px" />
+      <button id="addRotationBtn" class="btn">Add Rotation</button>
+    </div>
+    <div id="rotations"></div>
+    <h2>Members</h2>
+    <div class="row">
+      <input id="memberRotationId" placeholder="Rotation ID" style="width:140px" />
+      <input id="memberName" placeholder="Name" />
+      <input id="memberEmail" placeholder="Email" style="width:200px" />
+      <input id="memberPhone" placeholder="Phone" style="width:160px" />
+      <input id="memberOrder" placeholder="Order" style="width:80px" />
+      <button id="addMemberBtn" class="btn">Add Member</button>
+    </div>
+    <div id="members"></div>
+    <h2>Escalations</h2>
+    <div class="row">
+      <input id="escLevel" placeholder="Level" style="width:80px" />
+      <input id="escDelay" placeholder="Delay (min)" style="width:120px" />
+      <select id="escType">
+        <option value="rotation">rotation</option>
+        <option value="email">email</option>
+        <option value="sms">sms</option>
+      </select>
+      <input id="escRotationId" placeholder="Rotation ID" style="width:140px" />
+      <input id="escTarget" placeholder="Target (email/phone)" style="width:220px" />
+      <button id="addEscBtn" class="btn">Add Escalation</button>
+    </div>
+    <div id="escalations"></div>
+    <h2>Open Alerts</h2>
+    <div id="alerts"></div>
+    <script src="/static/js/oncall.js"></script>
+    </body>
+    </html>
+    """
+
+
+@router.get("/projects/{project_id}/remediation")
+def remediation_page(project_id: int):
+    return f"""
+    <html>
+    <head>
+      <title>Remediation Hooks</title>
+      <meta name="viewport" content="width=device-width,initial-scale=1" />
+      <link rel="stylesheet" href="/static/css/ui.css" />
+    </head>
+    <body>
+    <h1>Remediation Hooks</h1>
+    <div class="row">
+      <label>Project: <input id="projectId" value="{project_id}" style="width:80px"/></label>
+      <label>API Key: <input id="apiKey" placeholder="optional" style="width:240px"/></label>
+      <label>Admin token: <input id="adminToken" placeholder="optional" style="width:240px"/></label>
+      <button id="refreshBtn" class="btn">Refresh</button>
+    </div>
+    <h2>Create Hook</h2>
+    <div class="row">
+      <input id="hookCheckId" placeholder="Check ID (optional)" style="width:140px" />
+      <select id="hookEvent">
+        <option value="down">down</option>
+        <option value="degraded">degraded</option>
+      </select>
+      <input id="hookUrl" placeholder="URL" style="width:320px" />
+      <input id="hookMethod" placeholder="Method" style="width:100px" />
+      <input id="hookCooldown" placeholder="Cooldown (s)" style="width:140px" />
+      <input id="hookSecret" placeholder="Secret" style="width:160px" />
+      <label><input type="checkbox" id="hookEnabled" checked /> Enabled</label>
+      <button id="addHookBtn" class="btn">Add Hook</button>
+    </div>
+    <h2>Hooks</h2>
+    <div id="hooks"></div>
+    <h2>Logs</h2>
+    <div id="logs"></div>
+    <script src="/static/js/remediation.js"></script>
     </body>
     </html>
     """
