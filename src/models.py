@@ -105,7 +105,7 @@ class Check(SQLModel, table=True):
     # latency tracking
     latency_threshold_ms: Optional[int] = Field(default=None, description="latency threshold in ms for degraded state")
     last_latency_ms: Optional[float] = None
-    region: Optional[str] = Field(default=None, description="optional region label for distributed workers")
+    region: Optional[str] = Field(default=None, description="optional region label for distributed workers (comma-separated list or '*' for any)")
 
     status: str = Field(default=CheckStatus.UP)
     last_ping: Optional[datetime] = None

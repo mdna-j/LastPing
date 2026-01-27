@@ -2,15 +2,8 @@ name: SDK CI
 
 on:
   push:
-    paths:
-      - "lastping_sdk/**"
-      - "tests/test_sdk*.py"
-      - ".github/workflows/sdk_ci.yml"
   pull_request:
-    paths:
-      - "lastping_sdk/**"
-      - "tests/test_sdk*.py"
-      - ".github/workflows/sdk_ci.yml"
+  workflow_dispatch:
 
 jobs:
   sdk:

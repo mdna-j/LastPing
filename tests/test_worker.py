@@ -440,6 +440,101 @@ def test_tcp_and_dns_checks(tmp_path, monkeypatch):
         assert dns_check.last_ping is not None
 
 
+def test_tcp_dns_scheduling(tmp_path, monkeypatch):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_tcp_dns_sched.sqlite'}"
+
+    from sqlmodel import Session
+    from src import db as dbmod
+    from src.models import Project, Check, CheckType, CheckStatus
+    from src import worker
+
+    dbmod.create_db_and_tables()
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="proj_tcp_dns_sched")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        now = datetime.utcnow()
+        tcp_check = Check(project_id=project.id, name="tcp_sched", type=CheckType.TCP, host="example.com", port=443, status=CheckStatus.UP, interval=60, next_run=now + timedelta(seconds=300))
+        dns_check = Check(project_id=project.id, name="dns_sched", type=CheckType.DNS, host="example.com", dns_record_type="A", status=CheckStatus.UP, interval=60, next_run=now + timedelta(seconds=300))
+        session.add(tcp_check)
+        session.add(dns_check)
+        session.commit()
+
+        monkeypatch.setattr(worker, "_tcp_check", lambda *a, **k: (_ for _ in ()).throw(AssertionError("TCP should be skipped")))
+        monkeypatch.setattr(worker, "_dns_check", lambda *a, **k: (_ for _ in ()).throw(AssertionError("DNS should be skipped")))
+
+        worker.scan_checks_once(session)
+        session.refresh(tcp_check)
+        session.refresh(dns_check)
+        assert tcp_check.last_ping is None
+        assert dns_check.last_ping is None
+
+        tcp_check.next_run = datetime.utcnow() - timedelta(seconds=1)
+        dns_check.next_run = datetime.utcnow() - timedelta(seconds=1)
+        session.add(tcp_check)
+        session.add(dns_check)
+        session.commit()
+
+        monkeypatch.setattr(worker, "_tcp_check", lambda host, port, timeout: (True, "tcp_ok", 12.0))
+        monkeypatch.setattr(worker, "_dns_check", lambda host, record_type=None: (True, "dns_ok", 8.0))
+
+        worker.scan_checks_once(session)
+        session.refresh(tcp_check)
+        session.refresh(dns_check)
+        assert tcp_check.last_ping is not None
+        assert dns_check.last_ping is not None
+        assert tcp_check.next_run is not None
+        assert dns_check.next_run is not None
+
+
+def test_tcp_dns_failure(tmp_path, monkeypatch):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_tcp_dns_fail.sqlite'}"
+
+    from sqlmodel import Session, select
+    from src import db as dbmod
+    from src.models import Project, Check, CheckType, CheckStatus, Event, EventType
+    from src import worker
+
+    dbmod.create_db_and_tables()
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="proj_tcp_dns_fail")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        tcp_check = Check(project_id=project.id, name="tcp_fail", type=CheckType.TCP, host="example.com", port=443, status=CheckStatus.UP, alert_enabled=True, alert_after=1, alert_cooldown=0)
+        dns_check = Check(project_id=project.id, name="dns_fail", type=CheckType.DNS, host="example.com", dns_record_type="A", status=CheckStatus.UP, alert_enabled=True, alert_after=1, alert_cooldown=0)
+        session.add(tcp_check)
+        session.add(dns_check)
+        session.commit()
+        session.refresh(tcp_check)
+        session.refresh(dns_check)
+
+        monkeypatch.setattr(worker, "_tcp_check", lambda host, port, timeout: (False, "tcp_timeout", None))
+        monkeypatch.setattr(worker, "_dns_check", lambda host, record_type=None: (False, "dns_nxdomain", None))
+
+        called = {"reasons": []}
+
+        def fake_notify_down(chk, proj, reason=None):
+            called["reasons"].append(reason)
+
+        monkeypatch.setattr(worker, "notify_down", fake_notify_down)
+
+        worker.scan_checks_once(session)
+        session.refresh(tcp_check)
+        session.refresh(dns_check)
+        assert tcp_check.status == CheckStatus.DOWN
+        assert dns_check.status == CheckStatus.DOWN
+        evs = session.exec(select(Event).where(Event.project_id == project.id)).all()
+        assert any(e.event_type == EventType.DOWN for e in evs)
+        assert any("tcp_timeout" in (r or "") for r in called["reasons"])
+        assert any("dns_nxdomain" in (r or "") for r in called["reasons"])
+
+
 def test_region_filtering(tmp_path, monkeypatch):
     os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_region.sqlite'}"
     os.environ["WORKER_REGION"] = "us-east"
@@ -470,3 +565,91 @@ def test_region_filtering(tmp_path, monkeypatch):
 
         session.refresh(skip_check)
         assert skip_check.last_ping is None
+
+
+def test_region_list_allows(tmp_path, monkeypatch):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_region_list.sqlite'}"
+    os.environ["WORKER_REGION"] = "us-east"
+
+    from sqlmodel import Session
+    from src import db as dbmod
+    from src.models import Project, Check, CheckType, CheckStatus
+    from src import worker
+
+    dbmod.create_db_and_tables()
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="proj_region_list")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        allow_check = Check(project_id=project.id, name="http_allow", type=CheckType.HTTP, url="http://example.ok/health", region="us-east, eu-west", status=CheckStatus.UP)
+        session.add(allow_check)
+        session.commit()
+
+        monkeypatch.setattr(worker, "_http_check", lambda url, timeout, retries: (True, "status=200", 5.0))
+
+        worker.scan_checks_once(session)
+        session.refresh(allow_check)
+        assert allow_check.last_ping is not None
+
+
+def test_degraded_recovery(tmp_path, monkeypatch):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_deg_recover.sqlite'}"
+
+    from sqlmodel import Session, select
+    from src import db as dbmod
+    from src.models import Project, Check, CheckType, CheckStatus, Event, EventType
+    from src import worker
+
+    dbmod.create_db_and_tables()
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="proj_deg_recover")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        check = Check(
+            project_id=project.id,
+            name="http_deg_recover",
+            type=CheckType.HTTP,
+            url="http://example.ok/health",
+            timeout=1,
+            retries=1,
+            status=CheckStatus.UP,
+            latency_threshold_ms=10,
+            alert_enabled=True,
+            alert_cooldown=0,
+        )
+        session.add(check)
+        session.commit()
+        session.refresh(check)
+
+        monkeypatch.setattr(worker, "_http_check", lambda url, timeout, retries: (True, "status=200", 55.0))
+        monkeypatch.setattr(worker, "notify_degraded", lambda chk, proj, reason=None: None)
+
+        worker.scan_checks_once(session)
+        session.refresh(check)
+        assert check.status == CheckStatus.DEGRADED
+
+        # allow next run immediately
+        check.next_run = datetime.utcnow() - timedelta(seconds=1)
+        session.add(check)
+        session.commit()
+
+        called = {"recovery": 0}
+
+        def fake_recovery(chk, proj):
+            called["recovery"] += 1
+
+        monkeypatch.setattr(worker, "_http_check", lambda url, timeout, retries: (True, "status=200", 5.0))
+        monkeypatch.setattr(worker, "notify_recovery", fake_recovery)
+
+        worker.scan_checks_once(session)
+        session.refresh(check)
+        assert check.status == CheckStatus.UP
+        evs = session.exec(select(Event).where(Event.check_id == check.id)).all()
+        assert any(e.event_type == EventType.UP for e in evs)
+        assert called["recovery"] >= 1

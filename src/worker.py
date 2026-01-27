@@ -218,6 +218,24 @@ def _worker_id() -> str:
     return os.environ.get("WORKER_ID") or os.environ.get("WORKER_REGION") or socket.gethostname()
 
 
+def _region_allows(worker_region: Optional[str], check_region: Optional[str]) -> bool:
+    """Return True if the worker should process a check for the given region setting.
+
+    - check_region may be a single value or a comma/space-separated list.
+    - "*" or "all" means any worker region.
+    - If worker_region is unset, process all checks for dev/local runs.
+    """
+    if not check_region:
+        return True
+    raw = str(check_region).strip().lower()
+    if raw in ("*", "all", "any"):
+        return True
+    if not worker_region:
+        return True
+    allowed = [r for r in re.split(r"[,\s]+", raw) if r]
+    return worker_region.strip().lower() in allowed
+
+
 def _acquire_lease(session: Session, check: Check, now: datetime) -> bool:
     if os.environ.get("WORKER_LEASES", "1") == "0":
         return True
@@ -425,7 +443,7 @@ def scan_checks_once(session: Session):
     processed_oncall = False
     worker_region = os.environ.get("WORKER_REGION")
     for check in results:
-        if worker_region and getattr(check, "region", None) and check.region != worker_region:
+        if not _region_allows(worker_region, getattr(check, "region", None)):
             continue
         project = session.get(Project, check.project_id)
         if not project:
