@@ -180,16 +180,49 @@ async function openAvailability(){
   const apiKey = document.getElementById('apiKey').value || null;
   const start = document.getElementById('start').value || null;
   const end = document.getElementById('end').value || null;
+  const root = document.getElementById('availability');
+  if(root) root.innerText = 'Loading availability...';
   const params = new URLSearchParams();
   if(start) params.set('start', start);
   if(end) params.set('end', end);
   const headers = {};
   if(apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
   const res = await fetch(`/projects/${pid}/metrics/availability?${params.toString()}`, {headers});
-  if(!res.ok){ alert('Failed to load availability'); return }
+  if(!res.ok){
+    if(root) root.innerText = 'Failed to load availability';
+    else alert('Failed to load availability');
+    return;
+  }
   const data = await res.json();
-  const w = window.open('about:blank');
-  if(w){ w.document.write('<pre>' + JSON.stringify(data, null, 2) + '</pre>'); }
+  if(!root){
+    const w = window.open('about:blank');
+    if(w){ w.document.write('<pre>' + JSON.stringify(data, null, 2) + '</pre>'); }
+    return;
+  }
+
+  const pct = (v)=> (v === null || v === undefined) ? 'N/A' : (Number(v).toFixed(2) + '%');
+  let html = '';
+  html += `<div><strong>Project uptime:</strong> ${pct(data.project_uptime_percent)}</div>`;
+  html += `<div class="muted">Range: ${data.start} → ${data.end}</div>`;
+  html += `<div class="muted">SLO target: ${pct(data.slo_target)} &nbsp; SLA target: ${pct(data.sla_target)}</div>`;
+  html += '<div style="margin-top:8px"></div>';
+
+  if(!data.checks || !data.checks.length){
+    html += '<div class="muted">No checks in this project.</div>';
+    root.innerHTML = html;
+    return;
+  }
+
+  html += '<table><thead><tr><th>Check</th><th>Uptime %</th><th>SLO</th><th>SLA</th></tr></thead><tbody>';
+  for(const c of data.checks){
+    const sloClass = c.slo_met ? 'status-up' : 'status-down';
+    const slaClass = c.sla_met ? 'status-up' : 'status-down';
+    html += `<tr><td>${c.name || c.check_id}</td><td>${pct(c.uptime_percent)}</td>`;
+    html += `<td><span class="badge ${sloClass}">${c.slo_met ? 'met' : 'missed'}</span></td>`;
+    html += `<td><span class="badge ${slaClass}">${c.sla_met ? 'met' : 'missed'}</span></td></tr>`;
+  }
+  html += '</tbody></table>';
+  root.innerHTML = html;
 }
 
 window.loadSnapshots = loadSnapshots;

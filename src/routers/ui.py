@@ -164,6 +164,8 @@ def snapshots_page():
       <button id="exportCsvBtn" class="btn">Export CSV</button>
     </div>
     <div id="list">Loading...</div>
+    <h2>Availability Report</h2>
+    <div id="availability" class="card">Run Availability to view report.</div>
     <div style="margin-top:12px"><canvas id="uptimeChart" width="800" height="240"></canvas></div>
     <script src="/static/js/vendor/chart.min.js"></script>
     <script src="/static/js/snapshots.js"></script>
