@@ -157,6 +157,7 @@ def snapshots_page():
       <label>API Key: <input id="apiKey" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></label>
       <a id="settingsLink" class="btn" href="/ui/projects/1/settings">Settings</a>
       <a class="btn" href="/ui/dashboard">Dashboard</a>
+      <a class="btn" href="/ui/reports">Reports</a>
       <label>Check: <select id="checkId" style="width:120px"><option value="">(all)</option></select></label>
       <label>Start: <input id="start" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
       <label>End: <input id="end" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
@@ -194,6 +195,7 @@ def dashboard_page():
       <label>End: <input id="end" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
       <button id="loadDashboardBtn" class="btn">Load</button>
       <a class="btn" href="/ui/snapshots">Snapshots</a>
+      <a class="btn" href="/ui/reports">Reports</a>
       <a class="btn" href="/ui/incidents">Incidents</a>
     </div>
 
@@ -225,6 +227,51 @@ def dashboard_page():
 
     <script src="/static/js/vendor/chart.min.js"></script>
     <script src="/static/js/dashboard.js"></script>
+    </body>
+    </html>
+    """
+
+
+@router.get("/reports")
+def reports_page():
+    return """
+    <html>
+    <head>
+      <title>Availability Reports</title>
+      <meta name="viewport" content="width=device-width,initial-scale=1" />
+      <link rel="stylesheet" href="/static/css/ui.css" />
+    </head>
+    <body>
+    <h1>Availability Reports</h1>
+    <div class="row">
+      <label>Project: <input id="projectId" value="1" style="width:80px"/></label>
+      <label>API Key: <input id="apiKey" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></label>
+      <label>Check: <select id="checkId" style="width:140px"><option value="">(all)</option></select></label>
+      <label>Start: <input id="start" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
+      <label>End: <input id="end" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
+      <button id="loadBtn" class="btn">Load</button>
+      <button id="exportBtn" class="btn">Export CSV</button>
+      <a class="btn" href="/ui/dashboard">Dashboard</a>
+    </div>
+    <div class="row">
+      <button class="btn btn-secondary" id="p7d">Last 7d</button>
+      <button class="btn btn-secondary" id="p30d">Last 30d</button>
+      <button class="btn btn-secondary" id="p90d">Last 90d</button>
+      <button class="btn btn-secondary" id="p180d">Last 180d</button>
+    </div>
+    <div class="card">
+      <h3>Project Availability (Daily)</h3>
+      <canvas id="reportChart" height="140"></canvas>
+    </div>
+    <div class="card">
+      <h3>Daily Summary</h3>
+      <table id="reportTable">
+        <thead><tr><th>Date</th><th>Uptime %</th><th>SLO</th><th>SLA</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <script src="/static/js/vendor/chart.min.js"></script>
+    <script src="/static/js/report.js"></script>
     </body>
     </html>
     """

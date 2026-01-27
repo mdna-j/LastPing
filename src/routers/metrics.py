@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 from typing import Optional, List
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Path
+from fastapi import APIRouter, Depends, HTTPException, Query, Path, Response
 from sqlmodel import Session, select
 
 from ..db import get_session
@@ -205,6 +205,76 @@ def availability_report(project_id: int = Path(..., ge=1), start: Optional[str] 
         "project_sla_met": project_sla_met,
         "checks": check_rows,
     }
+
+
+@router.get("/metrics/availability/history")
+def availability_history(project_id: int = Path(..., ge=1), check_id: Optional[int] = Query(None, ge=1), start: Optional[str] = Query(None, max_length=40), end: Optional[str] = Query(None, max_length=40), session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
+    """Return daily availability history using UptimeSnapshot rows."""
+    start_dt, end_dt = _parse_range(start, end)
+    project = session.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    stmt = select(UptimeSnapshot).where(UptimeSnapshot.project_id == project_id, UptimeSnapshot.window_end >= start_dt, UptimeSnapshot.window_end <= end_dt)
+    if check_id:
+        stmt = stmt.where(UptimeSnapshot.check_id == check_id)
+    stmt = stmt.order_by(UptimeSnapshot.window_end.desc())
+    snaps = session.exec(stmt).all()
+
+    # keep latest snapshot per day per check
+    latest: dict = {}
+    for s in snaps:
+        day = s.window_end.date().isoformat()
+        key = (day, s.check_id)
+        if key not in latest:
+            latest[key] = s
+
+    # aggregate by day
+    days: dict = {}
+    for (day, _cid), snap in latest.items():
+        days.setdefault(day, []).append(snap)
+
+    series = []
+    for day in sorted(days.keys()):
+        rows = days[day]
+        if check_id:
+            snap = rows[0]
+            pct = snap.uptime_percent
+            series.append({
+                "day": day,
+                "uptime_percent": pct,
+                "slo_met": (project.slo_target is not None and pct >= project.slo_target) if project.slo_target is not None else None,
+                "sla_met": (project.sla_target is not None and pct >= project.sla_target) if project.sla_target is not None else None,
+            })
+        else:
+            avg = sum([r.uptime_percent for r in rows]) / len(rows)
+            series.append({
+                "day": day,
+                "uptime_percent": avg,
+                "slo_met": (project.slo_target is not None and avg >= project.slo_target) if project.slo_target is not None else None,
+                "sla_met": (project.sla_target is not None and avg >= project.sla_target) if project.sla_target is not None else None,
+            })
+
+    return {
+        "project_id": project_id,
+        "check_id": check_id,
+        "start": start_dt.isoformat(),
+        "end": end_dt.isoformat(),
+        "slo_target": project.slo_target,
+        "sla_target": project.sla_target,
+        "series": series,
+    }
+
+
+@router.get("/metrics/availability/report.csv")
+def availability_report_csv(project_id: int = Path(..., ge=1), check_id: Optional[int] = Query(None, ge=1), start: Optional[str] = Query(None, max_length=40), end: Optional[str] = Query(None, max_length=40), session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
+    data = availability_history(project_id=project_id, check_id=check_id, start=start, end=end, session=session, _proj=_proj)
+    lines = []
+    lines.append("day,uptime_percent,slo_met,sla_met")
+    for row in data.get("series", []):
+        lines.append(f"{row['day']},{row['uptime_percent']},{row.get('slo_met')},{row.get('sla_met')}")
+    csv = "\n".join(lines)
+    return Response(content=csv, media_type="text/csv")
 
 
 @router.get("/metrics/snapshots")
