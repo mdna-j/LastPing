@@ -7,6 +7,7 @@ Create Date: 2026-01-25 22:05:00.000000
 """
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy import inspect
 
 
 # revision identifiers, used by Alembic.
@@ -17,10 +18,17 @@ depends_on = None
 
 
 def upgrade():
-    op.add_column('project', sa.Column('sms_enabled', sa.Boolean(), nullable=True))
-    op.add_column('project', sa.Column('sms_to', sa.String(), nullable=True))
-    op.add_column('project', sa.Column('oncall_enabled', sa.Boolean(), nullable=True))
-    op.add_column('project', sa.Column('oncall_email', sa.String(), nullable=True))
+    bind = op.get_bind()
+    inspector = inspect(bind)
+    project_cols = {col["name"] for col in inspector.get_columns("project")}
+    if "sms_enabled" not in project_cols:
+        op.add_column('project', sa.Column('sms_enabled', sa.Boolean(), nullable=True))
+    if "sms_to" not in project_cols:
+        op.add_column('project', sa.Column('sms_to', sa.String(), nullable=True))
+    if "oncall_enabled" not in project_cols:
+        op.add_column('project', sa.Column('oncall_enabled', sa.Boolean(), nullable=True))
+    if "oncall_email" not in project_cols:
+        op.add_column('project', sa.Column('oncall_email', sa.String(), nullable=True))
 
 
 def downgrade():

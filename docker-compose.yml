@@ -26,6 +26,8 @@ services:
     # Placeholder worker; replace with your worker module/command
     entrypoint: ["/app/docker-entrypoint.sh"]
     command: ["python", "-u", "-m", "src.worker"]
+    environment:
+      RUN_MIGRATIONS: "0"
     env_file:
       - .env
     depends_on:

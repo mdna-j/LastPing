@@ -6,6 +6,7 @@ Create Date: 2026-01-14 00:00:00.000000
 """
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy import inspect
 
 # revision identifiers, used by Alembic.
 revision = '0016_add_user_usage'
@@ -15,13 +16,16 @@ depends_on = None
 
 
 def upgrade():
-    op.create_table(
-        'user_usage',
-        sa.Column('id', sa.Integer(), primary_key=True),
-        sa.Column('user_id', sa.Integer(), sa.ForeignKey('user.id'), nullable=False),
-        sa.Column('minute_start', sa.DateTime(), nullable=False),
-        sa.Column('count', sa.Integer(), nullable=False, default=0),
-    )
+    bind = op.get_bind()
+    inspector = inspect(bind)
+    if 'user_usage' not in inspector.get_table_names():
+        op.create_table(
+            'user_usage',
+            sa.Column('id', sa.Integer(), primary_key=True),
+            sa.Column('user_id', sa.Integer(), sa.ForeignKey('user.id'), nullable=False),
+            sa.Column('minute_start', sa.DateTime(), nullable=False),
+            sa.Column('count', sa.Integer(), nullable=False, default=0),
+        )
 
 
 def downgrade():
