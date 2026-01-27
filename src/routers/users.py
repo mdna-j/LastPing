@@ -3,25 +3,27 @@ from typing import Optional
 import os
 import secrets
 
-from fastapi import APIRouter, Depends, HTTPException, status, Header
-from pydantic import BaseModel, EmailStr
+from fastapi import APIRouter, Depends, HTTPException, status, Header, Path, Body
+from pydantic import BaseModel, EmailStr, constr
 from sqlmodel import Session, select
 
 from ..db import get_session
 from ..models import User, UserToken, ProjectMembership, Project
 from ..security import hash_password, verify_password
+from ..deps import limit_public_requests
+from ..schemas import StrictBaseModel
 
 router = APIRouter(prefix="/users", tags=["users"])
 
 
-class CreateUserIn(BaseModel):
+class CreateUserIn(StrictBaseModel):
     email: EmailStr
-    password: str
+    password: constr(min_length=8, max_length=128)
 
 
-class LoginIn(BaseModel):
+class LoginIn(StrictBaseModel):
     email: EmailStr
-    password: str
+    password: constr(min_length=8, max_length=128)
 
 
 class TokenOut(BaseModel):
@@ -30,7 +32,7 @@ class TokenOut(BaseModel):
     expires_at: Optional[datetime]
 
 
-@router.post("/create", response_model=dict)
+@router.post("/create", response_model=dict, dependencies=[Depends(limit_public_requests)])
 def create_user(payload: CreateUserIn, x_admin_token: Optional[str] = Header(None), session: Session = Depends(get_session)):
     admin_token = os.environ.get('ADMIN_TOKEN')
     if not admin_token or x_admin_token != admin_token:
@@ -47,7 +49,7 @@ def create_user(payload: CreateUserIn, x_admin_token: Optional[str] = Header(Non
     return {"id": u.id, "email": u.email}
 
 
-@router.post("/login", response_model=TokenOut)
+@router.post("/login", response_model=TokenOut, dependencies=[Depends(limit_public_requests)])
 def login(payload: LoginIn, session: Session = Depends(get_session)):
     user = session.exec(select(User).where(User.email == payload.email)).first()
     if not user or not verify_password(payload.password, user.hashed_password):
@@ -76,7 +78,7 @@ def me(authorization: Optional[str] = Header(None), session: Session = Depends(g
 
 
 @router.get('/projects/{project_id}/role')
-def my_role(project_id: int, authorization: Optional[str] = Header(None), session: Session = Depends(get_session)):
+def my_role(project_id: int = Path(..., ge=1), authorization: Optional[str] = Header(None), session: Session = Depends(get_session)):
     # Return current user's role on the project (requires bearer token)
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token")
@@ -94,7 +96,7 @@ def my_role(project_id: int, authorization: Optional[str] = Header(None), sessio
 
 
 @router.get("/projects/{project_id}/membership")
-def list_members(project_id: int, authorization: Optional[str] = Header(None), session: Session = Depends(get_session)):
+def list_members(project_id: int = Path(..., ge=1), authorization: Optional[str] = Header(None), session: Session = Depends(get_session)):
     # only allow project owners to list members
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token")
@@ -116,13 +118,13 @@ def list_members(project_id: int, authorization: Optional[str] = Header(None), s
     return out
 
 
-class MembershipIn(BaseModel):
+class MembershipIn(StrictBaseModel):
     email: EmailStr
-    role: str = "viewer"
+    role: constr(regex=r"^(owner|viewer)$") = "viewer"
 
 
 @router.post("/projects/{project_id}/membership")
-def add_member(project_id: int, payload: MembershipIn, authorization: Optional[str] = Header(None), session: Session = Depends(get_session)):
+def add_member(project_id: int = Path(..., ge=1), payload: MembershipIn = Body(...), authorization: Optional[str] = Header(None), session: Session = Depends(get_session)):
     # only owners may add members
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token")
@@ -155,7 +157,7 @@ def add_member(project_id: int, payload: MembershipIn, authorization: Optional[s
 
 
 @router.delete("/projects/{project_id}/membership/{user_id}")
-def remove_member(project_id: int, user_id: int, authorization: Optional[str] = Header(None), session: Session = Depends(get_session)):
+def remove_member(project_id: int = Path(..., ge=1), user_id: int = Path(..., ge=1), authorization: Optional[str] = Header(None), session: Session = Depends(get_session)):
     # only owners may remove members
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token")

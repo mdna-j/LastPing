@@ -2,9 +2,7 @@
 async function loadSnapshots(){
   const pid = document.getElementById('projectId').value || '1';
   const checkId = document.getElementById('checkId').value || null;
-  const rawApiInput = document.getElementById('apiKey').value || null;
-  // If input is masked (e.g., '******') prefer saved key
-  const apiKey = (rawApiInput === '******' || rawApiInput === '••••••') ? window._savedApiKey || null : rawApiInput;
+  const apiKey = document.getElementById('apiKey').value || null;
   const start = document.getElementById('start').value || null;
   const end = document.getElementById('end').value || null;
   const out = document.getElementById('list');
@@ -80,14 +78,10 @@ async function loadSnapshots(){
     }catch(e){ /* non-fatal */ }
 
     out.innerHTML = html;
-    // persist last used inputs locally (apiKey is stored only if remember checked)
+    // persist last used inputs locally (non-sensitive only)
     try{
-      const remember = document.getElementById('rememberApiKey') && document.getElementById('rememberApiKey').checked;
-      const payload = {projectId: pid, checkId: checkId, start: start, end: end, rememberApiKey: !!remember};
-      if(remember && apiKey) payload.apiKey = apiKey;
+      const payload = {projectId: pid, checkId: checkId, start: start, end: end};
       localStorage.setItem('lastSnapshotsPrefs', JSON.stringify(payload));
-      // if remembered, keep saved copy in memory for masked input
-      if(remember && apiKey) window._savedApiKey = apiKey;
     }catch(e){}
   }catch(e){ out.innerText = 'Error loading snapshots'; }
 }
@@ -99,10 +93,8 @@ function loadPrefs(){
     const p = JSON.parse(raw);
     if(p.projectId) document.getElementById('projectId').value = p.projectId;
     if(p.checkId) document.getElementById('checkId').value = p.checkId;
-    if(p.apiKey){ window._savedApiKey = p.apiKey; document.getElementById('apiKey').value = '******'; }
     if(p.start) document.getElementById('start').value = p.start;
     if(p.end) document.getElementById('end').value = p.end;
-    if(p.rememberApiKey) document.getElementById('rememberApiKey').checked = true;
   }catch(e){}
 }
 
@@ -110,13 +102,9 @@ function savePrefs(){
   try{
     const pid = document.getElementById('projectId').value || '1';
     const checkId = document.getElementById('checkId').value || null;
-    const apiKey = document.getElementById('apiKey').value || null;
     const start = document.getElementById('start').value || null;
     const end = document.getElementById('end').value || null;
-    const remember = document.getElementById('rememberApiKey') && document.getElementById('rememberApiKey').checked;
-    const payload = {projectId: pid, checkId: checkId, start: start, end: end, rememberApiKey: !!remember};
-    if(remember && apiKey) payload.apiKey = apiKey;
-    if(!remember) localStorage.removeItem('lastSnapshotsPrefs');
+    const payload = {projectId: pid, checkId: checkId, start: start, end: end};
     localStorage.setItem('lastSnapshotsPrefs', JSON.stringify(payload));
     alert('Preferences saved');
   }catch(e){ alert('Failed to save prefs'); }
@@ -133,9 +121,7 @@ async function exportCsv(){
   if(start) params.set('start', start);
   if(end) params.set('end', end);
   const headers = {};
-  // if input is masked, use saved key
-  const apiUsed = (apiKey === '******' || apiKey === '••••••') ? window._savedApiKey || null : apiKey;
-  if(apiUsed) headers['Authorization'] = `Bearer ${apiUsed}`;
+  if(apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
   const res = await fetch(`/projects/${pid}/metrics/snapshots?${params.toString()}`, {headers});
   if(!res.ok){ alert('Failed to fetch snapshots for CSV'); return }
   const data = await res.json();
@@ -155,8 +141,7 @@ async function exportCsv(){
 
 async function loadChecks(){
   const pid = document.getElementById('projectId').value || '1';
-  const rawApi = document.getElementById('apiKey').value || null;
-  const apiKey = (rawApi === '******' || rawApi === '••••••') ? window._savedApiKey || null : rawApi;
+  const apiKey = document.getElementById('apiKey').value || null;
   const sel = document.getElementById('checkId');
   // clear existing
   sel.innerHTML = '<option value="">(all)</option>';
@@ -184,20 +169,15 @@ function applyPreset(hours){
   document.getElementById('end').value = end.toISOString().slice(0,19);
 }
 
-function showApiKey(){
-  const raw = window._savedApiKey || '';
-  if(!raw){ alert('No saved API key'); return }
-  document.getElementById('apiKey').value = raw;
-}
 function updateSettingsLink(){
   const pid = document.getElementById('projectId').value || '1';
   const link = document.getElementById('settingsLink');
   if(link) link.href = `/ui/projects/${pid}/settings`;
 }
+
 async function openAvailability(){
   const pid = document.getElementById('projectId').value || '1';
-  const rawApi = document.getElementById('apiKey').value || null;
-  const apiKey = (rawApi === '******' || rawApi === 'â€¢â€¢â€¢â€¢â€¢â€¢') ? window._savedApiKey || null : rawApi;
+  const apiKey = document.getElementById('apiKey').value || null;
   const start = document.getElementById('start').value || null;
   const end = document.getElementById('end').value || null;
   const params = new URLSearchParams();
@@ -211,6 +191,7 @@ async function openAvailability(){
   const w = window.open('about:blank');
   if(w){ w.document.write('<pre>' + JSON.stringify(data, null, 2) + '</pre>'); }
 }
+
 window.loadSnapshots = loadSnapshots;
 document.addEventListener('DOMContentLoaded', ()=>{ const b = document.getElementById('loadSnapshotsBtn'); if(b) b.addEventListener('click', ()=>{ if(!isIsoTimestamp(document.getElementById('start').value) || !isIsoTimestamp(document.getElementById('end').value)){ if(document.getElementById('start').value || document.getElementById('end').value){ alert('Start/end must be valid ISO timestamps (YYYY-MM-DDTHH:MM:SS)'); return } } loadSnapshots(); }); loadSnapshots(); });
 document.addEventListener('DOMContentLoaded', ()=>{ loadPrefs(); const s = document.getElementById('savePrefsBtn'); if(s) s.addEventListener('click', savePrefs); const e = document.getElementById('exportCsvBtn'); if(e) e.addEventListener('click', exportCsv); const api = document.getElementById('apiKey'); if(api) api.addEventListener('change', loadChecks); const pid = document.getElementById('projectId'); if(pid) pid.addEventListener('change', loadChecks); const presets = document.createElement('div'); presets.style.marginTop='8px'; presets.innerHTML = '<button class="btn" id="p1h">Last 1h</button> <button class="btn" id="p6h">Last 6h</button> <button class="btn" id="p24h">Last 24h</button> <button class="btn" id="p7d">Last 7d</button>'; document.body.insertBefore(presets, document.getElementById('list'));

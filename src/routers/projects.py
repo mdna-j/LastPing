@@ -10,23 +10,24 @@ from datetime import datetime
 import secrets
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status, Header, Request
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, status, Header, Request, Path, Body
+from pydantic import BaseModel, EmailStr, AnyHttpUrl, confloat, constr, root_validator
 from sqlmodel import select, Session
 
 from ..db import get_session
 from ..models import Project as ProjectModel, AuditLog
 from ..security import generate_api_key, hash_api_key
-from ..deps import limit_by_api_key, get_audit_context
+from ..deps import limit_by_api_key, get_audit_context, limit_public_requests
+from ..schemas import StrictBaseModel
 import os
 
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
 
-class ProjectCreate(BaseModel):
-    name: str
-    owner_email: Optional[str] = None
+class ProjectCreate(StrictBaseModel):
+    name: constr(min_length=1, max_length=120)
+    owner_email: Optional[EmailStr] = None
 
 
 class ProjectRead(BaseModel):
@@ -44,7 +45,7 @@ class ProjectRead(BaseModel):
         orm_mode = True
 
 
-@router.post("/", status_code=status.HTTP_201_CREATED)
+@router.post("/", status_code=status.HTTP_201_CREATED, dependencies=[Depends(limit_public_requests)])
 def create_project(payload: ProjectCreate, request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), session: Session = Depends(get_session)):
     """Create a new project and return the project and API key."""
     # generate one-time plaintext API key and store only the hash
@@ -65,46 +66,54 @@ def create_project(payload: ProjectCreate, request: Request = None, authorizatio
     return {"project": ProjectRead.from_orm(project), "api_key": api_key}
 
 
-@router.get("/", response_model=List[ProjectRead])
+@router.get("/", response_model=List[ProjectRead], dependencies=[Depends(limit_public_requests)])
 def list_projects(session: Session = Depends(get_session)):
     projects = session.exec(select(ProjectModel)).all()
     return [ProjectRead.from_orm(p) for p in projects]
 
 
-@router.get("/{project_id}", response_model=ProjectRead)
-def get_project(project_id: int, session: Session = Depends(get_session)):
+@router.get("/{project_id}", response_model=ProjectRead, dependencies=[Depends(limit_public_requests)])
+def get_project(project_id: int = Path(..., ge=1), session: Session = Depends(get_session)):
     project = session.get(ProjectModel, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     return ProjectRead.from_orm(project)
 
 
-class WebhookUpdate(BaseModel):
-    discord_webhook_url: Optional[str] = None
-    slack_webhook_url: Optional[str] = None
-    pagerduty_integration_key: Optional[str] = None
-    generic_webhook_url: Optional[str] = None
+class WebhookUpdate(StrictBaseModel):
+    discord_webhook_url: Optional[AnyHttpUrl] = None
+    slack_webhook_url: Optional[AnyHttpUrl] = None
+    pagerduty_integration_key: Optional[constr(max_length=128)] = None
+    generic_webhook_url: Optional[AnyHttpUrl] = None
 
 
-class SloSettings(BaseModel):
-    slo_target: Optional[float] = None
-    sla_target: Optional[float] = None
+class SloSettings(StrictBaseModel):
+    slo_target: Optional[confloat(ge=0, le=100)] = None
+    sla_target: Optional[confloat(ge=0, le=100)] = None
 
 
-class AlertSettings(BaseModel):
+class AlertSettings(StrictBaseModel):
     sms_enabled: Optional[bool] = None
-    sms_to: Optional[str] = None
+    sms_to: Optional[constr(regex=r"^\\+?[0-9]{7,20}$")] = None
     oncall_enabled: Optional[bool] = None
-    oncall_email: Optional[str] = None
+    oncall_email: Optional[EmailStr] = None
 
 
-class MaintenanceWindow(BaseModel):
+class MaintenanceWindow(StrictBaseModel):
     maintenance_starts_at: Optional[datetime] = None
     maintenance_ends_at: Optional[datetime] = None
 
+    @root_validator
+    def _validate_window(cls, values):
+        start = values.get("maintenance_starts_at")
+        end = values.get("maintenance_ends_at")
+        if start and end and end <= start:
+            raise ValueError("maintenance_ends_at must be after maintenance_starts_at")
+        return values
+
 
 @router.get("/{project_id}/webhooks", response_model=WebhookUpdate)
-def get_project_webhooks(project_id: int, session: Session = Depends(get_session)):
+def get_project_webhooks(project_id: int = Path(..., ge=1), session: Session = Depends(get_session)):
     project = session.get(ProjectModel, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -117,7 +126,7 @@ def get_project_webhooks(project_id: int, session: Session = Depends(get_session
 
 
 @router.post("/{project_id}/webhooks", response_model=WebhookUpdate)
-def update_project_webhooks(project_id: int, payload: WebhookUpdate, request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
+def update_project_webhooks(project_id: int = Path(..., ge=1), payload: WebhookUpdate = Body(...), request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
     project = session.get(ProjectModel, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -139,7 +148,7 @@ def update_project_webhooks(project_id: int, payload: WebhookUpdate, request: Re
 
 
 @router.get("/{project_id}/maintenance", response_model=MaintenanceWindow)
-def get_project_maintenance(project_id: int, session: Session = Depends(get_session)):
+def get_project_maintenance(project_id: int = Path(..., ge=1), session: Session = Depends(get_session)):
     project = session.get(ProjectModel, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -147,7 +156,7 @@ def get_project_maintenance(project_id: int, session: Session = Depends(get_sess
 
 
 @router.post("/{project_id}/maintenance", response_model=MaintenanceWindow)
-def set_project_maintenance(project_id: int, payload: MaintenanceWindow, request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
+def set_project_maintenance(project_id: int = Path(..., ge=1), payload: MaintenanceWindow = Body(...), request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
     project = session.get(ProjectModel, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -167,7 +176,7 @@ def set_project_maintenance(project_id: int, payload: MaintenanceWindow, request
 
 
 @router.post("/{project_id}/rotate-key")
-def rotate_api_key(project_id: int, request: Request = None, session: Session = Depends(get_session), _rl = Depends(limit_by_api_key)):
+def rotate_api_key(project_id: int = Path(..., ge=1), request: Request = None, session: Session = Depends(get_session), _rl = Depends(limit_by_api_key)):
     project = session.get(ProjectModel, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -233,7 +242,7 @@ def rotate_all_keys(x_admin_token: Optional[str] = Header(None), session: Sessio
 
 
 @router.get("/{project_id}/slo", response_model=SloSettings)
-def get_project_slo(project_id: int, session: Session = Depends(get_session)):
+def get_project_slo(project_id: int = Path(..., ge=1), session: Session = Depends(get_session)):
     project = session.get(ProjectModel, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -241,7 +250,7 @@ def get_project_slo(project_id: int, session: Session = Depends(get_session)):
 
 
 @router.post("/{project_id}/slo", response_model=SloSettings)
-def set_project_slo(project_id: int, payload: SloSettings, request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
+def set_project_slo(project_id: int = Path(..., ge=1), payload: SloSettings = Body(...), request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
     project = session.get(ProjectModel, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -263,7 +272,7 @@ def set_project_slo(project_id: int, payload: SloSettings, request: Request = No
 
 
 @router.get("/{project_id}/alert-settings", response_model=AlertSettings)
-def get_project_alert_settings(project_id: int, session: Session = Depends(get_session)):
+def get_project_alert_settings(project_id: int = Path(..., ge=1), session: Session = Depends(get_session)):
     project = session.get(ProjectModel, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -276,7 +285,7 @@ def get_project_alert_settings(project_id: int, session: Session = Depends(get_s
 
 
 @router.post("/{project_id}/alert-settings", response_model=AlertSettings)
-def set_project_alert_settings(project_id: int, payload: AlertSettings, request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
+def set_project_alert_settings(project_id: int = Path(..., ge=1), payload: AlertSettings = Body(...), request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
     project = session.get(ProjectModel, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")

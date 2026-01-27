@@ -1,6 +1,6 @@
 from typing import Dict, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status, Response, Cookie, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, status, Response, Cookie, Request, Query
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlmodel import Session, select
@@ -42,7 +42,7 @@ def list_apikeys(x_admin_token: Optional[str] = Header(None), session: Session =
 
 
 @router.post("/create", status_code=status.HTTP_201_CREATED)
-def create_apikey(project_id: int, rate_limit_per_minute: Optional[int] = 0, request: Request = None, x_admin_token: Optional[str] = Header(None), x_csrf_token: Optional[str] = Header(None), admin_csrf: Optional[str] = Cookie(None), session: Session = Depends(get_session)):
+def create_apikey(project_id: int = Query(..., ge=1), rate_limit_per_minute: Optional[int] = Query(0, ge=0, le=10000), request: Request = None, x_admin_token: Optional[str] = Header(None), x_csrf_token: Optional[str] = Header(None), admin_csrf: Optional[str] = Cookie(None), session: Session = Depends(get_session)):
     admin_token = os.environ.get('ADMIN_TOKEN')
     if not admin_token or x_admin_token != admin_token:
         raise HTTPException(status_code=403, detail="Admin token required")
@@ -78,7 +78,7 @@ def create_apikey(project_id: int, rate_limit_per_minute: Optional[int] = 0, req
 
 
 @router.post("/revoke", status_code=status.HTTP_200_OK)
-def revoke_apikey(api_key_id: int, request: Request = None, x_admin_token: Optional[str] = Header(None), x_csrf_token: Optional[str] = Header(None), admin_csrf: Optional[str] = Cookie(None), session: Session = Depends(get_session)):
+def revoke_apikey(api_key_id: int = Query(..., ge=1), request: Request = None, x_admin_token: Optional[str] = Header(None), x_csrf_token: Optional[str] = Header(None), admin_csrf: Optional[str] = Cookie(None), session: Session = Depends(get_session)):
     admin_token = os.environ.get('ADMIN_TOKEN')
     if not admin_token or x_admin_token != admin_token:
         raise HTTPException(status_code=403, detail="Admin token required")
@@ -111,7 +111,7 @@ def revoke_apikey(api_key_id: int, request: Request = None, x_admin_token: Optio
 
 
 @router.get('/audit')
-def list_audit(limit: int = 100, x_admin_token: Optional[str] = Header(None), session: Session = Depends(get_session)):
+def list_audit(limit: int = Query(100, ge=1, le=1000), x_admin_token: Optional[str] = Header(None), session: Session = Depends(get_session)):
     admin_token = os.environ.get('ADMIN_TOKEN')
     if not admin_token or x_admin_token != admin_token:
         raise HTTPException(status_code=403, detail="Admin token required")
@@ -121,14 +121,14 @@ def list_audit(limit: int = 100, x_admin_token: Optional[str] = Header(None), se
 
 @router.get('/audit/search')
 def search_audit(
-    action: Optional[str] = None,
-    actor: Optional[str] = None,
-    target_type: Optional[str] = None,
+    action: Optional[str] = Query(None, max_length=64),
+    actor: Optional[str] = Query(None, max_length=64),
+    target_type: Optional[str] = Query(None, max_length=64),
     target_id: Optional[int] = None,
     start: Optional[datetime] = None,
     end: Optional[datetime] = None,
-    page: int = 1,
-    per_page: int = 50,
+    page: int = Query(1, ge=1, le=100000),
+    per_page: int = Query(50, ge=1, le=500),
     x_admin_token: Optional[str] = Header(None),
     session: Session = Depends(get_session),
 ):
@@ -159,7 +159,7 @@ def search_audit(
 
 
 @router.post('/rotate-project')
-def rotate_project_key(project_id: int, request: Request = None, x_admin_token: Optional[str] = Header(None), x_csrf_token: Optional[str] = Header(None), admin_csrf: Optional[str] = Cookie(None), session: Session = Depends(get_session)):
+def rotate_project_key(project_id: int = Query(..., ge=1), request: Request = None, x_admin_token: Optional[str] = Header(None), x_csrf_token: Optional[str] = Header(None), admin_csrf: Optional[str] = Cookie(None), session: Session = Depends(get_session)):
     admin_token = os.environ.get('ADMIN_TOKEN')
     if not admin_token or x_admin_token != admin_token:
         raise HTTPException(status_code=403, detail="Admin token required")
@@ -250,7 +250,7 @@ def admin_apikeys_ui(request: Request, x_admin_token: Optional[str] = Header(Non
             <body>
                 <h1>Admin: API Keys</h1>
                 <p>Use the controls below to list, create and revoke API keys.</p>
-                <label>Admin Token: <input id="admintoken" type="password" /></label>
+                <label>Admin Token: <input id="admintoken" type="password" autocomplete="off" /></label>
                 <button onclick="init();">Init</button>
                 <button onclick="listKeys()">List Keys</button>
                 <pre id="out"></pre>

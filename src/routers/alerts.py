@@ -1,7 +1,7 @@
 from typing import List
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Path
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
@@ -26,12 +26,12 @@ class EventRead(BaseModel):
 
 
 @router.get("/alerts", response_model=List[EventRead])
-def list_project_alerts(project_id: int, session: Session = Depends(get_session), _proj=Depends(require_project_api_key)):
+def list_project_alerts(project_id: int = Path(..., ge=1), session: Session = Depends(get_session), _proj=Depends(require_project_api_key)):
     events = session.exec(select(EventModel).where(EventModel.project_id == project_id).order_by(EventModel.created_at.desc())).all()
     return events
 
 
 @router.get("/checks/{check_id}/alerts", response_model=List[EventRead])
-def list_check_alerts(project_id: int, check_id: int, session: Session = Depends(get_session), _proj=Depends(require_project_api_key)):
+def list_check_alerts(project_id: int = Path(..., ge=1), check_id: int = Path(..., ge=1), session: Session = Depends(get_session), _proj=Depends(require_project_api_key)):
     events = session.exec(select(EventModel).where(EventModel.project_id == project_id, EventModel.check_id == check_id).order_by(EventModel.created_at.desc())).all()
     return events

@@ -6,38 +6,59 @@ heartbeat-based or HTTP checks; the worker interprets check fields to
 drive scheduling and detection logic.
 """
 
-from typing import List, Optional
+from typing import List, Optional, Literal
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, status, Header, Request
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, status, Header, Request, Path, Body
+from pydantic import BaseModel, AnyHttpUrl, conint, constr, root_validator
 from sqlmodel import Session, select
 
 from ..db import get_session
 from ..models import Check as CheckModel, CheckType, CheckStatus, Project, AuditLog
-from ..deps import require_admin_or_project_api_key, get_current_user, require_project_role, limit_by_api_key, get_audit_context
+from ..deps import require_admin_or_project_api_key, get_current_user, require_project_role, limit_by_api_key, get_audit_context, limit_public_requests
+from ..schemas import StrictBaseModel
 
 
 router = APIRouter(prefix="/projects/{project_id}/checks", tags=["checks"])
 
 
-class CheckCreate(BaseModel):
-    name: str
-    type: Optional[str] = CheckType.HEARTBEAT
-    expected_interval: Optional[int] = 600
-    grace_period: Optional[int] = 600
-    url: Optional[str] = None
-    timeout: Optional[int] = 5
-    retries: Optional[int] = 1
-    host: Optional[str] = None
-    port: Optional[int] = None
-    dns_record_type: Optional[str] = None
-    interval: Optional[int] = 60
-    latency_threshold_ms: Optional[int] = None
-    region: Optional[str] = None
+class CheckCreate(StrictBaseModel):
+    name: constr(min_length=1, max_length=120)
+    type: Optional[Literal["heartbeat", "http", "tcp", "dns"]] = CheckType.HEARTBEAT
+    expected_interval: Optional[conint(ge=1, le=86400)] = 600
+    grace_period: Optional[conint(ge=0, le=86400)] = 600
+    url: Optional[AnyHttpUrl] = None
+    timeout: Optional[conint(ge=1, le=60)] = 5
+    retries: Optional[conint(ge=0, le=10)] = 1
+    host: Optional[constr(min_length=1, max_length=253)] = None
+    port: Optional[conint(ge=1, le=65535)] = None
+    dns_record_type: Optional[constr(regex=r"^[A-Za-z0-9_-]{1,10}$")] = None
+    interval: Optional[conint(ge=1, le=86400)] = 60
+    latency_threshold_ms: Optional[conint(ge=1, le=600000)] = None
+    region: Optional[constr(regex=r"^[A-Za-z0-9._-]{1,32}$")] = None
     alert_enabled: Optional[bool] = True
-    alert_after: Optional[int] = 1
-    alert_cooldown: Optional[int] = 3600
+    alert_after: Optional[conint(ge=1, le=1000)] = 1
+    alert_cooldown: Optional[conint(ge=0, le=86400)] = 3600
+
+    @root_validator
+    def _validate_by_type(cls, values):
+        ctype = values.get("type") or CheckType.HEARTBEAT
+        if isinstance(ctype, str):
+            ctype = ctype.lower()
+            values["type"] = ctype
+        if ctype == "http" and not values.get("url"):
+            raise ValueError("url is required for http checks")
+        if ctype == "tcp":
+            if not values.get("host"):
+                raise ValueError("host is required for tcp checks")
+            if not values.get("port"):
+                raise ValueError("port is required for tcp checks")
+        if ctype == "dns":
+            if not values.get("host"):
+                raise ValueError("host is required for dns checks")
+            if not values.get("dns_record_type"):
+                raise ValueError("dns_record_type is required for dns checks")
+        return values
 
 
 class CheckRead(BaseModel):
@@ -66,7 +87,7 @@ class CheckRead(BaseModel):
 
 
 @router.post("/", status_code=status.HTTP_201_CREATED, response_model=CheckRead)
-def create_check(project_id: int, payload: CheckCreate, request: Request = None, x_admin_token: Optional[str] = Header(None), authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
+def create_check(project_id: int = Path(..., ge=1), payload: CheckCreate = Body(...), request: Request = None, x_admin_token: Optional[str] = Header(None), authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
     """Create a check for the given project.
 
     Names must be unique within a project. HTTP checks should provide a
@@ -119,24 +140,24 @@ def create_check(project_id: int, payload: CheckCreate, request: Request = None,
     return check
 
 
-class CheckUpdate(BaseModel):
-    name: Optional[str] = None
-    url: Optional[str] = None
-    interval: Optional[int] = None
-    expected_interval: Optional[int] = None
-    grace_period: Optional[int] = None
-    host: Optional[str] = None
-    port: Optional[int] = None
-    dns_record_type: Optional[str] = None
-    latency_threshold_ms: Optional[int] = None
-    region: Optional[str] = None
+class CheckUpdate(StrictBaseModel):
+    name: Optional[constr(min_length=1, max_length=120)] = None
+    url: Optional[AnyHttpUrl] = None
+    interval: Optional[conint(ge=1, le=86400)] = None
+    expected_interval: Optional[conint(ge=1, le=86400)] = None
+    grace_period: Optional[conint(ge=0, le=86400)] = None
+    host: Optional[constr(min_length=1, max_length=253)] = None
+    port: Optional[conint(ge=1, le=65535)] = None
+    dns_record_type: Optional[constr(regex=r"^[A-Za-z0-9_-]{1,10}$")] = None
+    latency_threshold_ms: Optional[conint(ge=1, le=600000)] = None
+    region: Optional[constr(regex=r"^[A-Za-z0-9._-]{1,32}$")] = None
     alert_enabled: Optional[bool] = None
-    alert_after: Optional[int] = None
-    alert_cooldown: Optional[int] = None
+    alert_after: Optional[conint(ge=1, le=1000)] = None
+    alert_cooldown: Optional[conint(ge=0, le=86400)] = None
 
 
 @router.put("/{check_id}", response_model=CheckRead)
-def update_check(project_id: int, check_id: int, payload: CheckUpdate, request: Request = None, x_admin_token: Optional[str] = Header(None), authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), session: Session = Depends(get_session)):
+def update_check(project_id: int = Path(..., ge=1), check_id: int = Path(..., ge=1), payload: CheckUpdate = Body(...), request: Request = None, x_admin_token: Optional[str] = Header(None), authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), session: Session = Depends(get_session)):
     # require owner/admin/api-key
     try:
         project = require_admin_or_project_api_key(project_id, x_admin_token=x_admin_token, authorization=authorization, x_api_key=x_api_key, session=session)
@@ -190,7 +211,7 @@ def update_check(project_id: int, check_id: int, payload: CheckUpdate, request: 
 
 
 @router.delete("/{check_id}")
-def delete_check(project_id: int, check_id: int, request: Request = None, x_admin_token: Optional[str] = Header(None), authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), session: Session = Depends(get_session)):
+def delete_check(project_id: int = Path(..., ge=1), check_id: int = Path(..., ge=1), request: Request = None, x_admin_token: Optional[str] = Header(None), authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), session: Session = Depends(get_session)):
     try:
         project = require_admin_or_project_api_key(project_id, x_admin_token=x_admin_token, authorization=authorization, x_api_key=x_api_key, session=session)
     except HTTPException:
@@ -211,28 +232,36 @@ def delete_check(project_id: int, check_id: int, request: Request = None, x_admi
     return {"status": "deleted"}
 
 
-@router.get("/", response_model=List[CheckRead])
-def list_checks(project_id: int, session: Session = Depends(get_session)):
+@router.get("/", response_model=List[CheckRead], dependencies=[Depends(limit_public_requests)])
+def list_checks(project_id: int = Path(..., ge=1), session: Session = Depends(get_session)):
     """List checks for a project (minimal visibility endpoint)."""
     checks = session.exec(select(CheckModel).where(CheckModel.project_id == project_id)).all()
     return checks
 
 
-@router.get("/{check_id}", response_model=CheckRead)
-def get_check(project_id: int, check_id: int, session: Session = Depends(get_session)):
+@router.get("/{check_id}", response_model=CheckRead, dependencies=[Depends(limit_public_requests)])
+def get_check(project_id: int = Path(..., ge=1), check_id: int = Path(..., ge=1), session: Session = Depends(get_session)):
     check = session.get(CheckModel, check_id)
     if not check or check.project_id != project_id:
         raise HTTPException(status_code=404, detail="Check not found")
     return check
 
 
-class MaintenanceWindow(BaseModel):
+class MaintenanceWindow(StrictBaseModel):
     maintenance_starts_at: Optional[datetime] = None
     maintenance_ends_at: Optional[datetime] = None
 
+    @root_validator
+    def _validate_window(cls, values):
+        start = values.get("maintenance_starts_at")
+        end = values.get("maintenance_ends_at")
+        if start and end and end <= start:
+            raise ValueError("maintenance_ends_at must be after maintenance_starts_at")
+        return values
+
 
 @router.get("/{check_id}/maintenance", response_model=MaintenanceWindow)
-def get_check_maintenance(project_id: int, check_id: int, session: Session = Depends(get_session)):
+def get_check_maintenance(project_id: int = Path(..., ge=1), check_id: int = Path(..., ge=1), session: Session = Depends(get_session)):
     check = session.get(CheckModel, check_id)
     if not check or check.project_id != project_id:
         raise HTTPException(status_code=404, detail="Check not found")
@@ -240,7 +269,7 @@ def get_check_maintenance(project_id: int, check_id: int, session: Session = Dep
 
 
 @router.post("/{check_id}/maintenance", response_model=MaintenanceWindow)
-def set_check_maintenance(project_id: int, check_id: int, payload: MaintenanceWindow, request: Request = None, x_admin_token: Optional[str] = Header(None), authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), session: Session = Depends(get_session)):
+def set_check_maintenance(project_id: int = Path(..., ge=1), check_id: int = Path(..., ge=1), payload: MaintenanceWindow = Body(...), request: Request = None, x_admin_token: Optional[str] = Header(None), authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), session: Session = Depends(get_session)):
     try:
         project = require_admin_or_project_api_key(project_id, x_admin_token=x_admin_token, authorization=authorization, x_api_key=x_api_key, session=session)
     except HTTPException:

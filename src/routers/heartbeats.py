@@ -2,19 +2,26 @@ import json
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, Body
+from fastapi import APIRouter, Depends, Body, Path
+from pydantic import constr
 from sqlmodel import Session, select
 
 from ..db import get_session
 from ..models import Check as CheckModel, Heartbeat as HeartbeatModel, Event as EventModel, CheckType, EventType
 from ..deps import require_project_api_key, limit_by_api_key
+from ..schemas import StrictBaseModel
 
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["heartbeats"])
 
 
+class HeartbeatIn(StrictBaseModel):
+    timestamp: Optional[datetime] = None
+    message: Optional[constr(max_length=500)] = None
+
+
 @router.post("/heartbeat/{name}")
-def post_heartbeat(project_id: int, name: str, payload: Optional[Dict[str, Any]] = Body(None), _proj = Depends(require_project_api_key), _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
+def post_heartbeat(project_id: int = Path(..., ge=1), name: str = Path(..., min_length=1, max_length=120), payload: Optional[HeartbeatIn] = Body(None), _proj = Depends(require_project_api_key), _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
     """Ingest a heartbeat for `project_id`/`name`.
 
     - Creates a `Check` automatically the first time a heartbeat for
@@ -33,7 +40,8 @@ def post_heartbeat(project_id: int, name: str, payload: Optional[Dict[str, Any]]
         session.refresh(check)
 
     # record heartbeat row (payload optional)
-    hb = HeartbeatModel(check_id=check.id, payload=json.dumps(payload) if payload is not None else None)
+    hb_payload = payload.dict(exclude_none=True) if payload is not None else None
+    hb = HeartbeatModel(check_id=check.id, payload=json.dumps(hb_payload) if hb_payload is not None else None)
     session.add(hb)
 
     # update check status atomically-ish

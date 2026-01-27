@@ -37,6 +37,96 @@ if os.environ.get('REDIS_URL'):
 
 # In-memory fallback counters for user-token rate limiting when Redis is not configured.
 _user_counters: dict = {}
+_public_counters: dict = {}
+
+
+def _get_client_ip(request: Request) -> Optional[str]:
+    """Best-effort client IP extraction (supports X-Forwarded-For)."""
+    if not request:
+        return None
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        # Take the first hop (original client)
+        return xff.split(",")[0].strip()
+    xri = request.headers.get("x-real-ip")
+    if xri:
+        return xri.strip()
+    return request.client.host if request.client else None
+
+
+def _raise_rate_limit(window_seconds: int) -> None:
+    raise HTTPException(
+        status_code=429,
+        detail="Rate limit exceeded",
+        headers={"Retry-After": str(window_seconds)},
+    )
+
+
+def _enforce_counter(counter: dict, key: str, limit: int, window_seconds: int) -> None:
+    if limit <= 0:
+        return
+    cur = counter.get(key, 0) + 1
+    counter[key] = cur
+    if cur > limit:
+        _raise_rate_limit(window_seconds)
+    # prevent unbounded memory growth
+    if len(counter) > 10000:
+        counter.clear()
+
+
+def _enforce_rate_limit(prefix: str, ident: str, limit: int, window_seconds: int) -> None:
+    """Shared rate limit implementation using Redis when available."""
+    if limit <= 0 or not ident:
+        return
+    minute = datetime.utcnow().strftime('%Y%m%d%H%M')
+    rkey = f"{prefix}:{ident}:{minute}"
+    if _redis is not None:
+        try:
+            val = _redis.incr(rkey)
+            if val == 1:
+                _redis.expire(rkey, max(60, int(window_seconds) + 5))
+            if val > limit:
+                _raise_rate_limit(window_seconds)
+            return
+        except HTTPException:
+            raise
+        except Exception:
+            # fall back to in-memory
+            pass
+    _enforce_counter(_public_counters, rkey, limit, window_seconds)
+
+
+def limit_public_requests(
+    request: Request,
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+) -> None:
+    """Rate limit unauthenticated/public endpoints by IP and user token.
+
+    Defaults can be tuned via env:
+    - PUBLIC_RATE_LIMIT_PER_MINUTE (IP limit, default 120)
+    - PUBLIC_USER_RATE_LIMIT_PER_MINUTE (user token limit, default 120)
+    - PUBLIC_RATE_LIMIT_WINDOW_SECONDS (window size, default 60)
+    """
+    admin_token = os.environ.get('ADMIN_TOKEN')
+    if admin_token and x_admin_token and x_admin_token == admin_token:
+        return
+
+    window = int(os.environ.get("PUBLIC_RATE_LIMIT_WINDOW_SECONDS", "60"))
+    ip_limit = int(os.environ.get("PUBLIC_RATE_LIMIT_PER_MINUTE", "120"))
+    user_limit = int(os.environ.get("PUBLIC_USER_RATE_LIMIT_PER_MINUTE", "120"))
+
+    client_ip = _get_client_ip(request)
+    if client_ip:
+        _enforce_rate_limit("pubip", client_ip, ip_limit, window)
+
+    # If a bearer user token is present, also enforce per-user limit.
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization.split(None, 1)[1].strip()
+        ut = session.exec(select(UserToken).where(UserToken.token == token)).first()
+        if ut and (not ut.expires_at or ut.expires_at >= datetime.utcnow()):
+            _enforce_rate_limit("pubuser", str(ut.user_id), user_limit, window)
 
 
 def require_admin_or_project_api_key(project_id: int, x_admin_token: Optional[str] = Header(None), authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), session: Session = Depends(get_session)) -> Project:
@@ -108,6 +198,7 @@ def limit_by_api_key(project_id: int, authorization: Optional[str] = Header(None
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing API key")
 
     # find matching ApiKey for project
+    window_seconds = int(os.environ.get("API_RATE_LIMIT_WINDOW_SECONDS", "60"))
     stmt = select(ApiKey).where(ApiKey.project_id == project_id)
     candidates = session.exec(stmt).all()
     matched = None
@@ -139,7 +230,7 @@ def limit_by_api_key(project_id: int, authorization: Optional[str] = Header(None
                     if val == 1:
                         _redis.expire(rkey, 70)
                     if val > limit:
-                        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+                        _raise_rate_limit(window_seconds)
                     return ut
                 except HTTPException:
                     raise
@@ -151,7 +242,7 @@ def limit_by_api_key(project_id: int, authorization: Optional[str] = Header(None
                 uu = session.exec(select(UserUsage).where(UserUsage.user_id == ut.user_id, UserUsage.minute_start == now)).first()
                 if uu:
                     if uu.count >= limit:
-                        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+                        _raise_rate_limit(window_seconds)
                     uu.count = uu.count + 1
                     session.add(uu)
                     session.commit()
@@ -166,7 +257,7 @@ def limit_by_api_key(project_id: int, authorization: Optional[str] = Header(None
                 rkey = f"user:{ut.user_id}:{minute}"
                 cur = _user_counters.get(rkey, 0)
                 if cur >= limit:
-                    raise HTTPException(status_code=429, detail="Rate limit exceeded")
+                    _raise_rate_limit(window_seconds)
                 _user_counters[rkey] = cur + 1
                 if len(_user_counters) > 10000:
                     _user_counters.clear()
@@ -189,7 +280,7 @@ def limit_by_api_key(project_id: int, authorization: Optional[str] = Header(None
                 # expire after 70 seconds to cover clock skew
                 _redis.expire(rkey, 70)
             if val > limit:
-                raise HTTPException(status_code=429, detail="Rate limit exceeded")
+                _raise_rate_limit(window_seconds)
             return matched
         except HTTPException:
             raise
@@ -202,7 +293,7 @@ def limit_by_api_key(project_id: int, authorization: Optional[str] = Header(None
     us = session.exec(select(ApiKeyUsage).where(ApiKeyUsage.api_key_id == matched.id, ApiKeyUsage.minute_start == now)).first()
     if us:
         if us.count >= limit:
-            raise HTTPException(status_code=429, detail="Rate limit exceeded")
+            _raise_rate_limit(window_seconds)
         us.count = us.count + 1
         session.add(us)
         session.commit()

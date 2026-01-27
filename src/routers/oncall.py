@@ -1,49 +1,61 @@
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Header, Request, status
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Header, Request, status, Path, Query, Body
+from pydantic import BaseModel, EmailStr, conint, constr, root_validator
 from sqlmodel import Session, select
 
 from ..db import get_session
 from ..models import OnCallRotation, OnCallMember, OnCallEscalation, OnCallAlert, Project, AuditLog
 from ..deps import require_admin_or_owner, require_project_api_key, limit_by_api_key, get_audit_context
+from ..schemas import StrictBaseModel
 
 router = APIRouter(prefix="/projects/{project_id}/oncall", tags=["oncall"])
 
 
-class RotationIn(BaseModel):
-    name: str
-    interval_minutes: Optional[int] = 1440
+class RotationIn(StrictBaseModel):
+    name: constr(min_length=1, max_length=120)
+    interval_minutes: Optional[conint(ge=1, le=10080)] = 1440
     start_at: Optional[datetime] = None
     enabled: Optional[bool] = True
 
 
-class MemberIn(BaseModel):
-    rotation_id: int
-    name: str
-    email: Optional[str] = None
-    phone: Optional[str] = None
-    order: Optional[int] = 0
+class MemberIn(StrictBaseModel):
+    rotation_id: conint(ge=1)
+    name: constr(min_length=1, max_length=120)
+    email: Optional[EmailStr] = None
+    phone: Optional[constr(regex=r"^\\+?[0-9]{7,20}$")] = None
+    order: Optional[conint(ge=0, le=1000)] = 0
     active: Optional[bool] = True
 
 
-class EscalationIn(BaseModel):
-    level: int
-    delay_minutes: Optional[int] = 15
-    target_type: str
-    rotation_id: Optional[int] = None
-    target_value: Optional[str] = None
+class EscalationIn(StrictBaseModel):
+    level: conint(ge=0, le=20)
+    delay_minutes: Optional[conint(ge=0, le=1440)] = 15
+    target_type: Literal["rotation", "email", "sms"]
+    rotation_id: Optional[conint(ge=1)] = None
+    target_value: Optional[constr(max_length=200)] = None
     enabled: Optional[bool] = True
+
+    @root_validator
+    def _validate_target(cls, values):
+        ttype = values.get("target_type")
+        rotation_id = values.get("rotation_id")
+        target_value = values.get("target_value")
+        if ttype == "rotation" and not rotation_id:
+            raise ValueError("rotation_id is required when target_type=rotation")
+        if ttype in ("email", "sms") and not target_value:
+            raise ValueError("target_value is required for email/sms targets")
+        return values
 
 
 @router.get("/rotations")
-def list_rotations(project_id: int, session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
+def list_rotations(project_id: int = Path(..., ge=1), session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
     return session.exec(select(OnCallRotation).where(OnCallRotation.project_id == project_id)).all()
 
 
 @router.post("/rotations", status_code=status.HTTP_201_CREATED)
-def create_rotation(project_id: int, payload: RotationIn, request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
+def create_rotation(project_id: int = Path(..., ge=1), payload: RotationIn = Body(...), request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
     require_admin_or_owner(project_id, x_admin_token=x_admin_token, authorization=authorization, session=session)
     rot = OnCallRotation(
         project_id=project_id,
@@ -66,7 +78,7 @@ def create_rotation(project_id: int, payload: RotationIn, request: Request = Non
 
 
 @router.delete("/rotations/{rotation_id}")
-def delete_rotation(project_id: int, rotation_id: int, request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), session: Session = Depends(get_session)):
+def delete_rotation(project_id: int = Path(..., ge=1), rotation_id: int = Path(..., ge=1), request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), session: Session = Depends(get_session)):
     require_admin_or_owner(project_id, x_admin_token=x_admin_token, authorization=authorization, session=session)
     rot = session.get(OnCallRotation, rotation_id)
     if not rot or rot.project_id != project_id:
@@ -84,12 +96,12 @@ def delete_rotation(project_id: int, rotation_id: int, request: Request = None, 
 
 
 @router.get("/rotations/{rotation_id}/members")
-def list_members(project_id: int, rotation_id: int, session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
+def list_members(project_id: int = Path(..., ge=1), rotation_id: int = Path(..., ge=1), session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
     return session.exec(select(OnCallMember).where(OnCallMember.rotation_id == rotation_id).order_by(OnCallMember.order)).all()
 
 
 @router.post("/rotations/{rotation_id}/members", status_code=status.HTTP_201_CREATED)
-def add_member(project_id: int, rotation_id: int, payload: MemberIn, request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
+def add_member(project_id: int = Path(..., ge=1), rotation_id: int = Path(..., ge=1), payload: MemberIn = Body(...), request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
     require_admin_or_owner(project_id, x_admin_token=x_admin_token, authorization=authorization, session=session)
     member = OnCallMember(
         rotation_id=rotation_id,
@@ -113,7 +125,7 @@ def add_member(project_id: int, rotation_id: int, payload: MemberIn, request: Re
 
 
 @router.delete("/rotations/{rotation_id}/members/{member_id}")
-def delete_member(project_id: int, rotation_id: int, member_id: int, request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), session: Session = Depends(get_session)):
+def delete_member(project_id: int = Path(..., ge=1), rotation_id: int = Path(..., ge=1), member_id: int = Path(..., ge=1), request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), session: Session = Depends(get_session)):
     require_admin_or_owner(project_id, x_admin_token=x_admin_token, authorization=authorization, session=session)
     member = session.get(OnCallMember, member_id)
     if not member or member.rotation_id != rotation_id:
@@ -131,12 +143,12 @@ def delete_member(project_id: int, rotation_id: int, member_id: int, request: Re
 
 
 @router.get("/escalations")
-def list_escalations(project_id: int, session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
+def list_escalations(project_id: int = Path(..., ge=1), session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
     return session.exec(select(OnCallEscalation).where(OnCallEscalation.project_id == project_id).order_by(OnCallEscalation.level)).all()
 
 
 @router.post("/escalations", status_code=status.HTTP_201_CREATED)
-def create_escalation(project_id: int, payload: EscalationIn, request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
+def create_escalation(project_id: int = Path(..., ge=1), payload: EscalationIn = Body(...), request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
     require_admin_or_owner(project_id, x_admin_token=x_admin_token, authorization=authorization, session=session)
     esc = OnCallEscalation(
         project_id=project_id,
@@ -161,7 +173,7 @@ def create_escalation(project_id: int, payload: EscalationIn, request: Request =
 
 
 @router.delete("/escalations/{escalation_id}")
-def delete_escalation(project_id: int, escalation_id: int, request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), session: Session = Depends(get_session)):
+def delete_escalation(project_id: int = Path(..., ge=1), escalation_id: int = Path(..., ge=1), request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), session: Session = Depends(get_session)):
     require_admin_or_owner(project_id, x_admin_token=x_admin_token, authorization=authorization, session=session)
     esc = session.get(OnCallEscalation, escalation_id)
     if not esc or esc.project_id != project_id:
@@ -179,7 +191,7 @@ def delete_escalation(project_id: int, escalation_id: int, request: Request = No
 
 
 @router.get("/alerts")
-def list_oncall_alerts(project_id: int, status_filter: Optional[str] = None, session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
+def list_oncall_alerts(project_id: int = Path(..., ge=1), status_filter: Optional[str] = Query(None, max_length=32), session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
     stmt = select(OnCallAlert).where(OnCallAlert.project_id == project_id)
     if status_filter:
         stmt = stmt.where(OnCallAlert.status == status_filter)
@@ -187,7 +199,7 @@ def list_oncall_alerts(project_id: int, status_filter: Optional[str] = None, ses
 
 
 @router.post("/alerts/{alert_id}/close")
-def close_alert(project_id: int, alert_id: int, request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), session: Session = Depends(get_session)):
+def close_alert(project_id: int = Path(..., ge=1), alert_id: int = Path(..., ge=1), request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), session: Session = Depends(get_session)):
     require_admin_or_owner(project_id, x_admin_token=x_admin_token, authorization=authorization, session=session)
     alert = session.get(OnCallAlert, alert_id)
     if not alert or alert.project_id != project_id:

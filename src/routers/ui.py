@@ -1,10 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Path
 from sqlmodel import Session, select
 
 from ..db import get_session
 from ..models import Project, Check, Event, Incident
+from ..deps import limit_public_requests
 
-router = APIRouter(prefix="/ui", tags=["ui"])
+router = APIRouter(prefix="/ui", tags=["ui"], dependencies=[Depends(limit_public_requests)])
 
 
 @router.get("/incidents")
@@ -42,8 +43,8 @@ def checks_page():
     <body>
     <h1>Checks</h1>
     <div class="row"><label>Project: <input id="projectId" value="1" style="width:80px"/></label>
-      <label>Admin token: <input id="adminToken" placeholder="optional" style="width:240px"/></label>
-      <label>User token: <input id="userToken" placeholder="optional" style="width:240px"/></label>
+      <label>Admin token: <input id="adminToken" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></label>
+      <label>User token: <input id="userToken" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></label>
       <button id="loadChecksBtn">Load</button>
     </div>
     <h2>Create Check</h2>
@@ -73,7 +74,7 @@ def checks_page():
 
 
 @router.get('/checks/{check_id}')
-def checks_manage_page(check_id: int):
+def checks_manage_page(check_id: int = Path(..., ge=1)):
     html = """
     <html>
     <head>
@@ -84,7 +85,7 @@ def checks_manage_page(check_id: int):
     <body>
     <h1>Manage Check __CHECK_ID__</h1>
     <div class="muted">Project: <input id="projectId" value="1" style="width:80px"/></div>
-    <div class="muted">Admin token: <input id="adminToken" placeholder="optional" style="width:240px"/></div>
+    <div class="muted">Admin token: <input id="adminToken" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></div>
     <h2>Update</h2>
     <div>
       <input id="name" placeholder="Name"/>
@@ -119,7 +120,7 @@ def checks_manage_page(check_id: int):
 
 
 @router.get("/incidents/{incident_id}")
-def incident_detail_page(incident_id: int):
+def incident_detail_page(incident_id: int = Path(..., ge=1)):
     return """
     <html>
     <head>
@@ -152,9 +153,7 @@ def snapshots_page():
     <h1>Snapshots (last 24h)</h1>
     <div class="row">
       <label>Project: <input id="projectId" value="1" style="width:80px"/></label>
-      <label>API Key: <input id="apiKey" placeholder="optional" style="width:240px"/></label>
-      <label><input type="checkbox" id="rememberApiKey" /> Remember API Key</label>
-      <button id="showApiKeyBtn" class="btn">Show</button>
+      <label>API Key: <input id="apiKey" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></label>
       <a id="settingsLink" class="btn" href="/ui/projects/1/settings">Settings</a>
       <label>Check: <select id="checkId" style="width:120px"><option value="">(all)</option></select></label>
       <label>Start: <input id="start" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
@@ -174,7 +173,7 @@ def snapshots_page():
 
 
 @router.get("/projects/{project_id}/settings")
-def project_settings_page(project_id: int):
+def project_settings_page(project_id: int = Path(..., ge=1)):
     return f"""
     <html>
     <head>
@@ -186,8 +185,8 @@ def project_settings_page(project_id: int):
     <h1>Project Settings</h1>
     <div class="row">
       <label>Project: <input id="projectId" value="{project_id}" style="width:80px"/></label>
-      <label>API Key: <input id="apiKey" placeholder="optional" style="width:240px"/></label>
-      <label>Admin token: <input id="adminToken" placeholder="optional" style="width:240px"/></label>
+      <label>API Key: <input id="apiKey" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></label>
+      <label>Admin token: <input id="adminToken" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></label>
       <button id="loadBtn" class="btn">Load</button>
       <button id="saveBtn" class="btn">Save</button>
       <a class="btn" href="/ui/projects/{project_id}/oncall">On-call</a>
@@ -213,7 +212,7 @@ def project_settings_page(project_id: int):
 
 
 @router.get("/projects/{project_id}/oncall")
-def oncall_page(project_id: int):
+def oncall_page(project_id: int = Path(..., ge=1)):
     return f"""
     <html>
     <head>
@@ -225,8 +224,8 @@ def oncall_page(project_id: int):
     <h1>On-call Management</h1>
     <div class="row">
       <label>Project: <input id="projectId" value="{project_id}" style="width:80px"/></label>
-      <label>API Key: <input id="apiKey" placeholder="optional" style="width:240px"/></label>
-      <label>Admin token: <input id="adminToken" placeholder="optional" style="width:240px"/></label>
+      <label>API Key: <input id="apiKey" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></label>
+      <label>Admin token: <input id="adminToken" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></label>
       <button id="refreshBtn" class="btn">Refresh</button>
     </div>
     <h2>Rotations</h2>
@@ -269,7 +268,7 @@ def oncall_page(project_id: int):
 
 
 @router.get("/projects/{project_id}/remediation")
-def remediation_page(project_id: int):
+def remediation_page(project_id: int = Path(..., ge=1)):
     return f"""
     <html>
     <head>
@@ -281,8 +280,8 @@ def remediation_page(project_id: int):
     <h1>Remediation Hooks</h1>
     <div class="row">
       <label>Project: <input id="projectId" value="{project_id}" style="width:80px"/></label>
-      <label>API Key: <input id="apiKey" placeholder="optional" style="width:240px"/></label>
-      <label>Admin token: <input id="adminToken" placeholder="optional" style="width:240px"/></label>
+      <label>API Key: <input id="apiKey" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></label>
+      <label>Admin token: <input id="adminToken" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></label>
       <button id="refreshBtn" class="btn">Refresh</button>
     </div>
     <h2>Create Hook</h2>
@@ -310,7 +309,7 @@ def remediation_page(project_id: int):
 
 
 @router.get("/status/{project_id}")
-def public_status_page(project_id: int):
+def public_status_page(project_id: int = Path(..., ge=1)):
     return f"""
     <html>
     <head>
@@ -328,7 +327,7 @@ def public_status_page(project_id: int):
 
 
 @router.get("/status/{project_id}/data")
-def public_status_data(project_id: int, session: Session = Depends(get_session)):
+def public_status_data(project_id: int = Path(..., ge=1), session: Session = Depends(get_session)):
     project = session.get(Project, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")

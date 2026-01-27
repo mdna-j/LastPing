@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Path
 from sqlmodel import Session, select
 
 from ..db import get_session
@@ -12,7 +12,7 @@ router = APIRouter(prefix="/projects/{project_id}", tags=["analytics"])
 
 
 @router.get("/analytics/failures")
-def failure_summary(project_id: int, days: int = Query(30), session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
+def failure_summary(project_id: int = Path(..., ge=1), days: int = Query(30, ge=1, le=365), session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
     """Return top failing checks by down events in the window."""
     end_dt = datetime.utcnow()
     start_dt = end_dt - timedelta(days=days)
@@ -30,7 +30,7 @@ def failure_summary(project_id: int, days: int = Query(30), session: Session = D
 
 
 @router.get("/analytics/trends")
-def failure_trends(project_id: int, days: int = Query(30), interval: str = Query("day"), session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
+def failure_trends(project_id: int = Path(..., ge=1), days: int = Query(30, ge=1, le=365), interval: str = Query("day", max_length=8), session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
     """Return aggregated counts of down events for simple trend analysis."""
     end_dt = datetime.utcnow()
     start_dt = end_dt - timedelta(days=days)
@@ -59,7 +59,7 @@ def failure_trends(project_id: int, days: int = Query(30), interval: str = Query
 
 
 @router.get("/analytics/similar-incidents")
-def similar_incidents(project_id: int, days: int = Query(90), session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
+def similar_incidents(project_id: int = Path(..., ge=1), days: int = Query(90, ge=1, le=365), session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
     """Group incidents by check and message signature for similarity heuristics."""
     end_dt = datetime.utcnow()
     start_dt = end_dt - timedelta(days=days)

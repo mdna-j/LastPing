@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 from typing import Optional, List
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Path
 from sqlmodel import Session, select
 
 from ..db import get_session
@@ -12,29 +12,32 @@ from ..models import UptimeSnapshot
 router = APIRouter(prefix="/projects/{project_id}", tags=["metrics"])
 
 
+def _parse_dt(label: str, value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except Exception:
+        raise HTTPException(status_code=400, detail=f"{label} must be ISO8601")
+
+
 def _parse_range(start: Optional[str], end: Optional[str]) -> tuple[datetime, datetime]:
     now = datetime.utcnow()
-    if start:
-        start_dt = datetime.fromisoformat(start)
-    else:
-        start_dt = now - (now - datetime.utcfromtimestamp(0))  # epoch fallback; will be corrected below
-    if end:
-        end_dt = datetime.fromisoformat(end)
-    else:
-        end_dt = now
+    start_dt = _parse_dt("start", start) or now - (now - datetime.utcfromtimestamp(0))
+    end_dt = _parse_dt("end", end) or now
     if start_dt >= end_dt:
         raise HTTPException(status_code=400, detail="start must be before end")
     return start_dt, end_dt
 
 
 @router.get("/metrics/uptime")
-def uptime(project_id: int, check_id: Optional[int] = Query(None), start: Optional[str] = Query(None), end: Optional[str] = Query(None), session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
+def uptime(project_id: int = Path(..., ge=1), check_id: Optional[int] = Query(None, ge=1), start: Optional[str] = Query(None, max_length=40), end: Optional[str] = Query(None, max_length=40), session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
     """Return uptime percentage for a check or project over the given ISO8601 time range.
 
     If `check_id` is omitted, returns aggregated uptime across all checks (time-weighted).
     """
-    start_dt = datetime.fromisoformat(start) if start else datetime.utcnow() - timedelta(days=7)
-    end_dt = datetime.fromisoformat(end) if end else datetime.utcnow()
+    start_dt = _parse_dt("start", start) if start else datetime.utcnow() - timedelta(days=7)
+    end_dt = _parse_dt("end", end) if end else datetime.utcnow()
     if start_dt >= end_dt:
         raise HTTPException(status_code=400, detail="start must be before end")
 
@@ -85,9 +88,9 @@ def uptime(project_id: int, check_id: Optional[int] = Query(None), start: Option
 
 
 @router.get("/events/timeline")
-def timeline(project_id: int, check_id: Optional[int] = Query(None), start: Optional[str] = Query(None), end: Optional[str] = Query(None), limit: int = Query(100), session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
-    start_dt = datetime.fromisoformat(start) if start else datetime.utcnow() - timedelta(days=7)
-    end_dt = datetime.fromisoformat(end) if end else datetime.utcnow()
+def timeline(project_id: int = Path(..., ge=1), check_id: Optional[int] = Query(None, ge=1), start: Optional[str] = Query(None, max_length=40), end: Optional[str] = Query(None, max_length=40), limit: int = Query(100, ge=1, le=1000), session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
+    start_dt = _parse_dt("start", start) if start else datetime.utcnow() - timedelta(days=7)
+    end_dt = _parse_dt("end", end) if end else datetime.utcnow()
     if start_dt >= end_dt:
         raise HTTPException(status_code=400, detail="start must be before end")
     stmt = select(Event).where(Event.project_id == project_id, Event.created_at >= start_dt, Event.created_at <= end_dt)
@@ -102,9 +105,9 @@ def timeline(project_id: int, check_id: Optional[int] = Query(None), start: Opti
 
 
 @router.get("/metrics/mttr")
-def mttr(project_id: int, check_id: Optional[int] = Query(None), start: Optional[str] = Query(None), end: Optional[str] = Query(None), session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
-    start_dt = datetime.fromisoformat(start) if start else datetime.utcnow() - timedelta(days=30)
-    end_dt = datetime.fromisoformat(end) if end else datetime.utcnow()
+def mttr(project_id: int = Path(..., ge=1), check_id: Optional[int] = Query(None, ge=1), start: Optional[str] = Query(None, max_length=40), end: Optional[str] = Query(None, max_length=40), session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
+    start_dt = _parse_dt("start", start) if start else datetime.utcnow() - timedelta(days=30)
+    end_dt = _parse_dt("end", end) if end else datetime.utcnow()
     if start_dt >= end_dt:
         raise HTTPException(status_code=400, detail="start must be before end")
 
@@ -138,10 +141,10 @@ def mttr(project_id: int, check_id: Optional[int] = Query(None), start: Optional
 
 
 @router.get("/metrics/availability")
-def availability_report(project_id: int, start: Optional[str] = Query(None), end: Optional[str] = Query(None), session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
+def availability_report(project_id: int = Path(..., ge=1), start: Optional[str] = Query(None, max_length=40), end: Optional[str] = Query(None, max_length=40), session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
     """Return availability report with SLO/SLA compliance for a project."""
-    start_dt = datetime.fromisoformat(start) if start else datetime.utcnow() - timedelta(days=30)
-    end_dt = datetime.fromisoformat(end) if end else datetime.utcnow()
+    start_dt = _parse_dt("start", start) if start else datetime.utcnow() - timedelta(days=30)
+    end_dt = _parse_dt("end", end) if end else datetime.utcnow()
     if start_dt >= end_dt:
         raise HTTPException(status_code=400, detail="start must be before end")
 
@@ -201,7 +204,7 @@ def availability_report(project_id: int, start: Optional[str] = Query(None), end
 
 
 @router.get("/metrics/snapshots")
-def snapshots(project_id: int, check_id: Optional[int] = Query(None), limit: int = Query(100), session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
+def snapshots(project_id: int = Path(..., ge=1), check_id: Optional[int] = Query(None, ge=1), limit: int = Query(100, ge=1, le=1000), session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
     """Return recent UptimeSnapshot rows for a project (optionally filtered by check_id)."""
     stmt = select(UptimeSnapshot).where(UptimeSnapshot.project_id == project_id)
     if check_id:

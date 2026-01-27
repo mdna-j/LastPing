@@ -1,19 +1,43 @@
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Literal
 
-from fastapi import APIRouter, Depends, Body, HTTPException, Header
+from fastapi import APIRouter, Depends, Body, HTTPException, Header, Path
+from pydantic import constr, root_validator
 from sqlmodel import Session, select
 
 from ..db import get_session
 from ..models import Check as CheckModel, Event as EventModel, EventType, CheckType, Project
 from ..deps import require_project_api_key, limit_by_api_key
+from ..schemas import StrictBaseModel
 import logging
-from .. import db as _db
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["webhooks"]) 
+
+
+class WebhookIn(StrictBaseModel):
+    check_name: constr(min_length=1, max_length=120)
+    event: Optional[Literal["down", "up", "heartbeat", "http_failure", "degraded"]] = "down"
+    message: Optional[constr(max_length=1000)] = None
+    timestamp: Optional[datetime] = None
+
+    @root_validator(pre=True)
+    def _coerce_legacy_fields(cls, values):
+        # Support legacy keys while still rejecting unexpected fields.
+        if "check_name" not in values:
+            for alt in ("check", "name"):
+                if alt in values:
+                    values["check_name"] = values.pop(alt)
+                    break
+        if "event" not in values and "type" in values:
+            values["event"] = values.pop("type")
+        if "event" in values and isinstance(values["event"], str):
+            values["event"] = values["event"].lower()
+        if "message" not in values and "body" in values:
+            values["message"] = values.pop("body")
+        return values
 
 
 def _try_limit(project_id: int, authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), session: Session = Depends(get_session)):
@@ -30,7 +54,7 @@ def _try_limit(project_id: int, authorization: Optional[str] = Header(None), x_a
 
 
 @router.post("/webhook")
-def receive_webhook(project_id: int, payload: Optional[Dict[str, Any]] = Body(None), _proj: Project = Depends(require_project_api_key), _rl = Depends(_try_limit), session: Session = Depends(get_session)):
+def receive_webhook(project_id: int = Path(..., ge=1), payload: Optional[WebhookIn] = Body(None), _proj: Project = Depends(require_project_api_key), _rl = Depends(_try_limit), session: Session = Depends(get_session)):
     """Generic inbound webhook endpoint.
 
     Expected JSON payload (flexible):
@@ -45,38 +69,15 @@ def receive_webhook(project_id: int, payload: Optional[Dict[str, Any]] = Body(No
     update `last_ping` for heartbeat events. It respects project/check
     maintenance windows and returns 202 on acceptance.
     """
-    # quick instrumentation
-    try:
-        logger.info("webhook called for project_id=%s payload=%s", project_id, payload)
-        logger.info("module DB URL: %s", getattr(_db.engine, 'url', None))
-    except Exception:
-        logger.exception("unable to log DB url")
-
     # normalize payload
     if payload is None:
-        payload = {}
-    name = payload.get("check_name") or payload.get("check") or payload.get("name")
-    if not name:
-        raise HTTPException(status_code=400, detail="Missing check_name in payload")
+        raise HTTPException(status_code=400, detail="Payload required")
+    name = payload.check_name
+    ev_type = (payload.event or "down").lower()
+    msg = payload.message
+    ts = payload.timestamp
 
-    ev_type = (payload.get("event") or payload.get("type") or "down").lower()
-    if ev_type not in (EventType.DOWN, EventType.UP, EventType.HEARTBEAT):
-        ev_type = EventType.DOWN
-
-    msg = payload.get("message") or payload.get("body") or None
-    ts = None
-    if payload.get("timestamp"):
-        try:
-            ts = datetime.fromisoformat(payload.get("timestamp"))
-        except Exception:
-            ts = None
-
-    # find or create check
-    try:
-        bind = session.get_bind()
-        logger.info("session bind: %s", getattr(bind, 'engine', getattr(bind, 'url', bind)))
-    except Exception:
-        logger.exception("unable to get session bind")
+    logger.info("webhook received project_id=%s check=%s event=%s", project_id, name, ev_type)
 
     chk = session.exec(select(CheckModel).where(CheckModel.project_id == project_id, CheckModel.name == name)).first()
     if not chk:
@@ -117,13 +118,20 @@ def receive_webhook(project_id: int, payload: Optional[Dict[str, Any]] = Body(No
         e = EventModel(check_id=chk.id, project_id=project_id, event_type=EventType.DOWN, message=msg)
     elif ev_type == EventType.UP:
         e = EventModel(check_id=chk.id, project_id=project_id, event_type=EventType.UP, message=msg)
+    elif ev_type == EventType.HTTP_FAILURE:
+        e = EventModel(check_id=chk.id, project_id=project_id, event_type=EventType.HTTP_FAILURE, message=msg)
+    elif ev_type == EventType.DEGRADED:
+        e = EventModel(check_id=chk.id, project_id=project_id, event_type=EventType.DEGRADED, message=msg)
     else:
         e = EventModel(check_id=chk.id, project_id=project_id, event_type=EventType.DOWN, message=msg)
 
     session.add(e)
     # update check status
-    if ev_type == EventType.DOWN:
+    if ev_type in (EventType.DOWN, EventType.HTTP_FAILURE):
         chk.status = "DOWN"
+        chk.consecutive_failures = (chk.consecutive_failures or 0) + 1
+    elif ev_type == EventType.DEGRADED:
+        chk.status = "DEGRADED"
         chk.consecutive_failures = (chk.consecutive_failures or 0) + 1
     elif ev_type == EventType.UP:
         chk.status = "UP"

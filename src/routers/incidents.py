@@ -2,20 +2,21 @@ from datetime import datetime
 import os
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Header, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Header, Request, Path, Body
 from sqlmodel import Session, select
-from pydantic import BaseModel
+from pydantic import BaseModel, conint, conlist, constr
 
 from ..db import get_session
 from ..models import Incident, Event, Project, AuditLog, UserToken
-from ..deps import require_project_api_key, require_admin_or_owner, get_audit_context
+from ..deps import require_project_api_key, require_admin_or_owner, get_audit_context, limit_public_requests
 from sqlalchemy import update as sa_update
+from ..schemas import StrictBaseModel
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["incidents"])
 
 
 @router.get("/incidents")
-def list_incidents(project_id: int, status: Optional[str] = Query(None), session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
+def list_incidents(project_id: int = Path(..., ge=1), status: Optional[str] = Query(None, max_length=32), session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
     stmt = select(Incident).where(Incident.project_id == project_id)
     if status:
         stmt = stmt.where(Incident.status == status)
@@ -37,7 +38,7 @@ def list_incidents(project_id: int, status: Optional[str] = Query(None), session
 
 
 @router.get("/incidents/{incident_id}")
-def get_incident(project_id: int, incident_id: int, session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
+def get_incident(project_id: int = Path(..., ge=1), incident_id: int = Path(..., ge=1), session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
     inc = session.get(Incident, incident_id)
     if not inc or inc.project_id != project_id:
         raise HTTPException(status_code=404, detail="Incident not found")
@@ -60,11 +61,11 @@ def get_incident(project_id: int, incident_id: int, session: Session = Depends(g
 
 
 # Public access via share token
-public_router = APIRouter(prefix="/incidents", tags=["incidents-public"])
+public_router = APIRouter(prefix="/incidents", tags=["incidents-public"], dependencies=[Depends(limit_public_requests)])
 
 
 @public_router.get("/public/{token}")
-def public_incident(token: str, session: Session = Depends(get_session)):
+def public_incident(token: constr(min_length=10, max_length=128), session: Session = Depends(get_session)):
     inc = session.exec(select(Incident).where(Incident.share_token == token)).first()
     if not inc:
         raise HTTPException(status_code=404, detail="Incident not found")
@@ -74,7 +75,7 @@ def public_incident(token: str, session: Session = Depends(get_session)):
 
 
 @router.post("/incidents/{incident_id}/share")
-def create_share(project_id: int, incident_id: int, session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
+def create_share(project_id: int = Path(..., ge=1), incident_id: int = Path(..., ge=1), session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
     inc = session.get(Incident, incident_id)
     if not inc or inc.project_id != project_id:
         raise HTTPException(status_code=404, detail="Incident not found")
@@ -87,12 +88,12 @@ def create_share(project_id: int, incident_id: int, session: Session = Depends(g
     return {"share_token": inc.share_token}
 
 
-class MergePayload(BaseModel):
-    into: int
+class MergePayload(StrictBaseModel):
+    into: conint(ge=1)
 
 
 @router.post("/incidents/{incident_id}/merge")
-def merge_incident(project_id: int, incident_id: int, payload: MergePayload, request: Request, session: Session = Depends(get_session), _proj: Project = Depends(require_admin_or_owner), x_admin_token: Optional[str] = Header(None), authorization: Optional[str] = Header(None)):
+def merge_incident(project_id: int = Path(..., ge=1), incident_id: int = Path(..., ge=1), payload: MergePayload = Body(...), request: Request = None, session: Session = Depends(get_session), _proj: Project = Depends(require_admin_or_owner), x_admin_token: Optional[str] = Header(None), authorization: Optional[str] = Header(None)):
     src = session.get(Incident, incident_id)
     tgt = session.get(Incident, payload.into)
     if not src or src.project_id != project_id:
@@ -121,12 +122,12 @@ def merge_incident(project_id: int, incident_id: int, payload: MergePayload, req
     return {"merged": True, "into": tgt.id}
 
 
-class SplitPayload(BaseModel):
-    event_ids: list[int]
+class SplitPayload(StrictBaseModel):
+    event_ids: conlist(conint(ge=1), min_items=1, max_items=500)
 
 
 @router.post("/incidents/{incident_id}/split")
-def split_incident(project_id: int, incident_id: int, payload: SplitPayload, request: Request, session: Session = Depends(get_session), _proj: Project = Depends(require_admin_or_owner), x_admin_token: Optional[str] = Header(None), authorization: Optional[str] = Header(None)):
+def split_incident(project_id: int = Path(..., ge=1), incident_id: int = Path(..., ge=1), payload: SplitPayload = Body(...), request: Request = None, session: Session = Depends(get_session), _proj: Project = Depends(require_admin_or_owner), x_admin_token: Optional[str] = Header(None), authorization: Optional[str] = Header(None)):
     src = session.get(Incident, incident_id)
     if not src or src.project_id != project_id:
         raise HTTPException(status_code=404, detail="Incident not found")

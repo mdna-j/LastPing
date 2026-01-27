@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from fastapi.staticfiles import StaticFiles
 
 from .db import create_db_and_tables, DATABASE_URL
@@ -15,6 +15,7 @@ from .routers.webhooks_fixed import router as webhooks_router
 from .routers.analytics import router as analytics_router
 from .routers.oncall import router as oncall_router
 from .routers.remediation import router as remediation_router
+from .deps import limit_public_requests
 
 
 app = FastAPI(title="LastPing API")
@@ -30,13 +31,13 @@ def on_startup():
         create_db_and_tables()
 
 
-@app.get("/")
+@app.get("/", dependencies=[Depends(limit_public_requests)])
 async def root():
     return {"message": "LastPing is running"}
 
 
 # Simple health endpoint
-@app.get("/health")
+@app.get("/health", dependencies=[Depends(limit_public_requests)])
 async def health():
     return {"status": "ok"}
 

@@ -1,24 +1,25 @@
 from typing import Optional, List
 
-from fastapi import APIRouter, Depends, HTTPException, Header, Request, status
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Header, Request, status, Path, Query, Body
+from pydantic import BaseModel, AnyHttpUrl, conint, constr
 from sqlmodel import Session, select
 
 from ..db import get_session
 from ..models import RemediationHook, RemediationLog, Project, AuditLog
 from ..deps import require_admin_or_owner, require_project_api_key, limit_by_api_key, get_audit_context
+from ..schemas import StrictBaseModel
 
 router = APIRouter(prefix="/projects/{project_id}/remediation", tags=["remediation"])
 
 
-class RemediationHookIn(BaseModel):
-    check_id: Optional[int] = None
-    event_type: str = "down"
-    url: str
-    method: Optional[str] = "POST"
+class RemediationHookIn(StrictBaseModel):
+    check_id: Optional[conint(ge=1)] = None
+    event_type: constr(regex=r"^(down|degraded)$") = "down"
+    url: AnyHttpUrl
+    method: Optional[constr(regex=r"(?i)^(GET|POST|PUT|PATCH|DELETE)$")] = "POST"
     enabled: Optional[bool] = True
-    cooldown_seconds: Optional[int] = 900
-    secret: Optional[str] = None
+    cooldown_seconds: Optional[conint(ge=0, le=86400)] = 900
+    secret: Optional[constr(max_length=255)] = None
 
 
 class RemediationHookOut(BaseModel):
@@ -37,20 +38,20 @@ class RemediationHookOut(BaseModel):
 
 
 @router.get("/hooks", response_model=List[RemediationHookOut])
-def list_hooks(project_id: int, session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
+def list_hooks(project_id: int = Path(..., ge=1), session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
     rows = session.exec(select(RemediationHook).where(RemediationHook.project_id == project_id)).all()
     return rows
 
 
 @router.post("/hooks", response_model=RemediationHookOut, status_code=status.HTTP_201_CREATED)
-def create_hook(project_id: int, payload: RemediationHookIn, request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
+def create_hook(project_id: int = Path(..., ge=1), payload: RemediationHookIn = Body(...), request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
     require_admin_or_owner(project_id, x_admin_token=x_admin_token, authorization=authorization, session=session)
     hook = RemediationHook(
         project_id=project_id,
         check_id=payload.check_id,
         event_type=payload.event_type,
         url=payload.url,
-        method=payload.method or "POST",
+        method=(payload.method or "POST").upper(),
         enabled=payload.enabled if payload.enabled is not None else True,
         cooldown_seconds=payload.cooldown_seconds or 900,
         secret=payload.secret,
@@ -69,7 +70,7 @@ def create_hook(project_id: int, payload: RemediationHookIn, request: Request = 
 
 
 @router.delete("/hooks/{hook_id}")
-def delete_hook(project_id: int, hook_id: int, request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), session: Session = Depends(get_session)):
+def delete_hook(project_id: int = Path(..., ge=1), hook_id: int = Path(..., ge=1), request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), session: Session = Depends(get_session)):
     require_admin_or_owner(project_id, x_admin_token=x_admin_token, authorization=authorization, session=session)
     hook = session.get(RemediationHook, hook_id)
     if not hook or hook.project_id != project_id:
@@ -87,6 +88,6 @@ def delete_hook(project_id: int, hook_id: int, request: Request = None, authoriz
 
 
 @router.get("/logs")
-def list_logs(project_id: int, limit: int = 100, session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
+def list_logs(project_id: int = Path(..., ge=1), limit: int = Query(100, ge=1, le=1000), session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
     rows = session.exec(select(RemediationLog).where(RemediationLog.project_id == project_id).order_by(RemediationLog.created_at.desc()).limit(limit)).all()
     return rows
