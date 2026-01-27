@@ -393,6 +393,13 @@ def _current_rotation_member(session: Session, rotation: OnCallRotation, now: da
     return members[idx]
 
 
+def _oncall_enabled_for_check(project: Project, check: Check) -> bool:
+    override = getattr(check, "alert_oncall_enabled", None)
+    if override is not None:
+        return bool(override)
+    return bool(getattr(project, "oncall_enabled", False))
+
+
 def _send_oncall_target(session: Session, project: Project, check: Check, alert: OnCallAlert, esc: OnCallEscalation, now: datetime) -> bool:
     msg = f"[LastPing] {alert.event_type.upper()}: {project.name}/{check.name} {alert.message or ''}".strip()
     try:
@@ -421,9 +428,27 @@ def _send_oncall_target(session: Session, project: Project, check: Check, alert:
 
 
 def _ensure_oncall_alert(session: Session, project: Project, check: Check, event_type: str, message: Optional[str], now: datetime):
-    if not getattr(project, "oncall_enabled", False):
+    if not _oncall_enabled_for_check(project, check):
         return
-    escs = session.exec(select(OnCallEscalation).where(OnCallEscalation.project_id == project.id, OnCallEscalation.enabled == True)).all()
+    escs = session.exec(
+        select(OnCallEscalation)
+        .where(
+            OnCallEscalation.project_id == project.id,
+            OnCallEscalation.enabled == True,
+            OnCallEscalation.check_id == check.id,
+        )
+        .order_by(OnCallEscalation.level)
+    ).all()
+    if not escs:
+        escs = session.exec(
+            select(OnCallEscalation)
+            .where(
+                OnCallEscalation.project_id == project.id,
+                OnCallEscalation.enabled == True,
+                OnCallEscalation.check_id == None,
+            )
+            .order_by(OnCallEscalation.level)
+        ).all()
     if not escs:
         return
     existing = session.exec(select(OnCallAlert).where(OnCallAlert.project_id == project.id, OnCallAlert.check_id == check.id, OnCallAlert.status == "open")).first()
@@ -461,14 +486,35 @@ def _process_oncall_alerts(session: Session, now: datetime):
             session.add(alert)
             session.commit()
             continue
+        if not _oncall_enabled_for_check(project, check):
+            alert.status = "closed"
+            session.add(alert)
+            session.commit()
+            continue
         if _in_maintenance(check, project, now):
             alert.next_escalation_at = now + timedelta(minutes=5)
             session.add(alert)
             session.commit()
             continue
         escs = session.exec(
-            select(OnCallEscalation).where(OnCallEscalation.project_id == project.id, OnCallEscalation.enabled == True).order_by(OnCallEscalation.level)
+            select(OnCallEscalation)
+            .where(
+                OnCallEscalation.project_id == project.id,
+                OnCallEscalation.enabled == True,
+                OnCallEscalation.check_id == check.id,
+            )
+            .order_by(OnCallEscalation.level)
         ).all()
+        if not escs:
+            escs = session.exec(
+                select(OnCallEscalation)
+                .where(
+                    OnCallEscalation.project_id == project.id,
+                    OnCallEscalation.enabled == True,
+                    OnCallEscalation.check_id == None,
+                )
+                .order_by(OnCallEscalation.level)
+            ).all()
         if not escs or alert.escalation_level >= len(escs):
             alert.status = "closed"
             session.add(alert)

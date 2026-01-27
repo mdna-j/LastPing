@@ -7,6 +7,19 @@ function headers(){
   if(ut) h['Authorization'] = 'Bearer ' + ut;
   return h;
 }
+function getTriSelect(id){
+  const el = document.getElementById(id);
+  if(!el) return null;
+  if(el.value === 'true') return true;
+  if(el.value === 'false') return false;
+  return null;
+}
+function valOrNull(id){
+  const el = document.getElementById(id);
+  if(!el) return null;
+  const v = (el.value || '').trim();
+  return v ? v : null;
+}
 async function loadChecks(){
   const pid = document.getElementById('projectId').value || '1';
   let isOwner = false;
@@ -29,17 +42,29 @@ async function createCheck(){
     name: document.getElementById('name').value,
     type: document.getElementById('type').value,
     url: document.getElementById('url').value,
-    host: document.getElementById('host').value || null,
+    host: valOrNull('host'),
     port: parseInt(document.getElementById('port').value || '0') || null,
-    dns_record_type: document.getElementById('dnsRecordType').value || null,
+    dns_record_type: valOrNull('dnsRecordType'),
     interval: parseInt(document.getElementById('interval').value || '0') || null,
     expected_interval: parseInt(document.getElementById('expectedInterval').value || '0') || null,
     grace_period: parseInt(document.getElementById('gracePeriod').value || '0') || null,
     latency_threshold_ms: parseInt(document.getElementById('latencyThreshold').value || '0') || null,
-    region: document.getElementById('region').value || null,
+    region: valOrNull('region'),
     alert_enabled: !!document.getElementById('alertEnabled').checked,
     alert_after: parseInt(document.getElementById('alertAfter').value || '0') || null,
-    alert_cooldown: parseInt(document.getElementById('alertCooldown').value || '0') || null
+    alert_cooldown: parseInt(document.getElementById('alertCooldown').value || '0') || null,
+    alert_sms_enabled: getTriSelect('alertSmsEnabled'),
+    alert_oncall_enabled: getTriSelect('alertOncallEnabled'),
+    alert_slack_enabled: getTriSelect('alertSlackEnabled'),
+    alert_discord_enabled: getTriSelect('alertDiscordEnabled'),
+    alert_pagerduty_enabled: getTriSelect('alertPagerdutyEnabled'),
+    alert_webhook_enabled: getTriSelect('alertWebhookEnabled'),
+    alert_sms_to: valOrNull('alertSmsTo'),
+    alert_oncall_email: valOrNull('alertOncallEmail'),
+    alert_slack_webhook_url: valOrNull('alertSlackWebhook'),
+    alert_discord_webhook_url: valOrNull('alertDiscordWebhook'),
+    alert_pagerduty_integration_key: valOrNull('alertPagerdutyKey'),
+    alert_generic_webhook_url: valOrNull('alertGenericWebhook')
   };
   const resp = await fetch(`/projects/${pid}/checks`, {method:'POST', headers: headers(), body: JSON.stringify(body)});
   if(resp.status==201){ alert('Created'); loadChecks(); } else { alert('Create failed'); }

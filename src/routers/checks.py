@@ -10,7 +10,7 @@ from typing import List, Optional, Literal
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status, Header, Request, Path, Body
-from pydantic import BaseModel, AnyHttpUrl, conint, constr, root_validator
+from pydantic import BaseModel, AnyHttpUrl, conint, constr, root_validator, EmailStr
 from sqlmodel import Session, select
 
 from ..db import get_session
@@ -39,6 +39,18 @@ class CheckCreate(StrictBaseModel):
     alert_enabled: Optional[bool] = True
     alert_after: Optional[conint(ge=1, le=1000)] = 1
     alert_cooldown: Optional[conint(ge=0, le=86400)] = 3600
+    alert_sms_enabled: Optional[bool] = None
+    alert_oncall_enabled: Optional[bool] = None
+    alert_slack_enabled: Optional[bool] = None
+    alert_discord_enabled: Optional[bool] = None
+    alert_pagerduty_enabled: Optional[bool] = None
+    alert_webhook_enabled: Optional[bool] = None
+    alert_sms_to: Optional[constr(regex=r"^\\+?[0-9]{7,20}$")] = None
+    alert_oncall_email: Optional[EmailStr] = None
+    alert_slack_webhook_url: Optional[AnyHttpUrl] = None
+    alert_discord_webhook_url: Optional[AnyHttpUrl] = None
+    alert_pagerduty_integration_key: Optional[constr(max_length=128)] = None
+    alert_generic_webhook_url: Optional[AnyHttpUrl] = None
     escalation_after_minutes: Optional[conint(ge=1, le=10080)] = None
     escalation_cooldown_seconds: Optional[conint(ge=0, le=86400)] = 3600
 
@@ -83,6 +95,18 @@ class CheckRead(BaseModel):
     alert_enabled: Optional[bool] = None
     alert_after: Optional[int] = None
     alert_cooldown: Optional[int] = None
+    alert_sms_enabled: Optional[bool] = None
+    alert_oncall_enabled: Optional[bool] = None
+    alert_slack_enabled: Optional[bool] = None
+    alert_discord_enabled: Optional[bool] = None
+    alert_pagerduty_enabled: Optional[bool] = None
+    alert_webhook_enabled: Optional[bool] = None
+    alert_sms_to: Optional[str] = None
+    alert_oncall_email: Optional[str] = None
+    alert_slack_webhook_url: Optional[str] = None
+    alert_discord_webhook_url: Optional[str] = None
+    alert_pagerduty_integration_key: Optional[str] = None
+    alert_generic_webhook_url: Optional[str] = None
     escalation_after_minutes: Optional[int] = None
     escalation_cooldown_seconds: Optional[int] = None
 
@@ -129,6 +153,18 @@ def create_check(project_id: int = Path(..., ge=1), payload: CheckCreate = Body(
         alert_enabled=payload.alert_enabled if payload.alert_enabled is not None else True,
         alert_after=payload.alert_after,
         alert_cooldown=payload.alert_cooldown,
+        alert_sms_enabled=payload.alert_sms_enabled,
+        alert_oncall_enabled=payload.alert_oncall_enabled,
+        alert_slack_enabled=payload.alert_slack_enabled,
+        alert_discord_enabled=payload.alert_discord_enabled,
+        alert_pagerduty_enabled=payload.alert_pagerduty_enabled,
+        alert_webhook_enabled=payload.alert_webhook_enabled,
+        alert_sms_to=payload.alert_sms_to,
+        alert_oncall_email=payload.alert_oncall_email,
+        alert_slack_webhook_url=payload.alert_slack_webhook_url,
+        alert_discord_webhook_url=payload.alert_discord_webhook_url,
+        alert_pagerduty_integration_key=payload.alert_pagerduty_integration_key,
+        alert_generic_webhook_url=payload.alert_generic_webhook_url,
         escalation_after_minutes=payload.escalation_after_minutes,
         escalation_cooldown_seconds=payload.escalation_cooldown_seconds,
         status=CheckStatus.UP,
@@ -160,6 +196,18 @@ class CheckUpdate(StrictBaseModel):
     alert_enabled: Optional[bool] = None
     alert_after: Optional[conint(ge=1, le=1000)] = None
     alert_cooldown: Optional[conint(ge=0, le=86400)] = None
+    alert_sms_enabled: Optional[bool] = None
+    alert_oncall_enabled: Optional[bool] = None
+    alert_slack_enabled: Optional[bool] = None
+    alert_discord_enabled: Optional[bool] = None
+    alert_pagerduty_enabled: Optional[bool] = None
+    alert_webhook_enabled: Optional[bool] = None
+    alert_sms_to: Optional[constr(regex=r"^\\+?[0-9]{7,20}$")] = None
+    alert_oncall_email: Optional[EmailStr] = None
+    alert_slack_webhook_url: Optional[AnyHttpUrl] = None
+    alert_discord_webhook_url: Optional[AnyHttpUrl] = None
+    alert_pagerduty_integration_key: Optional[constr(max_length=128)] = None
+    alert_generic_webhook_url: Optional[AnyHttpUrl] = None
     escalation_after_minutes: Optional[conint(ge=1, le=10080)] = None
     escalation_cooldown_seconds: Optional[conint(ge=0, le=86400)] = None
 
@@ -205,6 +253,30 @@ def update_check(project_id: int = Path(..., ge=1), check_id: int = Path(..., ge
         check.alert_after = payload.alert_after
     if payload.alert_cooldown is not None:
         check.alert_cooldown = payload.alert_cooldown
+    if payload.alert_sms_enabled is not None:
+        check.alert_sms_enabled = payload.alert_sms_enabled
+    if payload.alert_oncall_enabled is not None:
+        check.alert_oncall_enabled = payload.alert_oncall_enabled
+    if payload.alert_slack_enabled is not None:
+        check.alert_slack_enabled = payload.alert_slack_enabled
+    if payload.alert_discord_enabled is not None:
+        check.alert_discord_enabled = payload.alert_discord_enabled
+    if payload.alert_pagerduty_enabled is not None:
+        check.alert_pagerduty_enabled = payload.alert_pagerduty_enabled
+    if payload.alert_webhook_enabled is not None:
+        check.alert_webhook_enabled = payload.alert_webhook_enabled
+    if payload.alert_sms_to is not None:
+        check.alert_sms_to = payload.alert_sms_to
+    if payload.alert_oncall_email is not None:
+        check.alert_oncall_email = payload.alert_oncall_email
+    if payload.alert_slack_webhook_url is not None:
+        check.alert_slack_webhook_url = payload.alert_slack_webhook_url
+    if payload.alert_discord_webhook_url is not None:
+        check.alert_discord_webhook_url = payload.alert_discord_webhook_url
+    if payload.alert_pagerduty_integration_key is not None:
+        check.alert_pagerduty_integration_key = payload.alert_pagerduty_integration_key
+    if payload.alert_generic_webhook_url is not None:
+        check.alert_generic_webhook_url = payload.alert_generic_webhook_url
     if payload.escalation_after_minutes is not None:
         check.escalation_after_minutes = payload.escalation_after_minutes
     if payload.escalation_cooldown_seconds is not None:

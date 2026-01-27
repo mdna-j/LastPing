@@ -66,6 +66,69 @@ def checks_page():
       <input id="alertCooldown" placeholder="Cooldown (s)" style="width:140px" />
       <button id="createBtn" onclick="createCheck()">Create</button>
     </div>
+    <h3>Alert Routing (Per-check Overrides)</h3>
+    <div class="muted">Use inherit to fall back to project settings. Disabled prevents alerts for that channel even if project settings exist.</div>
+    <div class="muted">Validation hints: SMS phone uses +country code (e.g. +15551234567). Webhook URLs must be full https:// URLs.</div>
+    <div class="row">
+      <label>SMS:
+        <select id="alertSmsEnabled">
+          <option value="">inherit</option>
+          <option value="true">enabled</option>
+          <option value="false">disabled</option>
+        </select>
+      </label>
+      <input id="alertSmsTo" placeholder="+15551234567" style="width:180px"/>
+    </div>
+    <div class="row">
+      <label>On-call:
+        <select id="alertOncallEnabled">
+          <option value="">inherit</option>
+          <option value="true">enabled</option>
+          <option value="false">disabled</option>
+        </select>
+      </label>
+      <input id="alertOncallEmail" placeholder="oncall@example.com" style="width:240px"/>
+    </div>
+    <div class="row">
+      <label>Slack:
+        <select id="alertSlackEnabled">
+          <option value="">inherit</option>
+          <option value="true">enabled</option>
+          <option value="false">disabled</option>
+        </select>
+      </label>
+      <input id="alertSlackWebhook" placeholder="Slack webhook URL" style="width:360px"/>
+    </div>
+    <div class="row">
+      <label>Discord:
+        <select id="alertDiscordEnabled">
+          <option value="">inherit</option>
+          <option value="true">enabled</option>
+          <option value="false">disabled</option>
+        </select>
+      </label>
+      <input id="alertDiscordWebhook" placeholder="Discord webhook URL" style="width:360px"/>
+    </div>
+    <div class="row">
+      <label>PagerDuty:
+        <select id="alertPagerdutyEnabled">
+          <option value="">inherit</option>
+          <option value="true">enabled</option>
+          <option value="false">disabled</option>
+        </select>
+      </label>
+      <input id="alertPagerdutyKey" placeholder="Integration key" style="width:220px"/>
+    </div>
+    <div class="row">
+      <label>Webhook:
+        <select id="alertWebhookEnabled">
+          <option value="">inherit</option>
+          <option value="true">enabled</option>
+          <option value="false">disabled</option>
+        </select>
+      </label>
+      <input id="alertGenericWebhook" placeholder="Webhook URL" style="width:360px"/>
+    </div>
     <h2>Existing Checks</h2>
     <div id="list">Loading...</div>
     <script src="/static/js/checks.js"></script>
@@ -87,6 +150,7 @@ def checks_manage_page(check_id: int = Path(..., ge=1)):
     <h1>Manage Check __CHECK_ID__</h1>
     <div class="muted">Project: <input id="projectId" value="1" style="width:80px"/></div>
     <div class="muted">Admin token: <input id="adminToken" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></div>
+    <div class="muted">User token: <input id="userToken" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></div>
     <h2>Update</h2>
     <div>
       <input id="name" placeholder="Name"/>
@@ -104,6 +168,69 @@ def checks_manage_page(check_id: int = Path(..., ge=1)):
       <input id="alertCooldown" placeholder="Cooldown (s)" style="width:140px" />
       <button id="saveBtn">Save</button>
       <button id="delBtn" style="margin-left:8px;display:none">Delete</button>
+    </div>
+    <h2>Alert Routing (Per-check Overrides)</h2>
+    <div class="muted">Use inherit to fall back to project settings. Disabled prevents alerts for that channel even if project settings exist.</div>
+    <div class="muted">Validation hints: SMS phone uses +country code (e.g. +15551234567). Webhook URLs must be full https:// URLs.</div>
+    <div class="row">
+      <label>SMS:
+        <select id="alertSmsEnabled">
+          <option value="">inherit</option>
+          <option value="true">enabled</option>
+          <option value="false">disabled</option>
+        </select>
+      </label>
+      <input id="alertSmsTo" placeholder="+15551234567" style="width:180px"/>
+    </div>
+    <div class="row">
+      <label>On-call:
+        <select id="alertOncallEnabled">
+          <option value="">inherit</option>
+          <option value="true">enabled</option>
+          <option value="false">disabled</option>
+        </select>
+      </label>
+      <input id="alertOncallEmail" placeholder="oncall@example.com" style="width:240px"/>
+    </div>
+    <div class="row">
+      <label>Slack:
+        <select id="alertSlackEnabled">
+          <option value="">inherit</option>
+          <option value="true">enabled</option>
+          <option value="false">disabled</option>
+        </select>
+      </label>
+      <input id="alertSlackWebhook" placeholder="Slack webhook URL" style="width:360px"/>
+    </div>
+    <div class="row">
+      <label>Discord:
+        <select id="alertDiscordEnabled">
+          <option value="">inherit</option>
+          <option value="true">enabled</option>
+          <option value="false">disabled</option>
+        </select>
+      </label>
+      <input id="alertDiscordWebhook" placeholder="Discord webhook URL" style="width:360px"/>
+    </div>
+    <div class="row">
+      <label>PagerDuty:
+        <select id="alertPagerdutyEnabled">
+          <option value="">inherit</option>
+          <option value="true">enabled</option>
+          <option value="false">disabled</option>
+        </select>
+      </label>
+      <input id="alertPagerdutyKey" placeholder="Integration key" style="width:220px"/>
+    </div>
+    <div class="row">
+      <label>Webhook:
+        <select id="alertWebhookEnabled">
+          <option value="">inherit</option>
+          <option value="true">enabled</option>
+          <option value="false">disabled</option>
+        </select>
+      </label>
+      <input id="alertGenericWebhook" placeholder="Webhook URL" style="width:360px"/>
     </div>
     <h2>Maintenance</h2>
     <div>

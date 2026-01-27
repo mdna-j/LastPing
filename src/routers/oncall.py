@@ -6,7 +6,7 @@ from pydantic import BaseModel, EmailStr, conint, constr, root_validator
 from sqlmodel import Session, select
 
 from ..db import get_session
-from ..models import OnCallRotation, OnCallMember, OnCallEscalation, OnCallAlert, Project, AuditLog
+from ..models import OnCallRotation, OnCallMember, OnCallEscalation, OnCallAlert, Project, AuditLog, Check
 from ..deps import require_admin_or_owner, require_project_api_key, limit_by_api_key, get_audit_context
 from ..schemas import StrictBaseModel
 
@@ -33,6 +33,7 @@ class EscalationIn(StrictBaseModel):
     level: conint(ge=0, le=20)
     delay_minutes: Optional[conint(ge=0, le=1440)] = 15
     target_type: Literal["rotation", "email", "sms"]
+    check_id: Optional[conint(ge=1)] = None
     rotation_id: Optional[conint(ge=1)] = None
     target_value: Optional[constr(max_length=200)] = None
     enabled: Optional[bool] = True
@@ -160,15 +161,23 @@ def delete_member(project_id: int = Path(..., ge=1), rotation_id: int = Path(...
 
 
 @router.get("/escalations")
-def list_escalations(project_id: int = Path(..., ge=1), session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
-    return session.exec(select(OnCallEscalation).where(OnCallEscalation.project_id == project_id).order_by(OnCallEscalation.level)).all()
+def list_escalations(project_id: int = Path(..., ge=1), check_id: Optional[int] = Query(None, ge=1), session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
+    stmt = select(OnCallEscalation).where(OnCallEscalation.project_id == project_id)
+    if check_id is not None:
+        stmt = stmt.where(OnCallEscalation.check_id == check_id)
+    return session.exec(stmt.order_by(OnCallEscalation.level)).all()
 
 
 @router.post("/escalations", status_code=status.HTTP_201_CREATED)
 def create_escalation(project_id: int = Path(..., ge=1), payload: EscalationIn = Body(...), request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
     require_admin_or_owner(project_id, x_admin_token=x_admin_token, authorization=authorization, session=session)
+    if payload.check_id is not None:
+        check = session.get(Check, payload.check_id)
+        if not check or check.project_id != project_id:
+            raise HTTPException(status_code=404, detail="Check not found for project")
     esc = OnCallEscalation(
         project_id=project_id,
+        check_id=payload.check_id,
         level=payload.level,
         delay_minutes=payload.delay_minutes or 15,
         target_type=payload.target_type,

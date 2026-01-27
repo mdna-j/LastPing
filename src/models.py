@@ -86,6 +86,20 @@ class Check(SQLModel, table=True):
     alert_cooldown: int = Field(default=3600, description="seconds to wait between alerts for this check")
     last_alerted_at: Optional[datetime] = None
     last_alert_type: Optional[str] = None
+    # per-channel enablement (None = inherit project/default)
+    alert_sms_enabled: Optional[bool] = None
+    alert_oncall_enabled: Optional[bool] = None
+    alert_slack_enabled: Optional[bool] = None
+    alert_discord_enabled: Optional[bool] = None
+    alert_pagerduty_enabled: Optional[bool] = None
+    alert_webhook_enabled: Optional[bool] = None
+    # per-channel routing overrides
+    alert_sms_to: Optional[str] = None
+    alert_oncall_email: Optional[str] = None
+    alert_slack_webhook_url: Optional[str] = None
+    alert_discord_webhook_url: Optional[str] = None
+    alert_pagerduty_integration_key: Optional[str] = None
+    alert_generic_webhook_url: Optional[str] = None
     # per-check escalation policy (optional)
     escalation_after_minutes: Optional[int] = Field(default=None, description="minutes down before escalating")
     escalation_cooldown_seconds: Optional[int] = Field(default=3600, description="seconds between escalation notifications")
@@ -353,6 +367,7 @@ class OnCallEscalation(SQLModel, table=True):
     __tablename__ = "oncall_escalation"
     id: Optional[int] = Field(default=None, primary_key=True)
     project_id: int = Field(foreign_key="project.id")
+    check_id: Optional[int] = Field(default=None, foreign_key="check.id")
     level: int = Field(default=0, index=True)
     delay_minutes: int = Field(default=15)
     target_type: str = Field(default=EscalationTarget.ROTATION.value)

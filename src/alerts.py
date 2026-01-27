@@ -22,7 +22,19 @@ from datetime import datetime
 logger = logging.getLogger("lastping.alerts")
 
 
-def _sms_allowed(project) -> bool:
+def _check_channel_enabled(check, attr: str) -> bool:
+    if check is None:
+        return True
+    val = getattr(check, attr, None)
+    if val is None:
+        return True
+    return bool(val)
+
+
+def _sms_allowed(project, check=None) -> bool:
+    # per-check override
+    if check is not None and getattr(check, "alert_sms_enabled", None) is not None:
+        return bool(getattr(check, "alert_sms_enabled"))
     enabled = getattr(project, "sms_enabled", None)
     if enabled is None:
         # allow per-project overrides to enable SMS even if env is unset
@@ -32,7 +44,9 @@ def _sms_allowed(project) -> bool:
     return bool(enabled)
 
 
-def _sms_to(project) -> Optional[str]:
+def _sms_to(project, check=None) -> Optional[str]:
+    if check is not None and getattr(check, "alert_sms_to", None):
+        return getattr(check, "alert_sms_to", None)
     return getattr(project, "sms_to", None) or os.environ.get("ALERT_SMS_TO")
 
 
@@ -48,13 +62,33 @@ def _sms_auth_token(project) -> Optional[str]:
     return getattr(project, "sms_auth_token", None) or os.environ.get("TWILIO_AUTH_TOKEN")
 
 
-def _oncall_allowed(project) -> bool:
+def _oncall_allowed(project, check=None) -> bool:
+    if check is not None and getattr(check, "alert_oncall_enabled", None) is not None:
+        return bool(getattr(check, "alert_oncall_enabled"))
     enabled = getattr(project, "oncall_enabled", None)
     return bool(enabled)
 
 
-def _oncall_email(project) -> Optional[str]:
+def _oncall_email(project, check=None) -> Optional[str]:
+    if check is not None and getattr(check, "alert_oncall_email", None):
+        return getattr(check, "alert_oncall_email", None)
     return getattr(project, "oncall_email", None)
+
+
+def _discord_url(project, check=None) -> Optional[str]:
+    return getattr(check, "alert_discord_webhook_url", None) or getattr(project, "discord_webhook_url", None)
+
+
+def _slack_url(project, check=None) -> Optional[str]:
+    return getattr(check, "alert_slack_webhook_url", None) or getattr(project, "slack_webhook_url", None)
+
+
+def _pagerduty_key(project, check=None) -> Optional[str]:
+    return getattr(check, "alert_pagerduty_integration_key", None) or getattr(project, "pagerduty_integration_key", None)
+
+
+def _generic_webhook_url(project, check=None) -> Optional[str]:
+    return getattr(check, "alert_generic_webhook_url", None) or getattr(project, "generic_webhook_url", None)
 
 
 def _post_json(url: str, payload: dict, timeout: int = 10) -> bool:
@@ -163,7 +197,8 @@ def notify_down(check, project, reason: str = None) -> None:
 
         sent = False
         # Discord: use embed for nicer display (structured data improves readability)
-        if getattr(project, "discord_webhook_url", None):
+        discord_url = _discord_url(project, check)
+        if discord_url and _check_channel_enabled(check, "alert_discord_enabled"):
             # Discord embed with color, timestamp and optional links
             embed = {
                 "title": ":rotating_light: DOWN",
@@ -182,11 +217,12 @@ def notify_down(check, project, reason: str = None) -> None:
                 embed.setdefault("fields", []).append({"name": "Check URL", "value": check_url, "inline": False})
             if reason_text:
                 embed["fields"].append({"name": "Reason", "value": reason_text, "inline": False})
-            _post_json(project.discord_webhook_url, {"embeds": [embed]})
+            _post_json(discord_url, {"embeds": [embed]})
             sent = True
 
         # Slack: send Block Kit payload for structured messages
-        if getattr(project, "slack_webhook_url", None):
+        slack_url = _slack_url(project, check)
+        if slack_url and _check_channel_enabled(check, "alert_slack_enabled"):
             # Slack Block Kit with attachments for color and optional action
             blocks = [
                 {"type": "section", "text": {"type": "mrkdwn", "text": f":rotating_light: *{summary}*"}},
@@ -207,11 +243,12 @@ def notify_down(check, project, reason: str = None) -> None:
                 if check_url:
                     action_elements.append({"type": "button", "text": {"type": "plain_text", "text": "Open Check"}, "url": check_url})
                 attachment["actions"] = action_elements
-            _post_json(project.slack_webhook_url, {"attachments": [attachment]})
+            _post_json(slack_url, {"attachments": [attachment]})
             sent = True
 
         # PagerDuty: use existing helper which builds proper event payload
-        if getattr(project, 'pagerduty_integration_key', None):
+        pd_key = _pagerduty_key(project, check)
+        if pd_key and _check_channel_enabled(check, "alert_pagerduty_enabled"):
             # include check/project context in PagerDuty event details
             pd_details = details.copy()
             if project_url:
@@ -221,7 +258,7 @@ def notify_down(check, project, reason: str = None) -> None:
             timestamp_pd = now_iso
             pd_summary = summary
             pd_payload = {
-                "routing_key": project.pagerduty_integration_key,
+                "routing_key": pd_key,
                 "event_action": "trigger",
                 "payload": {
                     "summary": pd_summary,
@@ -236,7 +273,8 @@ def notify_down(check, project, reason: str = None) -> None:
             sent = True
 
         # Generic webhook: send structured JSON payload so receivers can process
-        if getattr(project, "generic_webhook_url", None):
+        gen_url = _generic_webhook_url(project, check)
+        if gen_url and _check_channel_enabled(check, "alert_webhook_enabled"):
             payload = {
                 "event": "down",
                 "summary": summary,
@@ -245,7 +283,7 @@ def notify_down(check, project, reason: str = None) -> None:
                 "check_url": check_url,
                 "timestamp": now_iso,
             }
-            send_generic_webhook(project.generic_webhook_url, payload)
+            send_generic_webhook(gen_url, payload)
             sent = True
 
         # fall back to global endpoints if no project-specific webhook is set
@@ -254,19 +292,21 @@ def notify_down(check, project, reason: str = None) -> None:
                 f":rotating_light: **DOWN** — Project `{project.name}` — Check `{check.name}`\n"
                 f"Last ping: `{check.last_ping}` — expected every `{getattr(check, 'expected_interval', getattr(check, 'interval', None))}s` + grace `{getattr(check, 'grace_period', None)}s`{(' — Reason: ' + reason) if reason else ''}"
             )
-            send_discord_message(msg)
-            send_slack_message(msg)
+            if _check_channel_enabled(check, "alert_discord_enabled"):
+                send_discord_message(msg)
+            if _check_channel_enabled(check, "alert_slack_enabled"):
+                send_slack_message(msg)
         try:
-            if _sms_allowed(project):
+            if _sms_allowed(project, check):
                 sms_msg = f"[LastPing] DOWN: {project.name}/{check.name} {reason or ''}".strip()
-                send_sms(sms_msg, to=_sms_to(project), project=project)
+                send_sms(sms_msg, to=_sms_to(project, check), project=project)
         except Exception:
             pass
         try:
-            if _oncall_allowed(project) and _oncall_email(project):
+            if _oncall_allowed(project, check) and _oncall_email(project, check):
                 subj = f"[LastPing] DOWN: {project.name}/{check.name}"
                 body = f"Project {project.name} check {check.name} is DOWN. {reason or ''}".strip()
-                send_email(subj, body, to=_oncall_email(project))
+                send_email(subj, body, to=_oncall_email(project, check))
         except Exception:
             pass
     except Exception:
@@ -286,38 +326,43 @@ def notify_degraded(check, project, reason: str = None) -> None:
                 pass
         summary = f"Project {project.name} -- Check {check.name} is DEGRADED"
         sent = False
-        if getattr(project, "discord_webhook_url", None):
+        discord_url = _discord_url(project, check)
+        if discord_url and _check_channel_enabled(check, "alert_discord_enabled"):
             embed = {"title": ":warning: DEGRADED", "description": summary, "color": 16753920, "timestamp": now_iso}
             if reason:
                 embed["fields"] = [{"name": "Reason", "value": reason, "inline": False}]
-            _post_json(project.discord_webhook_url, {"embeds": [embed]})
+            _post_json(discord_url, {"embeds": [embed]})
             sent = True
-        if getattr(project, "slack_webhook_url", None):
+        slack_url = _slack_url(project, check)
+        if slack_url and _check_channel_enabled(check, "alert_slack_enabled"):
             blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": f":warning: *{summary}*"}}]
             if reason:
                 blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"*Reason:* {reason}"}]})
             attachment = {"color": "#F5A623", "blocks": blocks}
-            _post_json(project.slack_webhook_url, {"attachments": [attachment]})
+            _post_json(slack_url, {"attachments": [attachment]})
             sent = True
-        if getattr(project, "generic_webhook_url", None):
+        gen_url = _generic_webhook_url(project, check)
+        if gen_url and _check_channel_enabled(check, "alert_webhook_enabled"):
             payload = {"event": "degraded", "summary": summary, "details": {"reason": reason}, "timestamp": now_iso}
-            send_generic_webhook(project.generic_webhook_url, payload)
+            send_generic_webhook(gen_url, payload)
             sent = True
         if not sent:
             msg = f":warning: **DEGRADED** -- Project `{project.name}` Check `{check.name}` {reason or ''}".strip()
-            send_discord_message(msg)
-            send_slack_message(msg)
+            if _check_channel_enabled(check, "alert_discord_enabled"):
+                send_discord_message(msg)
+            if _check_channel_enabled(check, "alert_slack_enabled"):
+                send_slack_message(msg)
         try:
-            if _sms_allowed(project):
+            if _sms_allowed(project, check):
                 sms_msg = f"[LastPing] DEGRADED: {project.name}/{check.name} {reason or ''}".strip()
-                send_sms(sms_msg, to=_sms_to(project), project=project)
+                send_sms(sms_msg, to=_sms_to(project, check), project=project)
         except Exception:
             pass
         try:
-            if _oncall_allowed(project) and _oncall_email(project):
+            if _oncall_allowed(project, check) and _oncall_email(project, check):
                 subj = f"[LastPing] DEGRADED: {project.name}/{check.name}"
                 body = f"Project {project.name} check {check.name} is DEGRADED. {reason or ''}".strip()
-                send_email(subj, body, to=_oncall_email(project))
+                send_email(subj, body, to=_oncall_email(project, check))
         except Exception:
             pass
     except Exception:
@@ -341,7 +386,8 @@ def notify_recovery(check, project) -> None:
         details = {"project": project.name, "check": check.name, "last_ping": timestamp}
 
         sent = False
-        if getattr(project, "discord_webhook_url", None):
+        discord_url = _discord_url(project, check)
+        if discord_url and _check_channel_enabled(check, "alert_discord_enabled"):
             embed = {
                 "title": ":white_check_mark: RECOVERY",
                 "description": summary,
@@ -353,9 +399,10 @@ def notify_recovery(check, project) -> None:
                 embed["fields"].append({"name": "Project URL", "value": project_url, "inline": False})
             if check_url:
                 embed["fields"].append({"name": "Check URL", "value": check_url, "inline": False})
-            _post_json(project.discord_webhook_url, {"embeds": [embed]})
+            _post_json(discord_url, {"embeds": [embed]})
             sent = True
-        if getattr(project, "slack_webhook_url", None):
+        slack_url = _slack_url(project, check)
+        if slack_url and _check_channel_enabled(check, "alert_slack_enabled"):
             blocks = [
                 {"type": "section", "text": {"type": "mrkdwn", "text": f":white_check_mark: *{summary}*"}},
                 {"type": "section", "fields": [{"type": "mrkdwn", "text": f"*Last ping:* {timestamp or 'n/a'}"}]},
@@ -368,9 +415,10 @@ def notify_recovery(check, project) -> None:
                 if check_url:
                     actions.append({"type": "button", "text": {"type": "plain_text", "text": "Open Check"}, "url": check_url})
                 attachment["actions"] = actions
-            _post_json(project.slack_webhook_url, {"attachments": [attachment]})
+            _post_json(slack_url, {"attachments": [attachment]})
             sent = True
-        if getattr(project, 'pagerduty_integration_key', None):
+        pd_key = _pagerduty_key(project, check)
+        if pd_key and _check_channel_enabled(check, "alert_pagerduty_enabled"):
             pd_details = details.copy()
             if project_url:
                 pd_details["project_url"] = project_url
@@ -378,7 +426,7 @@ def notify_recovery(check, project) -> None:
                 pd_details["check_url"] = check_url
             timestamp_pd = now_iso
             pd_payload = {
-                "routing_key": project.pagerduty_integration_key,
+                "routing_key": pd_key,
                 "event_action": "trigger",
                 "payload": {
                     "summary": summary,
@@ -391,9 +439,10 @@ def notify_recovery(check, project) -> None:
             }
             _post_json("https://events.pagerduty.com/v2/enqueue", pd_payload)
             sent = True
-        if getattr(project, "generic_webhook_url", None):
+        gen_url = _generic_webhook_url(project, check)
+        if gen_url and _check_channel_enabled(check, "alert_webhook_enabled"):
             send_generic_webhook(
-                project.generic_webhook_url,
+                gen_url,
                 {"event": "recovery", "summary": summary, "details": details, "timestamp": now_iso, "project_url": project_url, "check_url": check_url},
             )
             sent = True
@@ -401,8 +450,10 @@ def notify_recovery(check, project) -> None:
         # fall back to global endpoints if no project-specific webhook is configured
         if not sent:
             msg = (f":white_check_mark: **RECOVERY** — Project `{project.name}` — Check `{check.name}` is UP again\n" f"Last ping: `{check.last_ping}`")
-            send_discord_message(msg)
-            send_slack_message(msg)
+            if _check_channel_enabled(check, "alert_discord_enabled"):
+                send_discord_message(msg)
+            if _check_channel_enabled(check, "alert_slack_enabled"):
+                send_slack_message(msg)
     except Exception:
         logger.exception("Failed to send recovery notification")
 
@@ -453,7 +504,8 @@ def notify_escalation(project, reason: str, check=None):
         summary = f"Escalation: {project.name}/{getattr(check, 'name', 'check')} still failing"
         details.update({"check": getattr(check, "name", None), "check_id": getattr(check, "id", None)})
 
-    if getattr(project, "discord_webhook_url", None):
+    discord_url = _discord_url(project, check)
+    if discord_url and _check_channel_enabled(check, "alert_discord_enabled"):
         embed = {
             "title": ":warning: ESCALATION",
             "description": summary,
@@ -463,10 +515,11 @@ def notify_escalation(project, reason: str, check=None):
         }
         if check is not None:
             embed["fields"].append({"name": "Check", "value": getattr(check, "name", "n/a"), "inline": True})
-        _post_json(project.discord_webhook_url, {"embeds": [embed]})
+        _post_json(discord_url, {"embeds": [embed]})
         sent = True
 
-    if getattr(project, "slack_webhook_url", None):
+    slack_url = _slack_url(project, check)
+    if slack_url and _check_channel_enabled(check, "alert_slack_enabled"):
         blocks = [
             {"type": "section", "text": {"type": "mrkdwn", "text": f":warning: *{summary}*"}},
             {"type": "section", "fields": [{"type": "mrkdwn", "text": f"*Reason:* {reason or 'n/a'}"}]},
@@ -474,12 +527,13 @@ def notify_escalation(project, reason: str, check=None):
         if check is not None:
             blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"*Check:* {getattr(check, 'name', 'n/a')}"}]})
         attachment = {"color": "#F5A623", "blocks": blocks}
-        _post_json(project.slack_webhook_url, {"attachments": [attachment]})
+        _post_json(slack_url, {"attachments": [attachment]})
         sent = True
 
-    if getattr(project, "pagerduty_integration_key", None):
+    pd_key = _pagerduty_key(project, check)
+    if pd_key and _check_channel_enabled(check, "alert_pagerduty_enabled"):
         pd_payload = {
-            "routing_key": project.pagerduty_integration_key,
+            "routing_key": pd_key,
             "event_action": "trigger",
             "payload": {
                 "summary": summary,
@@ -492,9 +546,10 @@ def notify_escalation(project, reason: str, check=None):
         _post_json("https://events.pagerduty.com/v2/enqueue", pd_payload)
         sent = True
 
-    if getattr(project, "generic_webhook_url", None):
+    gen_url = _generic_webhook_url(project, check)
+    if gen_url and _check_channel_enabled(check, "alert_webhook_enabled"):
         payload = {"event": "escalation", "summary": summary, "details": details}
-        send_generic_webhook(project.generic_webhook_url, payload)
+        send_generic_webhook(gen_url, payload)
         sent = True
 
     esc = os.environ.get("ALERT_ESCALATION_EMAIL")
@@ -507,23 +562,23 @@ def notify_escalation(project, reason: str, check=None):
             body = f"Project {project.name} has exceeded its alert threshold. Latest reason: {reason}"
         sent = send_email(subj, body, to=esc) or sent
     try:
-        if _sms_allowed(project):
+        if _sms_allowed(project, check):
             if check is not None:
                 sms_msg = f"[LastPing] ESCALATION: {project.name}/{getattr(check, 'name', 'check')} {reason or ''}".strip()
             else:
                 sms_msg = f"[LastPing] ESCALATION: {project.name} {reason or ''}".strip()
-            sent = send_sms(sms_msg, to=_sms_to(project), project=project) or sent
+            sent = send_sms(sms_msg, to=_sms_to(project, check), project=project) or sent
     except Exception:
         pass
     try:
-        if _oncall_allowed(project) and _oncall_email(project):
+        if _oncall_allowed(project, check) and _oncall_email(project, check):
             if check is not None:
                 subj = f"[LastPing] ESCALATION: {project.name}/{getattr(check, 'name', 'check')}"
                 body = f"Project {project.name} check {getattr(check, 'name', 'check')} escalation: {reason}"
             else:
                 subj = f"[LastPing] ESCALATION: {project.name}"
                 body = f"Project {project.name} escalation: {reason}"
-            sent = send_email(subj, body, to=_oncall_email(project)) or sent
+            sent = send_email(subj, body, to=_oncall_email(project, check)) or sent
     except Exception:
         pass
 
