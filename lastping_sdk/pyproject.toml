@@ -20,3 +20,6 @@ dev = ["pytest", "pytest-asyncio"]
 
 [tool.setuptools]
 packages = ["lastping_sdk"]
+
+[tool.setuptools.package-dir]
+lastping_sdk = "."
