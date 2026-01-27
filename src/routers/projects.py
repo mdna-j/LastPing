@@ -112,7 +112,7 @@ class MaintenanceWindow(StrictBaseModel):
         return values
 
 
-@router.get("/{project_id}/webhooks", response_model=WebhookUpdate)
+@router.get("/{project_id}/webhooks", response_model=WebhookUpdate, dependencies=[Depends(limit_public_requests)])
 def get_project_webhooks(project_id: int = Path(..., ge=1), session: Session = Depends(get_session)):
     project = session.get(ProjectModel, project_id)
     if not project:
@@ -147,7 +147,7 @@ def update_project_webhooks(project_id: int = Path(..., ge=1), payload: WebhookU
     return payload
 
 
-@router.get("/{project_id}/maintenance", response_model=MaintenanceWindow)
+@router.get("/{project_id}/maintenance", response_model=MaintenanceWindow, dependencies=[Depends(limit_public_requests)])
 def get_project_maintenance(project_id: int = Path(..., ge=1), session: Session = Depends(get_session)):
     project = session.get(ProjectModel, project_id)
     if not project:
@@ -241,7 +241,7 @@ def rotate_all_keys(x_admin_token: Optional[str] = Header(None), session: Sessio
     return result
 
 
-@router.get("/{project_id}/slo", response_model=SloSettings)
+@router.get("/{project_id}/slo", response_model=SloSettings, dependencies=[Depends(limit_public_requests)])
 def get_project_slo(project_id: int = Path(..., ge=1), session: Session = Depends(get_session)):
     project = session.get(ProjectModel, project_id)
     if not project:
@@ -271,7 +271,7 @@ def set_project_slo(project_id: int = Path(..., ge=1), payload: SloSettings = Bo
     return SloSettings(slo_target=project.slo_target, sla_target=project.sla_target)
 
 
-@router.get("/{project_id}/alert-settings", response_model=AlertSettings)
+@router.get("/{project_id}/alert-settings", response_model=AlertSettings, dependencies=[Depends(limit_public_requests)])
 def get_project_alert_settings(project_id: int = Path(..., ge=1), session: Session = Depends(get_session)):
     project = session.get(ProjectModel, project_id)
     if not project:

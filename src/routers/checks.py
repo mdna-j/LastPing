@@ -260,7 +260,7 @@ class MaintenanceWindow(StrictBaseModel):
         return values
 
 
-@router.get("/{check_id}/maintenance", response_model=MaintenanceWindow)
+@router.get("/{check_id}/maintenance", response_model=MaintenanceWindow, dependencies=[Depends(limit_public_requests)])
 def get_check_maintenance(project_id: int = Path(..., ge=1), check_id: int = Path(..., ge=1), session: Session = Depends(get_session)):
     check = session.get(CheckModel, check_id)
     if not check or check.project_id != project_id:
