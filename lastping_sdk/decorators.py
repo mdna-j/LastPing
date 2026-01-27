@@ -1,12 +1,23 @@
 from contextlib import contextmanager
 from functools import wraps
 from typing import Callable, Optional
+import traceback
 
 from .client import HeartbeatClient
 from .api import send_event
 
 
-def heartbeat(project_id: int, name: str, base_url: str, api_key: str, capture_errors: bool = False, error_event: str = "down") -> Callable[[Callable], Callable]:
+def _format_exception(exc: Exception, include_traceback: bool = False, max_len: int = 1200) -> str:
+    if not include_traceback:
+        return f"{exc.__class__.__name__}: {exc}"
+    tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    tb = tb.strip()
+    if len(tb) > max_len:
+        tb = tb[-max_len:]
+    return tb
+
+
+def heartbeat(project_id: int, name: str, base_url: str, api_key: str, capture_errors: bool = False, error_event: str = "down", include_traceback: bool = False) -> Callable[[Callable], Callable]:
     """Decorator that sends a heartbeat before calling the wrapped function.
 
     Usage:
@@ -29,7 +40,8 @@ def heartbeat(project_id: int, name: str, base_url: str, api_key: str, capture_e
             except Exception as exc:
                 if capture_errors:
                     try:
-                        send_event(base_url, api_key, project_id, name, event=error_event, message=f"exception: {exc}")
+                        msg = _format_exception(exc, include_traceback=include_traceback)
+                        send_event(base_url, api_key, project_id, name, event=error_event, message=f"exception: {msg}")
                     except Exception:
                         pass
                 raise
@@ -40,7 +52,7 @@ def heartbeat(project_id: int, name: str, base_url: str, api_key: str, capture_e
 
 
 @contextmanager
-def heartbeat_context(project_id: int, name: str, base_url: str, api_key: str, capture_errors: bool = True, error_event: str = "down"):
+def heartbeat_context(project_id: int, name: str, base_url: str, api_key: str, capture_errors: bool = True, error_event: str = "down", include_traceback: bool = False):
     """Context manager that sends a heartbeat and optionally reports exceptions."""
     client = HeartbeatClient(base_url, api_key)
     try:
@@ -52,7 +64,8 @@ def heartbeat_context(project_id: int, name: str, base_url: str, api_key: str, c
     except Exception as exc:
         if capture_errors:
             try:
-                send_event(base_url, api_key, project_id, name, event=error_event, message=f"exception: {exc}")
+                msg = _format_exception(exc, include_traceback=include_traceback)
+                send_event(base_url, api_key, project_id, name, event=error_event, message=f"exception: {msg}")
             except Exception:
                 pass
         raise

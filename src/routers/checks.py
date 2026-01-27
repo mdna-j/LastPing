@@ -39,6 +39,8 @@ class CheckCreate(StrictBaseModel):
     alert_enabled: Optional[bool] = True
     alert_after: Optional[conint(ge=1, le=1000)] = 1
     alert_cooldown: Optional[conint(ge=0, le=86400)] = 3600
+    escalation_after_minutes: Optional[conint(ge=1, le=10080)] = None
+    escalation_cooldown_seconds: Optional[conint(ge=0, le=86400)] = 3600
 
     @root_validator
     def _validate_by_type(cls, values):
@@ -81,6 +83,8 @@ class CheckRead(BaseModel):
     alert_enabled: Optional[bool] = None
     alert_after: Optional[int] = None
     alert_cooldown: Optional[int] = None
+    escalation_after_minutes: Optional[int] = None
+    escalation_cooldown_seconds: Optional[int] = None
 
     class Config:
         orm_mode = True
@@ -125,6 +129,8 @@ def create_check(project_id: int = Path(..., ge=1), payload: CheckCreate = Body(
         alert_enabled=payload.alert_enabled if payload.alert_enabled is not None else True,
         alert_after=payload.alert_after,
         alert_cooldown=payload.alert_cooldown,
+        escalation_after_minutes=payload.escalation_after_minutes,
+        escalation_cooldown_seconds=payload.escalation_cooldown_seconds,
         status=CheckStatus.UP,
     )
     session.add(check)
@@ -154,6 +160,8 @@ class CheckUpdate(StrictBaseModel):
     alert_enabled: Optional[bool] = None
     alert_after: Optional[conint(ge=1, le=1000)] = None
     alert_cooldown: Optional[conint(ge=0, le=86400)] = None
+    escalation_after_minutes: Optional[conint(ge=1, le=10080)] = None
+    escalation_cooldown_seconds: Optional[conint(ge=0, le=86400)] = None
 
 
 @router.put("/{check_id}", response_model=CheckRead)
@@ -197,6 +205,10 @@ def update_check(project_id: int = Path(..., ge=1), check_id: int = Path(..., ge
         check.alert_after = payload.alert_after
     if payload.alert_cooldown is not None:
         check.alert_cooldown = payload.alert_cooldown
+    if payload.escalation_after_minutes is not None:
+        check.escalation_after_minutes = payload.escalation_after_minutes
+    if payload.escalation_cooldown_seconds is not None:
+        check.escalation_cooldown_seconds = payload.escalation_cooldown_seconds
     session.add(check)
     session.commit()
     session.refresh(check)

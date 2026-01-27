@@ -29,3 +29,23 @@ from lastping_sdk import heartbeat_context
 with heartbeat_context(1, "my-check", "https://example.com", "API_KEY"):
     run_job()
 ```
+
+Error capture (with optional traceback)
+
+```python
+from lastping_sdk import heartbeat
+
+@heartbeat(1, "my-check", "https://example.com", "API_KEY", capture_errors=True, include_traceback=True)
+def job():
+    ...
+```
+
+Async decorator example
+
+```python
+from lastping_sdk import async_heartbeat
+
+@async_heartbeat(1, "my-check", "https://example.com", "API_KEY", capture_errors=True)
+async def job():
+    ...
+```

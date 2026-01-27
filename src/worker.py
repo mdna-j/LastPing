@@ -2,6 +2,7 @@ import os
 import time
 import logging
 import json
+import re
 """
 Background worker: scans checks and executes monitoring logic.
 
@@ -137,11 +138,80 @@ def _trigger_escalation(session: Session, project: Project, now: datetime, reaso
     return False
 
 
+def _check_escalation_due(check: Check, open_inc: Optional[Incident], now: datetime) -> bool:
+    if open_inc is None:
+        return False
+    after_min = getattr(check, "escalation_after_minutes", None)
+    if not after_min:
+        return False
+    elapsed = (now - open_inc.started_at).total_seconds()
+    if elapsed < (after_min * 60):
+        return False
+    cooldown = getattr(check, "escalation_cooldown_seconds", 0) or 0
+    last = getattr(check, "last_escalated_at", None)
+    if last and (now - last).total_seconds() < cooldown:
+        return False
+    return True
+
+
+def _trigger_check_escalation(session: Session, project: Project, check: Check, open_inc: Optional[Incident], now: datetime, reason: str) -> bool:
+    if not _check_escalation_due(check, open_inc, now):
+        return False
+    try:
+        from .alerts import notify_escalation
+
+        ok = notify_escalation(project, reason, check=check)
+        check.last_escalated_at = now
+        session.add(check)
+        session.commit()
+        return ok
+    except Exception:
+        logger.exception("Error triggering check escalation")
+        return False
+
+
 def _is_degraded(check: Check, latency_ms: Optional[float]) -> bool:
     thr = getattr(check, "latency_threshold_ms", None)
     if thr is None or latency_ms is None:
         return False
     return latency_ms > thr
+
+
+def _normalize_reason(reason: Optional[str]) -> str:
+    if not reason:
+        return "unknown"
+    text = reason.strip().lower()
+    # strip URLs and IPs, normalize numbers
+    text = re.sub(r"https?://\\S+", "url", text)
+    text = re.sub(r"\\b\\d{1,3}(?:\\.\\d{1,3}){3}\\b", "ip", text)
+    text = re.sub(r"\\d+", "#", text)
+    text = re.sub(r"\\s+", " ", text)
+    return text[:160] if text else "unknown"
+
+
+def _incident_signature(session: Session, incident_id: int) -> str:
+    ev = session.exec(select(Event).where(Event.incident_id == incident_id).order_by(Event.created_at)).first()
+    return _normalize_reason(getattr(ev, "message", None) if ev else None)
+
+
+def _find_group_root(session: Session, project_id: int, signature: str, now: datetime) -> Optional[int]:
+    if not signature:
+        return None
+    cutoff = now - timedelta(seconds=GROUP_WINDOW)
+    candidates = session.exec(
+        select(Incident)
+        .where(
+            Incident.project_id == project_id,
+            Incident.resolved_at == None,
+            Incident.started_at >= cutoff,
+        )
+        .order_by(Incident.started_at.desc())
+    ).all()
+    for cand in candidates:
+        cand_sig = _incident_signature(session, cand.id)
+        if cand_sig == signature:
+            return cand.group_id or cand.id
+    return None
 
 
 def _worker_id() -> str:
@@ -314,6 +384,11 @@ def _process_oncall_alerts(session: Session, now: datetime):
             session.add(alert)
             session.commit()
             continue
+        if _in_maintenance(check, project, now):
+            alert.next_escalation_at = now + timedelta(minutes=5)
+            session.add(alert)
+            session.commit()
+            continue
         escs = session.exec(
             select(OnCallEscalation).where(OnCallEscalation.project_id == project.id, OnCallEscalation.enabled == True).order_by(OnCallEscalation.level)
         ).all()
@@ -357,6 +432,7 @@ def scan_checks_once(session: Session):
             continue
         if not _acquire_lease(session, check, now):
             continue
+        maintenance = _in_maintenance(check, project, now)
 
         # HEARTBEAT checks are driven by client pings; worker only
         # marks them DOWN when the expected interval + grace window
@@ -374,36 +450,35 @@ def scan_checks_once(session: Session):
                 if check.status != CheckStatus.DOWN:
                     check.status = CheckStatus.DOWN
                     check.consecutive_failures = (check.consecutive_failures or 0) + 1
+                    reason = "missed heartbeat"
+                    signature = _normalize_reason(reason)
                     # find or create open incident for this check
                     open_inc = session.exec(select(Incident).where(Incident.check_id == check.id, Incident.resolved_at == None)).first()
                     if not open_inc:
-                        # try to reuse a recent open incident in the same project (grouping)
-                        candidate = session.exec(select(Incident).where(Incident.project_id == check.project_id, Incident.resolved_at == None).order_by(Incident.started_at.desc())).first()
-                        if candidate and (now - candidate.started_at).total_seconds() <= GROUP_WINDOW:
-                            open_inc = candidate
-                        else:
-                            open_inc = Incident(project_id=check.project_id, check_id=check.id, started_at=now, status="open")
-                            session.add(open_inc)
-                            session.commit()
-                            session.refresh(open_inc)
-                    event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.DOWN, message="missed heartbeat", incident_id=open_inc.id)
+                        group_root = _find_group_root(session, check.project_id, signature, now)
+                        open_inc = Incident(project_id=check.project_id, check_id=check.id, started_at=now, status="open", group_id=group_root)
+                        session.add(open_inc)
+                        session.commit()
+                        session.refresh(open_inc)
+                    event_message = reason
+                    if maintenance:
+                        event_message = f"{reason} (suppressed due to maintenance)"
+                    event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.DOWN, message=event_message, incident_id=open_inc.id)
                     session.add(event)
-                    _trigger_remediation(session, project, check, EventType.DOWN, "missed heartbeat", now)
-                    _ensure_oncall_alert(session, project, check, EventType.DOWN, "missed heartbeat", now)
+                    if not maintenance:
+                        _trigger_remediation(session, project, check, EventType.DOWN, reason, now)
+                        _ensure_oncall_alert(session, project, check, EventType.DOWN, reason, now)
                     # alerting: only send if enabled and threshold reached and cooldown passed
                     should_alert = check.alert_enabled and (check.consecutive_failures >= (check.alert_after or 1))
                     if should_alert:
-                        # suppress alerts during a maintenance window
-                        if _in_maintenance(check, project, now):
-                            event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.DOWN, message="missed heartbeat (suppressed due to maintenance)", incident_id=(open_inc.id if 'open_inc' in locals() and open_inc else None))
-                            session.add(event)
+                        if maintenance:
                             session.add(check)
                             session.commit()
                             continue
                         # project-level throttling/escalation
                         throttled = _project_is_throttled(session, project, now)
                         if throttled:
-                            _trigger_escalation(session, project, now, "missed heartbeat", check=check)
+                            _trigger_escalation(session, project, now, reason, check=check)
                             session.add(check)
                             session.commit()
                         else:
@@ -423,6 +498,7 @@ def scan_checks_once(session: Session):
                             else:
                                 session.add(check)
                                 session.commit()
+                        _trigger_check_escalation(session, project, check, open_inc, now, reason)
                     else:
                         session.add(check)
                         session.commit()
@@ -431,7 +507,8 @@ def scan_checks_once(session: Session):
                     # still down: allow re-alerts after cooldown if threshold met
                     should_alert = check.alert_enabled and (check.consecutive_failures >= (check.alert_after or 1))
                     if should_alert:
-                        if _in_maintenance(check, project, now):
+                        open_inc = session.exec(select(Incident).where(Incident.check_id == check.id, Incident.resolved_at == None)).first()
+                        if maintenance:
                             session.add(check)
                             session.commit()
                             continue
@@ -457,6 +534,7 @@ def scan_checks_once(session: Session):
                             else:
                                 session.add(check)
                                 session.commit()
+                        _trigger_check_escalation(session, project, check, open_inc, now, "still down (missed heartbeat)")
                     else:
                         session.add(check)
                         session.commit()
@@ -475,7 +553,7 @@ def scan_checks_once(session: Session):
                     session.add(event)
                     _close_oncall_alerts(session, check.id)
                     # recovery alert: respect cooldown and enabled
-                    if check.alert_enabled:
+                    if check.alert_enabled and not maintenance:
                         last_alert = check.last_alerted_at
                         cooldown = check.alert_cooldown or 0
                         if (last_alert is None) or ((now - last_alert).total_seconds() > cooldown):
@@ -536,11 +614,15 @@ def scan_checks_once(session: Session):
                             session.commit()
                         check.status = CheckStatus.DEGRADED
                         check.consecutive_failures = 0
-                        event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.DEGRADED, message=f"latency_ms={latency_ms:.1f}" if latency_ms is not None else "degraded")
+                        event_message = f"latency_ms={latency_ms:.1f}" if latency_ms is not None else "degraded"
+                        if maintenance:
+                            event_message = f"{event_message} (suppressed due to maintenance)"
+                        event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.DEGRADED, message=event_message)
                         session.add(event)
-                        _trigger_remediation(session, project, check, EventType.DEGRADED, event.message, now)
-                        _ensure_oncall_alert(session, project, check, EventType.DEGRADED, event.message, now)
-                        if check.alert_enabled:
+                        if not maintenance:
+                            _trigger_remediation(session, project, check, EventType.DEGRADED, event.message, now)
+                            _ensure_oncall_alert(session, project, check, EventType.DEGRADED, event.message, now)
+                        if check.alert_enabled and not maintenance:
                             last_alert = check.last_alerted_at
                             cooldown = check.alert_cooldown or 0
                             if (last_alert is None) or ((now - last_alert).total_seconds() > cooldown):
@@ -556,7 +638,7 @@ def scan_checks_once(session: Session):
                                     logger.exception("Error sending DEGRADED alert")
                     else:
                         # still degraded: allow re-alerts after cooldown
-                        if check.alert_enabled:
+                        if check.alert_enabled and not maintenance:
                             last_alert = check.last_alerted_at
                             cooldown = check.alert_cooldown or 0
                             if (last_alert is None) or ((now - last_alert).total_seconds() > cooldown):
@@ -583,7 +665,7 @@ def scan_checks_once(session: Session):
                         event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.UP, message=f"check ok ({reason})", incident_id=(open_inc.id if open_inc else None))
                         session.add(event)
                         _close_oncall_alerts(session, check.id)
-                        if check.alert_enabled:
+                        if check.alert_enabled and not maintenance:
                             last_alert = check.last_alerted_at
                             cooldown = check.alert_cooldown or 0
                             if (last_alert is None) or ((now - last_alert).total_seconds() > cooldown):
@@ -608,60 +690,56 @@ def scan_checks_once(session: Session):
                     check.status = CheckStatus.DOWN
                     open_inc = session.exec(select(Incident).where(Incident.check_id == check.id, Incident.resolved_at == None)).first()
                     if not open_inc:
-                        candidate = session.exec(select(Incident).where(Incident.project_id == check.project_id, Incident.resolved_at == None).order_by(Incident.started_at.desc())).first()
-                        if candidate and (now - candidate.started_at).total_seconds() <= GROUP_WINDOW:
-                            open_inc = candidate
-                        else:
-                            open_inc = Incident(project_id=check.project_id, check_id=check.id, started_at=now, status="open")
-                            session.add(open_inc)
-                            session.commit()
-                            session.refresh(open_inc)
+                        signature = _normalize_reason(reason)
+                        group_root = _find_group_root(session, check.project_id, signature, now)
+                        open_inc = Incident(project_id=check.project_id, check_id=check.id, started_at=now, status="open", group_id=group_root)
+                        session.add(open_inc)
+                        session.commit()
+                        session.refresh(open_inc)
                     event_type = EventType.HTTP_FAILURE if check.type == CheckType.HTTP else EventType.DOWN
-                    event = Event(check_id=check.id, project_id=check.project_id, event_type=event_type, message=f"{reason}", incident_id=open_inc.id)
+                    event_message = f"{reason}"
+                    if maintenance:
+                        event_message = f"{event_message} (suppressed due to maintenance)"
+                    event = Event(check_id=check.id, project_id=check.project_id, event_type=event_type, message=event_message, incident_id=open_inc.id)
                     session.add(event)
                     rem_event = EventType.DOWN if event_type == EventType.HTTP_FAILURE else event_type
-                    _trigger_remediation(session, project, check, rem_event, reason, now)
-                    _ensure_oncall_alert(session, project, check, rem_event, reason, now)
+                    if not maintenance:
+                        _trigger_remediation(session, project, check, rem_event, reason, now)
+                        _ensure_oncall_alert(session, project, check, rem_event, reason, now)
                     should_alert = check.alert_enabled and (check.consecutive_failures >= (check.alert_after or 1))
                     if should_alert:
-                        if _in_maintenance(check, project, now):
-                            event = Event(check_id=check.id, project_id=check.project_id, event_type=event_type, message=f"{reason} (suppressed due to maintenance)")
-                            session.add(event)
-                            session.add(check)
-                            session.commit()
-                            try:
-                                check.next_run = now + timedelta(seconds=interval)
-                                session.add(check)
-                                session.commit()
-                            except Exception:
-                                logger.exception("Error persisting next_run for check %s", getattr(check, 'id', None))
-                            continue
-                        throttled = _project_is_throttled(session, project, now)
-                        if throttled:
-                            _trigger_escalation(session, project, now, reason, check=check)
+                        if maintenance:
                             session.add(check)
                             session.commit()
                         else:
-                            last_alert = check.last_alerted_at
-                            cooldown = check.alert_cooldown or 0
-                            if (last_alert is None) or ((now - last_alert).total_seconds() > cooldown):
+                            throttled = _project_is_throttled(session, project, now)
+                            if throttled:
+                                _trigger_escalation(session, project, now, reason, check=check)
                                 session.add(check)
                                 session.commit()
-                                try:
-                                    notify_down(check, project, reason=reason)
-                                    check.last_alerted_at = now
-                                    check.last_alert_type = event_type
+                            else:
+                                last_alert = check.last_alerted_at
+                                cooldown = check.alert_cooldown or 0
+                                if (last_alert is None) or ((now - last_alert).total_seconds() > cooldown):
                                     session.add(check)
                                     session.commit()
-                                except Exception:
-                                    logger.exception("Error sending DOWN alert")
+                                    try:
+                                        notify_down(check, project, reason=reason)
+                                        check.last_alerted_at = now
+                                        check.last_alert_type = event_type
+                                        session.add(check)
+                                        session.commit()
+                                    except Exception:
+                                        logger.exception("Error sending DOWN alert")
+                            _trigger_check_escalation(session, project, check, open_inc, now, reason)
                     else:
                         session.add(check)
                         session.commit()
                 else:
                     should_alert = check.alert_enabled and (check.consecutive_failures >= (check.alert_after or 1))
                     if should_alert:
-                        if _in_maintenance(check, project, now):
+                        open_inc = session.exec(select(Incident).where(Incident.check_id == check.id, Incident.resolved_at == None)).first()
+                        if maintenance:
                             session.add(check)
                             session.commit()
                         else:
@@ -684,6 +762,7 @@ def scan_checks_once(session: Session):
                                         session.commit()
                                     except Exception:
                                         logger.exception("Error sending repeated DOWN alert")
+                            _trigger_check_escalation(session, project, check, open_inc, now, "still down")
                     else:
                         session.add(check)
                         session.commit()

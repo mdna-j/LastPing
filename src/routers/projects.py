@@ -40,6 +40,8 @@ class ProjectRead(BaseModel):
     generic_webhook_url: Optional[str] = None
     slo_target: Optional[float] = None
     sla_target: Optional[float] = None
+    maintenance_starts_at: Optional[datetime] = None
+    maintenance_ends_at: Optional[datetime] = None
 
     class Config:
         orm_mode = True

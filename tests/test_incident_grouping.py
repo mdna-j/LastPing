@@ -38,13 +38,14 @@ def test_grouping_and_merge_split(tmp_path, monkeypatch):
         session.commit()
         session.refresh(inc1)
 
-        # Now run worker; chk2 should be marked DOWN and its event should reuse inc1
+        # Now run worker; chk2 should be marked DOWN and its incident should group with inc1
         monkeypatch.setattr(worker, 'notify_down', lambda *a, **k: True)
         worker.scan_checks_once(session)
 
-        # check events for chk2 reference inc1
-        ev = session.exec(select(Event).where(Event.check_id == chk2.id)).all()
-        assert any(e.incident_id == inc1.id for e in ev)
+        # check incident for chk2 is grouped under inc1
+        chk2_inc = session.exec(select(Incident).where(Incident.check_id == chk2.id, Incident.resolved_at == None)).first()
+        assert chk2_inc is not None
+        assert chk2_inc.group_id == (inc1.group_id or inc1.id)
 
         # Create a second incident and some events to test merge/split via API
         inc2 = Incident(project_id=project.id, check_id=chk1.id, started_at=now - timedelta(seconds=50), status="open")

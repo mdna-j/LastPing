@@ -1,6 +1,8 @@
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Optional, Any
+from typing import Optional, Any, Callable
+from functools import wraps
+import traceback
 
 
 class AsyncHeartbeatClient:
@@ -68,8 +70,42 @@ class AsyncHeartbeatClient:
             return await resp.text()
 
 
+def _format_exception(exc: Exception, include_traceback: bool = False, max_len: int = 1200) -> str:
+    if not include_traceback:
+        return f"{exc.__class__.__name__}: {exc}"
+    tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    tb = tb.strip()
+    if len(tb) > max_len:
+        tb = tb[-max_len:]
+    return tb
+
+
+def async_heartbeat(project_id: int, name: str, base_url: str, api_key: str, capture_errors: bool = False, error_event: str = "down", include_traceback: bool = False) -> Callable[[Callable], Callable]:
+    """Async decorator that sends a heartbeat and optionally reports exceptions."""
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            async with AsyncHeartbeatClient(base_url, api_key) as client:
+                try:
+                    await client.send(project_id, name)
+                except Exception:
+                    pass
+                try:
+                    return await func(*args, **kwargs)
+                except Exception as exc:
+                    if capture_errors:
+                        try:
+                            msg = _format_exception(exc, include_traceback=include_traceback)
+                            await client.send_event(project_id, name, event=error_event, message=f"exception: {msg}")
+                        except Exception:
+                            pass
+                    raise
+        return wrapper
+    return decorator
+
+
 @asynccontextmanager
-async def heartbeat_context(project_id: int, name: str, base_url: str, api_key: str, capture_errors: bool = True, error_event: str = "down"):
+async def heartbeat_context(project_id: int, name: str, base_url: str, api_key: str, capture_errors: bool = True, error_event: str = "down", include_traceback: bool = False):
     """Async context manager that sends a heartbeat and reports exceptions."""
     async with AsyncHeartbeatClient(base_url, api_key) as client:
         try:
@@ -81,7 +117,8 @@ async def heartbeat_context(project_id: int, name: str, base_url: str, api_key: 
         except Exception as exc:
             if capture_errors:
                 try:
-                    await client.send_event(project_id, name, event=error_event, message=f"exception: {exc}")
+                    msg = _format_exception(exc, include_traceback=include_traceback)
+                    await client.send_event(project_id, name, event=error_event, message=f"exception: {msg}")
                 except Exception:
                     pass
             raise

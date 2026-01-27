@@ -427,6 +427,7 @@ def notify_escalation(project, reason: str, check=None):
     summary = f"Escalation: project {project.name} alert threshold exceeded"
     details = {"project": project.name, "reason": reason, "timestamp": now_iso}
     if check is not None:
+        summary = f"Escalation: {project.name}/{getattr(check, 'name', 'check')} still failing"
         details.update({"check": getattr(check, "name", None), "check_id": getattr(check, "id", None)})
 
     if getattr(project, "discord_webhook_url", None):
@@ -475,19 +476,30 @@ def notify_escalation(project, reason: str, check=None):
 
     esc = os.environ.get("ALERT_ESCALATION_EMAIL")
     if esc:
-        subj = f"[LastPing] Escalation: project {project.name} alert threshold exceeded"
-        body = f"Project {project.name} has exceeded its alert threshold. Latest reason: {reason}"
+        if check is not None:
+            subj = f"[LastPing] Escalation: {project.name}/{getattr(check, 'name', 'check')}"
+            body = f"Project {project.name} check {getattr(check, 'name', 'check')} escalation: {reason}"
+        else:
+            subj = f"[LastPing] Escalation: project {project.name} alert threshold exceeded"
+            body = f"Project {project.name} has exceeded its alert threshold. Latest reason: {reason}"
         sent = send_email(subj, body, to=esc) or sent
     try:
         if _sms_allowed(project):
-            sms_msg = f"[LastPing] ESCALATION: {project.name} {reason or ''}".strip()
+            if check is not None:
+                sms_msg = f"[LastPing] ESCALATION: {project.name}/{getattr(check, 'name', 'check')} {reason or ''}".strip()
+            else:
+                sms_msg = f"[LastPing] ESCALATION: {project.name} {reason or ''}".strip()
             sent = send_sms(sms_msg, to=_sms_to(project)) or sent
     except Exception:
         pass
     try:
         if _oncall_allowed(project) and _oncall_email(project):
-            subj = f"[LastPing] ESCALATION: {project.name}"
-            body = f"Project {project.name} escalation: {reason}"
+            if check is not None:
+                subj = f"[LastPing] ESCALATION: {project.name}/{getattr(check, 'name', 'check')}"
+                body = f"Project {project.name} check {getattr(check, 'name', 'check')} escalation: {reason}"
+            else:
+                subj = f"[LastPing] ESCALATION: {project.name}"
+                body = f"Project {project.name} escalation: {reason}"
             sent = send_email(subj, body, to=_oncall_email(project)) or sent
     except Exception:
         pass

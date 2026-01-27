@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Path
 from sqlmodel import Session, select
@@ -69,20 +70,31 @@ def similar_incidents(project_id: int = Path(..., ge=1), days: int = Query(90, g
         if not msg:
             return "unknown"
         low = msg.strip().lower()
+        low = re.sub(r"https?://\\S+", "url", low)
+        low = re.sub(r"\\b\\d{1,3}(?:\\.\\d{1,3}){3}\\b", "ip", low)
+        low = re.sub(r"\\d+", "#", low)
         for sep in ("(", ":", ";", "|"):
             if sep in low:
                 low = low.split(sep, 1)[0].strip()
-        return low[:120] if low else "unknown"
+        low = re.sub(r"\\s+", " ", low)
+        return low[:160] if low else "unknown"
+
+    def group_root_id(inc: Incident) -> int:
+        if getattr(inc, "merged_into", None):
+            return inc.merged_into
+        return getattr(inc, "group_id", None) or inc.id
 
     groups: Dict[str, Dict[str, object]] = {}
     for inc in incs:
         ev = session.exec(select(Event).where(Event.incident_id == inc.id).order_by(Event.created_at)).first()
         signature = normalize(getattr(ev, "message", None))
-        key = f"{inc.check_id}:{signature}"
+        root_id = group_root_id(inc)
+        key = f"{root_id}:{signature}"
         g = groups.get(key)
         if not g:
             groups[key] = {
-                "check_id": inc.check_id,
+                "group_id": root_id,
+                "check_ids": {inc.check_id},
                 "signature": signature,
                 "incident_ids": [inc.id],
                 "count": 1,
@@ -91,13 +103,15 @@ def similar_incidents(project_id: int = Path(..., ge=1), days: int = Query(90, g
         else:
             g["incident_ids"].append(inc.id)
             g["count"] = int(g["count"]) + 1
+            g["check_ids"].add(inc.check_id)
             if inc.started_at > g["last_seen"]:
                 g["last_seen"] = inc.started_at
 
     rows: List[dict] = []
     for g in groups.values():
         rows.append({
-            "check_id": g["check_id"],
+            "group_id": g["group_id"],
+            "check_ids": sorted(list(g["check_ids"])),
             "signature": g["signature"],
             "count": g["count"],
             "incident_ids": g["incident_ids"],

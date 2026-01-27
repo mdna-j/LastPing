@@ -82,6 +82,10 @@ class Check(SQLModel, table=True):
     alert_cooldown: int = Field(default=3600, description="seconds to wait between alerts for this check")
     last_alerted_at: Optional[datetime] = None
     last_alert_type: Optional[str] = None
+    # per-check escalation policy (optional)
+    escalation_after_minutes: Optional[int] = Field(default=None, description="minutes down before escalating")
+    escalation_cooldown_seconds: Optional[int] = Field(default=3600, description="seconds between escalation notifications")
+    last_escalated_at: Optional[datetime] = None
 
     # optional maintenance window (suppress alerts during this period)
     maintenance_starts_at: Optional[datetime] = None

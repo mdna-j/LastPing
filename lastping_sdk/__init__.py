@@ -14,13 +14,14 @@ except PackageNotFoundError:  # pragma: no cover - not installed
     __version__ = "0.0.0"
 
 from .client import HeartbeatClient
-from .async_client import AsyncHeartbeatClient, heartbeat_context as async_heartbeat_context
+from .async_client import AsyncHeartbeatClient, heartbeat_context as async_heartbeat_context, async_heartbeat
 from .decorators import heartbeat, heartbeat_context
 from .api import send_event
 
 __all__ = [
     "HeartbeatClient",
     "AsyncHeartbeatClient",
+    "async_heartbeat",
     "heartbeat",
     "heartbeat_context",
     "async_heartbeat_context",
