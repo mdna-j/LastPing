@@ -46,6 +46,10 @@ class Project(SQLModel, table=True):
     # on-call and SMS alert settings (optional; when None fall back to env defaults)
     sms_enabled: Optional[bool] = Field(default=None, description="enable SMS alerts for this project")
     sms_to: Optional[str] = Field(default=None, description="destination phone number for SMS alerts")
+    sms_from: Optional[str] = Field(default=None, description="override SMS from number (Twilio)")
+    sms_provider: Optional[str] = Field(default=None, description="SMS provider id, e.g. 'twilio'")
+    sms_account_sid: Optional[str] = Field(default=None, description="SMS provider account SID (Twilio)")
+    sms_auth_token: Optional[str] = Field(default=None, description="SMS provider auth token (Twilio)")
     oncall_enabled: Optional[bool] = Field(default=None, description="enable on-call email alerts for this project")
     oncall_email: Optional[str] = Field(default=None, description="destination email address for on-call alerts")
     # optional project-level maintenance window (suppress alerts across project)
@@ -295,6 +299,13 @@ class RemediationHook(SQLModel, table=True):
     cooldown_seconds: int = Field(default=900)
     last_triggered_at: Optional[datetime] = None
     secret: Optional[str] = None
+    require_secret: bool = Field(default=False, description="require a secret to be set before triggering")
+    max_triggers_per_day: Optional[int] = Field(default=50, description="max remediation triggers per 24h")
+    failure_count: int = Field(default=0, description="consecutive failure count")
+    disable_on_failure_count: Optional[int] = Field(default=5, description="disable hook after this many failures")
+    disabled_at: Optional[datetime] = None
+    disabled_reason: Optional[str] = None
+    allow_during_maintenance: bool = Field(default=False, description="allow remediation during maintenance windows")
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 

@@ -236,6 +236,19 @@ def _region_allows(worker_region: Optional[str], check_region: Optional[str]) ->
     return worker_region.strip().lower() in allowed
 
 
+def _allow_region_or_failover(session: Session, worker_region: Optional[str], check: Check, now: datetime) -> bool:
+    if _region_allows(worker_region, getattr(check, "region", None)):
+        return True
+    # failover: allow other regions to pick up checks after leases expire
+    if os.environ.get("WORKER_REGION_FAILOVER", "0") != "1":
+        return False
+    grace = int(os.environ.get("WORKER_FAILOVER_AFTER_SECONDS", "300"))
+    lease = session.get(CheckLease, check.id)
+    if lease is None or lease.lease_expires_at is None:
+        return True
+    return lease.lease_expires_at <= (now - timedelta(seconds=grace))
+
+
 def _acquire_lease(session: Session, check: Check, now: datetime) -> bool:
     if os.environ.get("WORKER_LEASES", "1") == "0":
         return True
@@ -272,10 +285,42 @@ def _trigger_remediation(session: Session, project: Project, check: Check, event
             )
         ).all()
         for hook in hooks:
+            if hook.disabled_at is not None:
+                continue
             if hook.check_id and hook.check_id != check.id:
                 continue
+            if getattr(hook, "require_secret", False) and not hook.secret:
+                try:
+                    al = AuditLog(actor="worker", action="skip_remediation", target_type="remediation_hook", target_id=hook.id, details="missing_secret", actor_ip=None, user_agent=None)
+                    session.add(al)
+                    session.commit()
+                except Exception:
+                    pass
+                continue
+            # safety: enforce maintenance suppression unless explicitly allowed
+            if not getattr(hook, "allow_during_maintenance", False):
+                if _in_maintenance(check, project, now):
+                    try:
+                        al = AuditLog(actor="worker", action="skip_remediation", target_type="remediation_hook", target_id=hook.id, details="maintenance_window", actor_ip=None, user_agent=None)
+                        session.add(al)
+                        session.commit()
+                    except Exception:
+                        pass
+                    continue
             if hook.last_triggered_at and (now - hook.last_triggered_at).total_seconds() < (hook.cooldown_seconds or 0):
                 continue
+            max_per_day = getattr(hook, "max_triggers_per_day", None)
+            if max_per_day:
+                day_start = now - timedelta(days=1)
+                recent = session.exec(select(RemediationLog).where(RemediationLog.hook_id == hook.id, RemediationLog.created_at >= day_start)).all()
+                if len(recent) >= max_per_day:
+                    try:
+                        al = AuditLog(actor="worker", action="skip_remediation", target_type="remediation_hook", target_id=hook.id, details="max_per_day", actor_ip=None, user_agent=None)
+                        session.add(al)
+                        session.commit()
+                    except Exception:
+                        pass
+                    continue
             payload = {
                 "project_id": project.id,
                 "project": project.name,
@@ -301,6 +346,20 @@ def _trigger_remediation(session: Session, project: Project, check: Check, event
             except Exception as exc:
                 msg = str(exc)
             hook.last_triggered_at = now
+            if status != "ok":
+                hook.failure_count = (hook.failure_count or 0) + 1
+                threshold = getattr(hook, "disable_on_failure_count", None)
+                if threshold and hook.failure_count >= threshold:
+                    hook.enabled = False
+                    hook.disabled_at = now
+                    hook.disabled_reason = f"failure_count>={threshold}"
+                    try:
+                        al = AuditLog(actor="worker", action="disable_remediation", target_type="remediation_hook", target_id=hook.id, details=hook.disabled_reason, actor_ip=None, user_agent=None)
+                        session.add(al)
+                    except Exception:
+                        pass
+            else:
+                hook.failure_count = 0
             session.add(hook)
             log = RemediationLog(
                 hook_id=hook.id,
@@ -350,12 +409,12 @@ def _send_oncall_target(session: Session, project: Project, check: Check, alert:
             if member.email:
                 ok = send_email(f"[LastPing] {project.name} alert", msg, to=member.email) or ok
             if member.phone:
-                ok = send_sms(msg, to=member.phone) or ok
+                ok = send_sms(msg, to=member.phone, project=project) or ok
             return ok
         if esc.target_type == "email" and esc.target_value:
             return send_email(f"[LastPing] {project.name} alert", msg, to=esc.target_value)
         if esc.target_type == "sms" and esc.target_value:
-            return send_sms(msg, to=esc.target_value)
+            return send_sms(msg, to=esc.target_value, project=project)
     except Exception:
         logger.exception("Error sending on-call notification")
     return False
@@ -443,7 +502,7 @@ def scan_checks_once(session: Session):
     processed_oncall = False
     worker_region = os.environ.get("WORKER_REGION")
     for check in results:
-        if not _region_allows(worker_region, getattr(check, "region", None)):
+        if not _allow_region_or_failover(session, worker_region, check, now):
             continue
         project = session.get(Project, check.project_id)
         if not project:

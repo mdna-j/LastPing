@@ -22,6 +22,7 @@ def incidents_page():
       <div class="row">
       <label>Project: <input id="projectId" value="1" style="width:80px"/></label>
       <button id="loadIncidentsBtn" class="btn">Load</button>
+      <a href="/ui/dashboard" style="margin-left:12px">Dashboard</a>
       <a href="/ui/snapshots" style="margin-left:12px">Snapshots</a>
     </div>
     <div id="list">Loading...</div>
@@ -155,6 +156,7 @@ def snapshots_page():
       <label>Project: <input id="projectId" value="1" style="width:80px"/></label>
       <label>API Key: <input id="apiKey" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></label>
       <a id="settingsLink" class="btn" href="/ui/projects/1/settings">Settings</a>
+      <a class="btn" href="/ui/dashboard">Dashboard</a>
       <label>Check: <select id="checkId" style="width:120px"><option value="">(all)</option></select></label>
       <label>Start: <input id="start" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
       <label>End: <input id="end" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
@@ -169,6 +171,60 @@ def snapshots_page():
     <div style="margin-top:12px"><canvas id="uptimeChart" width="800" height="240"></canvas></div>
     <script src="/static/js/vendor/chart.min.js"></script>
     <script src="/static/js/snapshots.js"></script>
+    </body>
+    </html>
+    """
+
+
+@router.get("/dashboard")
+def dashboard_page():
+    return """
+    <html>
+    <head>
+      <title>Project Dashboard</title>
+      <meta name="viewport" content="width=device-width,initial-scale=1" />
+      <link rel="stylesheet" href="/static/css/ui.css" />
+    </head>
+    <body>
+    <h1>Project Dashboard</h1>
+    <div class="row">
+      <label>Project: <input id="projectId" value="1" style="width:80px"/></label>
+      <label>API Key: <input id="apiKey" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></label>
+      <label>Start: <input id="start" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
+      <label>End: <input id="end" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
+      <button id="loadDashboardBtn" class="btn">Load</button>
+      <a class="btn" href="/ui/snapshots">Snapshots</a>
+      <a class="btn" href="/ui/incidents">Incidents</a>
+    </div>
+
+    <div id="cards" class="row"></div>
+
+    <div class="row">
+      <div class="card" style="flex:1;min-width:320px">
+        <h3>Uptime (recent)</h3>
+        <canvas id="uptimeChart" height="140"></canvas>
+      </div>
+      <div class="card" style="flex:1;min-width:320px">
+        <h3>Failure Trends</h3>
+        <canvas id="trendChart" height="140"></canvas>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Checks</h3>
+      <table id="checksTable">
+        <thead><tr><th>Name</th><th>Type</th><th>Status</th><th>Last Ping</th><th>Latency</th><th>Region</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h3>Latest Incidents</h3>
+      <div id="incidentsList" class="muted">Provide API key to load incidents.</div>
+    </div>
+
+    <script src="/static/js/vendor/chart.min.js"></script>
+    <script src="/static/js/dashboard.js"></script>
     </body>
     </html>
     """

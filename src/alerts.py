@@ -25,12 +25,27 @@ logger = logging.getLogger("lastping.alerts")
 def _sms_allowed(project) -> bool:
     enabled = getattr(project, "sms_enabled", None)
     if enabled is None:
+        # allow per-project overrides to enable SMS even if env is unset
+        if project and (getattr(project, "sms_account_sid", None) or getattr(project, "sms_auth_token", None) or getattr(project, "sms_from", None) or getattr(project, "sms_to", None)):
+            return True
         return bool(os.environ.get("ALERT_SMS_TO"))
     return bool(enabled)
 
 
 def _sms_to(project) -> Optional[str]:
-    return getattr(project, "sms_to", None)
+    return getattr(project, "sms_to", None) or os.environ.get("ALERT_SMS_TO")
+
+
+def _sms_from(project) -> Optional[str]:
+    return getattr(project, "sms_from", None) or os.environ.get("TWILIO_FROM")
+
+
+def _sms_account_sid(project) -> Optional[str]:
+    return getattr(project, "sms_account_sid", None) or os.environ.get("TWILIO_ACCOUNT_SID")
+
+
+def _sms_auth_token(project) -> Optional[str]:
+    return getattr(project, "sms_auth_token", None) or os.environ.get("TWILIO_AUTH_TOKEN")
 
 
 def _oncall_allowed(project) -> bool:
@@ -80,12 +95,12 @@ def send_generic_webhook(url: str, payload: dict) -> bool:
     return _post_json(url, payload)
 
 
-def send_sms(message: str, to: Optional[str] = None) -> bool:
-    """Send SMS via Twilio when configured."""
-    sid = os.environ.get("TWILIO_ACCOUNT_SID")
-    token = os.environ.get("TWILIO_AUTH_TOKEN")
-    from_num = os.environ.get("TWILIO_FROM")
-    to_num = to or os.environ.get("ALERT_SMS_TO")
+def send_sms(message: str, to: Optional[str] = None, project=None) -> bool:
+    """Send SMS via Twilio when configured (env vars or per-project overrides)."""
+    sid = _sms_account_sid(project)
+    token = _sms_auth_token(project)
+    from_num = _sms_from(project)
+    to_num = to or _sms_to(project)
     if not sid or not token or not from_num or not to_num:
         logger.debug("SMS not configured")
         return False
@@ -244,7 +259,7 @@ def notify_down(check, project, reason: str = None) -> None:
         try:
             if _sms_allowed(project):
                 sms_msg = f"[LastPing] DOWN: {project.name}/{check.name} {reason or ''}".strip()
-                send_sms(sms_msg, to=_sms_to(project))
+                send_sms(sms_msg, to=_sms_to(project), project=project)
         except Exception:
             pass
         try:
@@ -261,6 +276,14 @@ def notify_down(check, project, reason: str = None) -> None:
 def notify_degraded(check, project, reason: str = None) -> None:
     try:
         now_iso = datetime.utcnow().isoformat() + "Z"
+        if reason is None:
+            try:
+                last_lat = getattr(check, "last_latency_ms", None)
+                thr = getattr(check, "latency_threshold_ms", None)
+                if last_lat is not None and thr is not None:
+                    reason = f"latency_ms={float(last_lat):.1f} (> {int(thr)}ms)"
+            except Exception:
+                pass
         summary = f"Project {project.name} -- Check {check.name} is DEGRADED"
         sent = False
         if getattr(project, "discord_webhook_url", None):
@@ -287,7 +310,7 @@ def notify_degraded(check, project, reason: str = None) -> None:
         try:
             if _sms_allowed(project):
                 sms_msg = f"[LastPing] DEGRADED: {project.name}/{check.name} {reason or ''}".strip()
-                send_sms(sms_msg, to=_sms_to(project))
+                send_sms(sms_msg, to=_sms_to(project), project=project)
         except Exception:
             pass
         try:
@@ -489,7 +512,7 @@ def notify_escalation(project, reason: str, check=None):
                 sms_msg = f"[LastPing] ESCALATION: {project.name}/{getattr(check, 'name', 'check')} {reason or ''}".strip()
             else:
                 sms_msg = f"[LastPing] ESCALATION: {project.name} {reason or ''}".strip()
-            sent = send_sms(sms_msg, to=_sms_to(project)) or sent
+            sent = send_sms(sms_msg, to=_sms_to(project), project=project) or sent
     except Exception:
         pass
     try:

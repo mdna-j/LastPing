@@ -20,6 +20,10 @@ class RemediationHookIn(StrictBaseModel):
     enabled: Optional[bool] = True
     cooldown_seconds: Optional[conint(ge=0, le=86400)] = 900
     secret: Optional[constr(max_length=255)] = None
+    require_secret: Optional[bool] = False
+    max_triggers_per_day: Optional[conint(ge=1, le=10000)] = 50
+    disable_on_failure_count: Optional[conint(ge=1, le=1000)] = 5
+    allow_during_maintenance: Optional[bool] = False
 
 
 class RemediationHookOut(BaseModel):
@@ -32,6 +36,13 @@ class RemediationHookOut(BaseModel):
     enabled: bool
     cooldown_seconds: int
     last_triggered_at: Optional[str]
+    require_secret: bool
+    max_triggers_per_day: Optional[int]
+    failure_count: int
+    disable_on_failure_count: Optional[int]
+    disabled_at: Optional[str]
+    disabled_reason: Optional[str]
+    allow_during_maintenance: bool
 
     class Config:
         orm_mode = True
@@ -55,6 +66,10 @@ def create_hook(project_id: int = Path(..., ge=1), payload: RemediationHookIn = 
         enabled=payload.enabled if payload.enabled is not None else True,
         cooldown_seconds=payload.cooldown_seconds or 900,
         secret=payload.secret,
+        require_secret=payload.require_secret if payload.require_secret is not None else False,
+        max_triggers_per_day=payload.max_triggers_per_day,
+        disable_on_failure_count=payload.disable_on_failure_count,
+        allow_during_maintenance=payload.allow_during_maintenance if payload.allow_during_maintenance is not None else False,
     )
     session.add(hook)
     session.commit()

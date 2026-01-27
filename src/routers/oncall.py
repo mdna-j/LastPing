@@ -49,6 +49,23 @@ class EscalationIn(StrictBaseModel):
         return values
 
 
+class SmsSettingsIn(StrictBaseModel):
+    sms_provider: Optional[Literal["twilio"]] = None
+    sms_account_sid: Optional[constr(max_length=128)] = None
+    sms_auth_token: Optional[constr(max_length=128)] = None
+    sms_from: Optional[constr(regex=r"^\\+?[0-9]{7,20}$")] = None
+
+
+class SmsSettingsOut(BaseModel):
+    sms_provider: Optional[str] = None
+    sms_account_sid: Optional[str] = None
+    sms_auth_token_set: bool = False
+    sms_from: Optional[str] = None
+
+    class Config:
+        orm_mode = True
+
+
 @router.get("/rotations")
 def list_rotations(project_id: int = Path(..., ge=1), session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
     return session.exec(select(OnCallRotation).where(OnCallRotation.project_id == project_id)).all()
@@ -196,6 +213,52 @@ def list_oncall_alerts(project_id: int = Path(..., ge=1), status_filter: Optiona
     if status_filter:
         stmt = stmt.where(OnCallAlert.status == status_filter)
     return session.exec(stmt.order_by(OnCallAlert.created_at.desc())).all()
+
+
+@router.get("/sms-settings", response_model=SmsSettingsOut)
+def get_sms_settings(project_id: int = Path(..., ge=1), authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), session: Session = Depends(get_session)):
+    require_admin_or_owner(project_id, x_admin_token=x_admin_token, authorization=authorization, session=session)
+    project = session.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return SmsSettingsOut(
+        sms_provider=project.sms_provider,
+        sms_account_sid=project.sms_account_sid,
+        sms_auth_token_set=bool(project.sms_auth_token),
+        sms_from=project.sms_from,
+    )
+
+
+@router.post("/sms-settings", response_model=SmsSettingsOut)
+def set_sms_settings(project_id: int = Path(..., ge=1), payload: SmsSettingsIn = Body(...), request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
+    require_admin_or_owner(project_id, x_admin_token=x_admin_token, authorization=authorization, session=session)
+    project = session.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if payload.sms_provider is not None:
+        project.sms_provider = payload.sms_provider
+    if payload.sms_account_sid is not None:
+        project.sms_account_sid = payload.sms_account_sid or None
+    if payload.sms_auth_token is not None:
+        project.sms_auth_token = payload.sms_auth_token or None
+    if payload.sms_from is not None:
+        project.sms_from = payload.sms_from or None
+    session.add(project)
+    session.commit()
+    session.refresh(project)
+    try:
+        actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
+        al = AuditLog(actor=actor, action="set_sms_settings", target_type="project", target_id=project_id, details=None, actor_ip=actor_ip, user_agent=user_agent)
+        session.add(al)
+        session.commit()
+    except Exception:
+        pass
+    return SmsSettingsOut(
+        sms_provider=project.sms_provider,
+        sms_account_sid=project.sms_account_sid,
+        sms_auth_token_set=bool(project.sms_auth_token),
+        sms_from=project.sms_from,
+    )
 
 
 @router.post("/alerts/{alert_id}/close")
