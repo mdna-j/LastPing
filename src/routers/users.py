@@ -3,14 +3,14 @@ from typing import Optional
 import os
 import secrets
 
-from fastapi import APIRouter, Depends, HTTPException, status, Header, Path, Body
+from fastapi import APIRouter, Depends, HTTPException, status, Header, Path, Body, Request
 from pydantic import BaseModel, EmailStr, constr
 from sqlmodel import Session, select
 
 from ..db import get_session
-from ..models import User, UserToken, ProjectMembership, Project
+from ..models import User, UserToken, ProjectMembership, Project, AuditLog
 from ..security import hash_password, verify_password
-from ..deps import limit_public_requests
+from ..deps import limit_public_requests, get_audit_context
 from ..schemas import StrictBaseModel
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -33,7 +33,7 @@ class TokenOut(BaseModel):
 
 
 @router.post("/create", response_model=dict, dependencies=[Depends(limit_public_requests)])
-def create_user(payload: CreateUserIn, x_admin_token: Optional[str] = Header(None), session: Session = Depends(get_session)):
+def create_user(payload: CreateUserIn, request: Request = None, x_admin_token: Optional[str] = Header(None), session: Session = Depends(get_session)):
     admin_token = os.environ.get('ADMIN_TOKEN')
     if not admin_token or x_admin_token != admin_token:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin token required")
@@ -46,6 +46,13 @@ def create_user(payload: CreateUserIn, x_admin_token: Optional[str] = Header(Non
     session.add(u)
     session.commit()
     session.refresh(u)
+    try:
+        actor, actor_ip, user_agent = get_audit_context(request, None, x_admin_token, session)
+        al = AuditLog(actor=actor, action="create_user", target_type="user", target_id=u.id, details=f"email={u.email}", actor_ip=actor_ip, user_agent=user_agent)
+        session.add(al)
+        session.commit()
+    except Exception:
+        pass
     return {"id": u.id, "email": u.email}
 
 
@@ -124,7 +131,7 @@ class MembershipIn(StrictBaseModel):
 
 
 @router.post("/projects/{project_id}/membership")
-def add_member(project_id: int = Path(..., ge=1), payload: MembershipIn = Body(...), authorization: Optional[str] = Header(None), session: Session = Depends(get_session)):
+def add_member(project_id: int = Path(..., ge=1), payload: MembershipIn = Body(...), request: Request = None, authorization: Optional[str] = Header(None), session: Session = Depends(get_session)):
     # only owners may add members
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token")
@@ -153,11 +160,19 @@ def add_member(project_id: int = Path(..., ge=1), payload: MembershipIn = Body(.
     membership = ProjectMembership(user_id=target.id, project_id=project_id, role=payload.role)
     session.add(membership)
     session.commit()
+    session.refresh(membership)
+    try:
+        actor, actor_ip, user_agent = get_audit_context(request, authorization, None, session)
+        al = AuditLog(actor=actor, action="add_project_member", target_type="project_membership", target_id=membership.id, details=f"project_id={project_id}, user_id={target.id}, role={payload.role}", actor_ip=actor_ip, user_agent=user_agent)
+        session.add(al)
+        session.commit()
+    except Exception:
+        pass
     return {"user_id": target.id, "email": target.email, "role": payload.role}
 
 
 @router.delete("/projects/{project_id}/membership/{user_id}")
-def remove_member(project_id: int = Path(..., ge=1), user_id: int = Path(..., ge=1), authorization: Optional[str] = Header(None), session: Session = Depends(get_session)):
+def remove_member(project_id: int = Path(..., ge=1), user_id: int = Path(..., ge=1), request: Request = None, authorization: Optional[str] = Header(None), session: Session = Depends(get_session)):
     # only owners may remove members
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token")
@@ -173,6 +188,14 @@ def remove_member(project_id: int = Path(..., ge=1), user_id: int = Path(..., ge
     target_pm = session.exec(select(ProjectMembership).where(ProjectMembership.user_id == user_id, ProjectMembership.project_id == project_id)).first()
     if not target_pm:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Membership not found")
+    pm_id = target_pm.id
     session.delete(target_pm)
     session.commit()
+    try:
+        actor, actor_ip, user_agent = get_audit_context(request, authorization, None, session)
+        al = AuditLog(actor=actor, action="remove_project_member", target_type="project_membership", target_id=pm_id, details=f"project_id={project_id}, user_id={user_id}", actor_ip=actor_ip, user_agent=user_agent)
+        session.add(al)
+        session.commit()
+    except Exception:
+        pass
     return {"status": "removed"}

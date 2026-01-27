@@ -205,6 +205,13 @@ async function openAvailability(){
   html += `<div><strong>Project uptime:</strong> ${pct(data.project_uptime_percent)}</div>`;
   html += `<div class="muted">Range: ${data.start} → ${data.end}</div>`;
   html += `<div class="muted">SLO target: ${pct(data.slo_target)} &nbsp; SLA target: ${pct(data.sla_target)}</div>`;
+  if(data.project_slo_met !== undefined || data.project_sla_met !== undefined){
+    const sloClass = data.project_slo_met ? 'status-up' : 'status-down';
+    const slaClass = data.project_sla_met ? 'status-up' : 'status-down';
+    const sloText = (data.project_slo_met === null || data.project_slo_met === undefined) ? 'n/a' : (data.project_slo_met ? 'met' : 'missed');
+    const slaText = (data.project_sla_met === null || data.project_sla_met === undefined) ? 'n/a' : (data.project_sla_met ? 'met' : 'missed');
+    html += `<div style="margin-top:4px"><span class="badge ${sloClass}">Project SLO ${sloText}</span> <span class="badge ${slaClass}">Project SLA ${slaText}</span></div>`;
+  }
   html += '<div style="margin-top:8px"></div>';
 
   if(!data.checks || !data.checks.length){

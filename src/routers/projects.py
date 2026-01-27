@@ -211,7 +211,7 @@ def rotate_api_key(project_id: int = Path(..., ge=1), request: Request = None, s
 
 
 @router.post('/rotate-all-keys')
-def rotate_all_keys(x_admin_token: Optional[str] = Header(None), session: Session = Depends(get_session)):
+def rotate_all_keys(request: Request = None, x_admin_token: Optional[str] = Header(None), session: Session = Depends(get_session)):
     """Admin endpoint to rotate API keys for all projects.
 
     Protected by `ADMIN_TOKEN` env var. Supply the admin token in header `X-ADMIN-TOKEN`.
@@ -239,7 +239,21 @@ def rotate_all_keys(x_admin_token: Optional[str] = Header(None), session: Sessio
                 send_email(subj, body, to=p.owner_email)
         except Exception:
             pass
+        # audit per project rotation
+        try:
+            actor, actor_ip, user_agent = get_audit_context(request, None, x_admin_token, session)
+            al = AuditLog(actor=actor, action="rotate_project_key_admin", target_type="project", target_id=p.id, details="rotate_all_keys", actor_ip=actor_ip, user_agent=user_agent)
+            session.add(al)
+        except Exception:
+            pass
     session.commit()
+    try:
+        actor, actor_ip, user_agent = get_audit_context(request, None, x_admin_token, session)
+        al = AuditLog(actor=actor, action="rotate_all_keys", target_type="admin", target_id=None, details=f"count={len(result)}", actor_ip=actor_ip, user_agent=user_agent)
+        session.add(al)
+        session.commit()
+    except Exception:
+        pass
     return result
 
 

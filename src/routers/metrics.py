@@ -192,6 +192,8 @@ def availability_report(project_id: int = Path(..., ge=1), start: Optional[str] 
         })
 
     agg = sum([r["uptime_percent"] for r in check_rows]) / len(check_rows) if check_rows else 100.0
+    project_slo_met = None if project.slo_target is None else agg >= project.slo_target
+    project_sla_met = None if project.sla_target is None else agg >= project.sla_target
     return {
         "project_id": project_id,
         "start": start_dt.isoformat(),
@@ -199,6 +201,8 @@ def availability_report(project_id: int = Path(..., ge=1), start: Optional[str] 
         "project_uptime_percent": agg,
         "slo_target": project.slo_target,
         "sla_target": project.sla_target,
+        "project_slo_met": project_slo_met,
+        "project_sla_met": project_sla_met,
         "checks": check_rows,
     }
 
