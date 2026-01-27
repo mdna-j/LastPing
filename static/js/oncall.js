@@ -10,9 +10,11 @@ function headersOncall(){
 async function refreshOncall(){
   const pid = document.getElementById('projectId').value || '1';
   const h = headersOncall();
+  const escFilter = document.getElementById('escFilterCheckId').value;
+  const escUrl = escFilter ? `/projects/${pid}/oncall/escalations?check_id=${encodeURIComponent(escFilter)}` : `/projects/${pid}/oncall/escalations`;
   const [rots, escs, alerts] = await Promise.all([
     fetch(`/projects/${pid}/oncall/rotations`, {headers: h}),
-    fetch(`/projects/${pid}/oncall/escalations`, {headers: h}),
+    fetch(escUrl, {headers: h}),
     fetch(`/projects/${pid}/oncall/alerts?status_filter=open`, {headers: h}),
   ]);
   if(!rots.ok || !escs.ok || !alerts.ok){ alert('Failed to load on-call data'); return; }
@@ -33,7 +35,7 @@ async function refreshOncall(){
   }
 
   const escDiv = document.getElementById('escalations');
-  escDiv.innerHTML = escJson.map(e => `<div class="card"><div>Level ${e.level} ${e.target_type} delay:${e.delay_minutes} ${e.rotation_id? 'rotation:'+e.rotation_id:''} ${e.target_value? 'target:'+e.target_value:''}</div><button class="btn" onclick="deleteEscalation(${pid}, ${e.id})">Delete</button></div>`).join('');
+  escDiv.innerHTML = escJson.map(e => `<div class="card"><div>${e.check_id? 'check:'+e.check_id:'project-wide'} level:${e.level} ${e.target_type} delay:${e.delay_minutes} ${e.rotation_id? 'rotation:'+e.rotation_id:''} ${e.target_value? 'target:'+e.target_value:''}</div><button class="btn" onclick="deleteEscalation(${pid}, ${e.id})">Delete</button></div>`).join('');
 
   const alertDiv = document.getElementById('alerts');
   alertDiv.innerHTML = alertJson.map(a => `<div class="card"><div>Alert ${a.id} check:${a.check_id} event:${a.event_type} level:${a.escalation_level}</div><div class="muted">${a.message||''}</div><button class="btn" onclick="closeAlert(${pid}, ${a.id})">Close</button></div>`).join('');
@@ -69,6 +71,7 @@ async function addMember(){
 async function addEscalation(){
   const pid = document.getElementById('projectId').value || '1';
   const payload = {
+    check_id: parseInt(document.getElementById('escCheckId').value || '0') || null,
     level: parseInt(document.getElementById('escLevel').value || '0') || 0,
     delay_minutes: parseInt(document.getElementById('escDelay').value || '0') || 15,
     target_type: document.getElementById('escType').value,
@@ -105,5 +108,10 @@ document.addEventListener('DOMContentLoaded', ()=>{
   document.getElementById('addRotationBtn').addEventListener('click', addRotation);
   document.getElementById('addMemberBtn').addEventListener('click', addMember);
   document.getElementById('addEscBtn').addEventListener('click', addEscalation);
+  document.getElementById('escFilterBtn').addEventListener('click', refreshOncall);
+  document.getElementById('escClearFilterBtn').addEventListener('click', ()=>{
+    document.getElementById('escFilterCheckId').value = '';
+    refreshOncall();
+  });
   refreshOncall();
 });

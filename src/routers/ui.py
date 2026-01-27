@@ -479,6 +479,7 @@ def oncall_page(project_id: int = Path(..., ge=1)):
     <div id="members"></div>
     <h2>Escalations</h2>
     <div class="row">
+      <input id="escCheckId" placeholder="Check ID (optional)" style="width:140px" />
       <input id="escLevel" placeholder="Level" style="width:80px" />
       <input id="escDelay" placeholder="Delay (min)" style="width:120px" />
       <select id="escType">
@@ -489,6 +490,11 @@ def oncall_page(project_id: int = Path(..., ge=1)):
       <input id="escRotationId" placeholder="Rotation ID" style="width:140px" />
       <input id="escTarget" placeholder="Target (email/phone)" style="width:220px" />
       <button id="addEscBtn" class="btn">Add Escalation</button>
+    </div>
+    <div class="row">
+      <input id="escFilterCheckId" placeholder="Filter by Check ID" style="width:160px" />
+      <button id="escFilterBtn" class="btn btn-secondary">Filter</button>
+      <button id="escClearFilterBtn" class="btn btn-secondary">Clear</button>
     </div>
     <div id="escalations"></div>
     <h2>Open Alerts</h2>
