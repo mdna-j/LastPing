@@ -258,10 +258,15 @@ def incident_detail_page(incident_id: int = Path(..., ge=1)):
     </head>
     <body>
     <h1>Incident <span id="iid"></span></h1>
-    <div class="muted">Project: <input id="projectId" value="1" style="width:80px"/></div>
+    <div class="row">
+      <label>Project: <input id="projectId" value="1" style="width:80px"/></label>
+      <label>API Key: <input id="apiKey" type="password" autocomplete="off" placeholder="required" style="width:240px"/></label>
+    </div>
     <div style="margin-top:12px"><button id="shareBtn" class="btn">Create Share Link</button> <span id="shareInfo" class="muted"></span></div>
     <h2>Events</h2>
     <div id="detail">Loading...</div>
+    <h2>Similar Incidents</h2>
+    <div id="similarIncidents" class="muted">Provide API key to load similar incidents.</div>
     <script src="/static/js/incident_detail.js"></script>
     </body>
     </html>

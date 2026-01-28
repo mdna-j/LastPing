@@ -25,6 +25,7 @@ from .db import engine
 from .models import Check, CheckType, CheckStatus, Event, EventType, Project, Incident
 from .alerts import notify_down, notify_recovery, notify_degraded, send_email, send_sms
 from .models import UptimeSnapshot, CheckLease, RemediationHook, RemediationLog, RemediationApproval, OnCallAlert, OnCallEscalation, OnCallRotation, OnCallMember, AuditLog
+from .analytics_ml import find_similar_incidents
 
 logger = logging.getLogger("lastping.worker")
 
@@ -325,6 +326,40 @@ def _maybe_log_early_warnings(session: Session, now: datetime, project_ids):
             except Exception:
                 session.rollback()
                 logger.exception("Failed to log early warning for check %s", check_id)
+
+
+def _log_similar_incidents(session: Session, project: Project, incident_id: int, reason: Optional[str]):
+    threshold = float(os.environ.get("INCIDENT_SIMILARITY_THRESHOLD", "0.35"))
+    if threshold <= 0.0:
+        return
+    days = int(os.environ.get("INCIDENT_SIMILARITY_DAYS", "90"))
+    limit = int(os.environ.get("INCIDENT_SIMILARITY_LIMIT", "3"))
+    matches = find_similar_incidents(
+        session=session,
+        project_id=project.id,
+        target_text=reason,
+        days=days,
+        limit=limit,
+        threshold=threshold,
+        target_incident_id=incident_id,
+    )
+    if not matches:
+        return
+    try:
+        al = AuditLog(
+            actor="worker",
+            action="similar_incident_ml",
+            target_type="incident",
+            target_id=incident_id,
+            details=json.dumps({"matches": matches}),
+            actor_ip=None,
+            user_agent=None,
+        )
+        session.add(al)
+        session.commit()
+    except Exception:
+        session.rollback()
+        logger.exception("Failed to log similar incident for %s", incident_id)
 
 
 def _incident_signature(session: Session, incident_id: int) -> str:
@@ -818,6 +853,7 @@ def scan_checks_once(session: Session):
                     reason = "missed heartbeat"
                     signature = _normalize_reason(reason)
                     # find or create open incident for this check
+                    created_incident = False
                     open_inc = session.exec(select(Incident).where(Incident.check_id == check.id, Incident.resolved_at == None)).first()
                     if not open_inc:
                         group_root = _find_group_root(session, check.project_id, signature, now)
@@ -825,6 +861,9 @@ def scan_checks_once(session: Session):
                         session.add(open_inc)
                         session.commit()
                         session.refresh(open_inc)
+                        created_incident = True
+                    if created_incident:
+                        _log_similar_incidents(session, project, open_inc.id, reason)
                     event_message = reason
                     if maintenance:
                         event_message = f"{reason} (suppressed due to maintenance)"
@@ -1054,6 +1093,7 @@ def scan_checks_once(session: Session):
                 if check.status != CheckStatus.DOWN:
                     check.status = CheckStatus.DOWN
                     open_inc = session.exec(select(Incident).where(Incident.check_id == check.id, Incident.resolved_at == None)).first()
+                    created_incident = False
                     if not open_inc:
                         signature = _normalize_reason(reason)
                         group_root = _find_group_root(session, check.project_id, signature, now)
@@ -1061,6 +1101,9 @@ def scan_checks_once(session: Session):
                         session.add(open_inc)
                         session.commit()
                         session.refresh(open_inc)
+                        created_incident = True
+                    if created_incident:
+                        _log_similar_incidents(session, project, open_inc.id, reason)
                     event_type = EventType.HTTP_FAILURE if check.type == CheckType.HTTP else EventType.DOWN
                     event_message = f"{reason}"
                     if maintenance:

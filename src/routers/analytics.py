@@ -8,6 +8,7 @@ from sqlmodel import Session, select
 
 from ..db import get_session
 from ..models import Event, Check, Project, Incident
+from ..analytics_ml import find_similar_incidents
 from ..deps import require_project_api_key
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["analytics"])
@@ -184,6 +185,40 @@ def similar_incidents(project_id: int = Path(..., ge=1), days: int = Query(90, g
 
     rows.sort(key=lambda r: r["count"], reverse=True)
     return {"project_id": project_id, "start": start_dt.isoformat(), "end": end_dt.isoformat(), "groups": rows}
+
+
+@router.get("/analytics/incident-similarity")
+def incident_similarity(
+    project_id: int = Path(..., ge=1),
+    incident_id: int = Query(..., ge=1),
+    days: int = Query(90, ge=1, le=365),
+    limit: int = Query(5, ge=1, le=50),
+    threshold: float = Query(0.35, ge=0.0, le=1.0),
+    session: Session = Depends(get_session),
+    _proj: Project = Depends(require_project_api_key),
+):
+    """Return ML-style similarity scores for incidents based on TF-IDF token overlap."""
+    inc = session.get(Incident, incident_id)
+    if not inc or inc.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    ev = session.exec(select(Event).where(Event.incident_id == incident_id).order_by(Event.created_at)).first()
+    text = getattr(ev, "message", None) if ev else None
+    matches = find_similar_incidents(
+        session=session,
+        project_id=project_id,
+        target_text=text,
+        days=days,
+        limit=limit,
+        threshold=threshold,
+        target_incident_id=incident_id,
+    )
+    return {
+        "project_id": project_id,
+        "incident_id": incident_id,
+        "days": days,
+        "threshold": threshold,
+        "matches": matches,
+    }
 
 
 @router.get("/analytics/early-warning")
