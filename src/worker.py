@@ -383,7 +383,9 @@ def _allow_region_or_failover(session: Session, worker_region: Optional[str], ch
     grace = int(os.environ.get("WORKER_FAILOVER_AFTER_SECONDS", "300"))
     lease = session.get(CheckLease, check.id)
     if lease is None or lease.lease_expires_at is None:
-        return True
+        # Do not allow non-matching regions to claim a check before its
+        # owning region has acquired at least one lease.
+        return False
     return lease.lease_expires_at <= (now - timedelta(seconds=grace))
 
 

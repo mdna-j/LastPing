@@ -44,6 +44,87 @@ services:
       retries: 3
       start_period: 10s
 
+  worker_us:
+    build: .
+    container_name: lastping_worker_us
+    profiles: ["multi-region"]
+    entrypoint: ["/app/docker-entrypoint.sh"]
+    command: ["python", "-u", "-m", "src.worker"]
+    environment:
+      RUN_MIGRATIONS: "0"
+      WORKER_REGION: "us-east"
+      WORKER_ID: "us-east-1"
+      WORKER_REGION_FAILOVER: "1"
+    env_file:
+      - .env
+    depends_on:
+      redis:
+        condition: service_started
+      db:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,time; f='/tmp/lastping_worker.health';\
+        import sys; sys.exit(0 if os.path.exists(f) and time.time()-os.path.getmtime(f) < 120 else 1)"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  worker_eu:
+    build: .
+    container_name: lastping_worker_eu
+    profiles: ["multi-region"]
+    entrypoint: ["/app/docker-entrypoint.sh"]
+    command: ["python", "-u", "-m", "src.worker"]
+    environment:
+      RUN_MIGRATIONS: "0"
+      WORKER_REGION: "eu-west"
+      WORKER_ID: "eu-west-1"
+      WORKER_REGION_FAILOVER: "1"
+    env_file:
+      - .env
+    depends_on:
+      redis:
+        condition: service_started
+      db:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,time; f='/tmp/lastping_worker.health';\
+        import sys; sys.exit(0 if os.path.exists(f) and time.time()-os.path.getmtime(f) < 120 else 1)"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  worker_ap:
+    build: .
+    container_name: lastping_worker_ap
+    profiles: ["multi-region"]
+    entrypoint: ["/app/docker-entrypoint.sh"]
+    command: ["python", "-u", "-m", "src.worker"]
+    environment:
+      RUN_MIGRATIONS: "0"
+      WORKER_REGION: "ap-south"
+      WORKER_ID: "ap-south-1"
+      WORKER_REGION_FAILOVER: "1"
+    env_file:
+      - .env
+    depends_on:
+      redis:
+        condition: service_started
+      db:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,time; f='/tmp/lastping_worker.health';\
+        import sys; sys.exit(0 if os.path.exists(f) and time.time()-os.path.getmtime(f) < 120 else 1)"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
   db:
     image: postgres:15
     container_name: lastping_db
