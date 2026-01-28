@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List
 import re
+import math
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Path
 from sqlmodel import Session, select
@@ -24,6 +25,18 @@ def _normalize_signature(msg: Optional[str]) -> str:
             low = low.split(sep, 1)[0].strip()
     low = re.sub(r"\\s+", " ", low)
     return low[:160] if low else "unknown"
+
+
+def _bucket_hour(dt: datetime) -> datetime:
+    return dt.replace(minute=0, second=0, microsecond=0)
+
+
+def _event_weight(event_type: str) -> float:
+    if event_type in ("down", "http_failure"):
+        return 1.0
+    if event_type == "degraded":
+        return 0.5
+    return 0.0
 
 
 @router.get("/analytics/failures")
@@ -171,3 +184,115 @@ def similar_incidents(project_id: int = Path(..., ge=1), days: int = Query(90, g
 
     rows.sort(key=lambda r: r["count"], reverse=True)
     return {"project_id": project_id, "start": start_dt.isoformat(), "end": end_dt.isoformat(), "groups": rows}
+
+
+@router.get("/analytics/early-warning")
+def early_warning(
+    project_id: int = Path(..., ge=1),
+    recent_hours: int = Query(3, ge=1, le=72),
+    baseline_days: int = Query(14, ge=2, le=180),
+    min_events: int = Query(3, ge=1, le=200),
+    z_threshold: float = Query(2.5, ge=0.5, le=10.0),
+    ratio_threshold: float = Query(2.0, ge=1.1, le=20.0),
+    session: Session = Depends(get_session),
+    _proj: Project = Depends(require_project_api_key),
+):
+    """Early-warning heuristics for failure spikes and anomalous patterns."""
+    now = datetime.utcnow()
+    recent_start = now - timedelta(hours=recent_hours)
+    baseline_start = now - timedelta(days=baseline_days)
+    if baseline_start >= recent_start:
+        raise HTTPException(status_code=400, detail="baseline_days must exceed recent window")
+
+    stmt = select(Event).where(
+        Event.project_id == project_id,
+        Event.created_at >= baseline_start,
+        Event.created_at <= now,
+    )
+    events = session.exec(stmt).all()
+    checks = session.exec(select(Check).where(Check.project_id == project_id)).all()
+    check_map = {c.id: c for c in checks}
+
+    baseline_counts: Dict[int, Dict[datetime, float]] = {}
+    baseline_total: Dict[int, float] = {}
+    recent_total: Dict[int, float] = {}
+    recent_sig: Dict[int, Dict[str, int]] = {}
+
+    for ev in events:
+        if ev.event_type not in ("down", "http_failure", "degraded"):
+            continue
+        weight = _event_weight(ev.event_type)
+        if weight <= 0:
+            continue
+        if ev.created_at >= recent_start:
+            recent_total[ev.check_id] = recent_total.get(ev.check_id, 0.0) + weight
+            sig = _normalize_signature(getattr(ev, "message", None))
+            recent_sig.setdefault(ev.check_id, {})[sig] = recent_sig.get(ev.check_id, {}).get(sig, 0) + 1
+        else:
+            bucket = _bucket_hour(ev.created_at)
+            baseline_counts.setdefault(ev.check_id, {})[bucket] = baseline_counts.get(ev.check_id, {}).get(bucket, 0.0) + weight
+            baseline_total[ev.check_id] = baseline_total.get(ev.check_id, 0.0) + weight
+
+    baseline_hours = int((recent_start - baseline_start).total_seconds() / 3600) or 1
+    warnings: List[dict] = []
+    for check_id, recent_cnt in recent_total.items():
+        if recent_cnt < min_events:
+            continue
+        base_total = baseline_total.get(check_id, 0.0)
+        base_mean = base_total / baseline_hours
+        counts = baseline_counts.get(check_id, {})
+        missing = max(0, baseline_hours - len(counts))
+        sum_sq = 0.0
+        for val in counts.values():
+            sum_sq += (val - base_mean) ** 2
+        if missing:
+            sum_sq += missing * ((0.0 - base_mean) ** 2)
+        std = math.sqrt(sum_sq / baseline_hours) if baseline_hours > 0 else 0.0
+
+        recent_rate = recent_cnt / float(recent_hours)
+        ratio = (recent_rate / base_mean) if base_mean > 0 else None
+        zscore = ((recent_rate - base_mean) / std) if std > 0 else None
+        signal = "rate_spike"
+        if base_mean == 0 and recent_cnt >= min_events:
+            signal = "new_spike"
+        severity = "low"
+        if (zscore is not None and zscore >= 3.0) or (ratio is not None and ratio >= 3.0) or signal == "new_spike":
+            severity = "high"
+        elif (zscore is not None and zscore >= z_threshold) or (ratio is not None and ratio >= ratio_threshold):
+            severity = "medium"
+        else:
+            continue
+
+        sigs = recent_sig.get(check_id, {})
+        top_sig = None
+        if sigs:
+            top_sig = sorted(sigs.items(), key=lambda kv: kv[1], reverse=True)[0][0]
+
+        chk = check_map.get(check_id)
+        warnings.append({
+            "check_id": check_id,
+            "check_name": getattr(chk, "name", None),
+            "status": getattr(chk, "status", None),
+            "consecutive_failures": getattr(chk, "consecutive_failures", None),
+            "signal": signal,
+            "severity": severity,
+            "recent_count": recent_cnt,
+            "recent_rate_per_hour": round(recent_rate, 4),
+            "baseline_mean_per_hour": round(base_mean, 4),
+            "baseline_std_per_hour": round(std, 4),
+            "ratio": round(ratio, 4) if ratio is not None else None,
+            "zscore": round(zscore, 4) if zscore is not None else None,
+            "top_signature": top_sig,
+        })
+
+    warnings.sort(key=lambda r: (r["severity"] == "high", r["recent_count"]), reverse=True)
+    return {
+        "project_id": project_id,
+        "baseline_start": baseline_start.isoformat(),
+        "recent_start": recent_start.isoformat(),
+        "recent_hours": recent_hours,
+        "baseline_days": baseline_days,
+        "z_threshold": z_threshold,
+        "ratio_threshold": ratio_threshold,
+        "warnings": warnings,
+    }

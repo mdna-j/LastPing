@@ -534,10 +534,25 @@ def remediation_page(project_id: int = Path(..., ge=1)):
       <input id="hookCooldown" placeholder="Cooldown (s)" style="width:140px" />
       <input id="hookSecret" placeholder="Secret" style="width:160px" />
       <label><input type="checkbox" id="hookEnabled" checked /> Enabled</label>
+      <label><input type="checkbox" id="hookRequireApproval" /> Require approval</label>
       <button id="addHookBtn" class="btn">Add Hook</button>
     </div>
     <h2>Hooks</h2>
     <div id="hooks"></div>
+    <h2>Approvals</h2>
+    <div class="row">
+      <select id="approvalStatus">
+        <option value="">(all)</option>
+        <option value="pending">pending</option>
+        <option value="approved">approved</option>
+        <option value="denied">denied</option>
+        <option value="executed">executed</option>
+        <option value="failed">failed</option>
+        <option value="expired">expired</option>
+      </select>
+      <button id="refreshApprovalsBtn" class="btn btn-secondary">Refresh Approvals</button>
+    </div>
+    <div id="approvals"></div>
     <h2>Logs</h2>
     <div id="logs"></div>
     <script src="/static/js/remediation.js"></script>

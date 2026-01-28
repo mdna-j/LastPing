@@ -314,6 +314,7 @@ class RemediationHook(SQLModel, table=True):
     last_triggered_at: Optional[datetime] = None
     secret: Optional[str] = None
     require_secret: bool = Field(default=False, description="require a secret to be set before triggering")
+    require_approval: bool = Field(default=False, description="require manual approval before triggering")
     max_triggers_per_day: Optional[int] = Field(default=50, description="max remediation triggers per 24h")
     failure_count: int = Field(default=0, description="consecutive failure count")
     disable_on_failure_count: Optional[int] = Field(default=5, description="disable hook after this many failures")
@@ -334,6 +335,24 @@ class RemediationLog(SQLModel, table=True):
     response_code: Optional[int] = None
     message: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class RemediationApproval(SQLModel, table=True):
+    __tablename__ = "remediation_approval"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    hook_id: int = Field(foreign_key="remediation_hook.id")
+    project_id: int = Field(foreign_key="project.id")
+    check_id: int = Field(foreign_key="check.id")
+    event_type: str
+    reason: Optional[str] = None
+    status: str = Field(default="pending", description="pending/approved/denied/expired/executed/failed")
+    requested_at: datetime = Field(default_factory=datetime.utcnow)
+    decided_at: Optional[datetime] = None
+    decided_by: Optional[str] = None
+    expires_at: Optional[datetime] = None
+    executed_at: Optional[datetime] = None
+    execution_status: Optional[str] = None
+    execution_message: Optional[str] = None
 
 
 class EscalationTarget(str, Enum):

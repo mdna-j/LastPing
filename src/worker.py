@@ -3,6 +3,7 @@ import time
 import logging
 import json
 import re
+import math
 """
 Background worker: scans checks and executes monitoring logic.
 
@@ -23,12 +24,13 @@ from sqlmodel import Session, select
 from .db import engine
 from .models import Check, CheckType, CheckStatus, Event, EventType, Project, Incident
 from .alerts import notify_down, notify_recovery, notify_degraded, send_email, send_sms
-from .models import UptimeSnapshot, CheckLease, RemediationHook, RemediationLog, OnCallAlert, OnCallEscalation, OnCallRotation, OnCallMember, AuditLog
+from .models import UptimeSnapshot, CheckLease, RemediationHook, RemediationLog, RemediationApproval, OnCallAlert, OnCallEscalation, OnCallRotation, OnCallMember, AuditLog
 
 logger = logging.getLogger("lastping.worker")
 
 # Window (seconds) in which separate failures may be grouped into a single incident
 GROUP_WINDOW = int(os.environ.get("INCIDENT_GROUP_WINDOW", "600"))
+_LAST_EARLY_WARNING_RUN: Optional[datetime] = None
 
 
 def _now() -> datetime:
@@ -189,6 +191,142 @@ def _normalize_reason(reason: Optional[str]) -> str:
     return text[:160] if text else "unknown"
 
 
+def _bucket_hour(dt: datetime) -> datetime:
+    return dt.replace(minute=0, second=0, microsecond=0)
+
+
+def _event_weight(event_type: str) -> float:
+    if event_type in (EventType.DOWN, EventType.HTTP_FAILURE):
+        return 1.0
+    if event_type == EventType.DEGRADED:
+        return 0.5
+    return 0.0
+
+
+def _compute_early_warnings(session: Session, project_id: int, now: datetime, recent_hours: int, baseline_days: int, min_events: int, z_threshold: float, ratio_threshold: float):
+    recent_start = now - timedelta(hours=recent_hours)
+    baseline_start = now - timedelta(days=baseline_days)
+    if baseline_start >= recent_start:
+        return []
+    stmt = select(Event).where(
+        Event.project_id == project_id,
+        Event.created_at >= baseline_start,
+        Event.created_at <= now,
+    )
+    events = session.exec(stmt).all()
+    baseline_counts = {}
+    baseline_total = {}
+    recent_total = {}
+    recent_sig = {}
+    for ev in events:
+        if ev.event_type not in (EventType.DOWN, EventType.HTTP_FAILURE, EventType.DEGRADED):
+            continue
+        weight = _event_weight(ev.event_type)
+        if weight <= 0:
+            continue
+        if ev.created_at >= recent_start:
+            recent_total[ev.check_id] = recent_total.get(ev.check_id, 0.0) + weight
+            sig = _normalize_reason(getattr(ev, "message", None))
+            recent_sig.setdefault(ev.check_id, {})[sig] = recent_sig.get(ev.check_id, {}).get(sig, 0) + 1
+        else:
+            bucket = _bucket_hour(ev.created_at)
+            baseline_counts.setdefault(ev.check_id, {})[bucket] = baseline_counts.get(ev.check_id, {}).get(bucket, 0.0) + weight
+            baseline_total[ev.check_id] = baseline_total.get(ev.check_id, 0.0) + weight
+
+    baseline_hours = int((recent_start - baseline_start).total_seconds() / 3600) or 1
+    warnings = []
+    for check_id, recent_cnt in recent_total.items():
+        if recent_cnt < min_events:
+            continue
+        base_total = baseline_total.get(check_id, 0.0)
+        base_mean = base_total / baseline_hours
+        counts = baseline_counts.get(check_id, {})
+        missing = max(0, baseline_hours - len(counts))
+        sum_sq = 0.0
+        for val in counts.values():
+            sum_sq += (val - base_mean) ** 2
+        if missing:
+            sum_sq += missing * ((0.0 - base_mean) ** 2)
+        std = math.sqrt(sum_sq / baseline_hours) if baseline_hours > 0 else 0.0
+        recent_rate = recent_cnt / float(recent_hours)
+        ratio = (recent_rate / base_mean) if base_mean > 0 else None
+        zscore = ((recent_rate - base_mean) / std) if std > 0 else None
+        signal = "rate_spike"
+        if base_mean == 0 and recent_cnt >= min_events:
+            signal = "new_spike"
+        severity = "low"
+        if (zscore is not None and zscore >= 3.0) or (ratio is not None and ratio >= 3.0) or signal == "new_spike":
+            severity = "high"
+        elif (zscore is not None and zscore >= z_threshold) or (ratio is not None and ratio >= ratio_threshold):
+            severity = "medium"
+        else:
+            continue
+        sigs = recent_sig.get(check_id, {})
+        top_sig = None
+        if sigs:
+            top_sig = sorted(sigs.items(), key=lambda kv: kv[1], reverse=True)[0][0]
+        warnings.append({
+            "check_id": check_id,
+            "severity": severity,
+            "signal": signal,
+            "recent_count": recent_cnt,
+            "recent_rate_per_hour": round(recent_rate, 4),
+            "baseline_mean_per_hour": round(base_mean, 4),
+            "baseline_std_per_hour": round(std, 4),
+            "ratio": round(ratio, 4) if ratio is not None else None,
+            "zscore": round(zscore, 4) if zscore is not None else None,
+            "top_signature": top_sig,
+        })
+    return warnings
+
+
+def _maybe_log_early_warnings(session: Session, now: datetime, project_ids):
+    global _LAST_EARLY_WARNING_RUN
+    if os.environ.get("EARLY_WARNING_ENABLED", "1") == "0":
+        return
+    interval = int(os.environ.get("EARLY_WARNING_INTERVAL_SECONDS", "600"))
+    if _LAST_EARLY_WARNING_RUN and (now - _LAST_EARLY_WARNING_RUN).total_seconds() < interval:
+        return
+    _LAST_EARLY_WARNING_RUN = now
+    recent_hours = int(os.environ.get("EARLY_WARNING_RECENT_HOURS", "3"))
+    baseline_days = int(os.environ.get("EARLY_WARNING_BASELINE_DAYS", "14"))
+    min_events = int(os.environ.get("EARLY_WARNING_MIN_EVENTS", "3"))
+    z_threshold = float(os.environ.get("EARLY_WARNING_Z_THRESHOLD", "2.5"))
+    ratio_threshold = float(os.environ.get("EARLY_WARNING_RATIO_THRESHOLD", "2.0"))
+    log_window = int(os.environ.get("EARLY_WARNING_LOG_WINDOW_SECONDS", "3600"))
+
+    for pid in project_ids:
+        warnings = _compute_early_warnings(session, pid, now, recent_hours, baseline_days, min_events, z_threshold, ratio_threshold)
+        for warn in warnings:
+            check_id = warn.get("check_id")
+            cutoff = now - timedelta(seconds=log_window)
+            existing = session.exec(
+                select(AuditLog).where(
+                    AuditLog.action == "early_warning",
+                    AuditLog.target_type == "check",
+                    AuditLog.target_id == check_id,
+                    AuditLog.created_at >= cutoff,
+                )
+            ).first()
+            if existing:
+                continue
+            try:
+                al = AuditLog(
+                    actor="worker",
+                    action="early_warning",
+                    target_type="check",
+                    target_id=check_id,
+                    details=json.dumps(warn),
+                    actor_ip=None,
+                    user_agent=None,
+                )
+                session.add(al)
+                session.commit()
+            except Exception:
+                session.rollback()
+                logger.exception("Failed to log early warning for check %s", check_id)
+
+
 def _incident_signature(session: Session, incident_id: int) -> str:
     ev = session.exec(select(Event).where(Event.incident_id == incident_id).order_by(Event.created_at)).first()
     return _normalize_reason(getattr(ev, "message", None) if ev else None)
@@ -275,6 +413,190 @@ def _acquire_lease(session: Session, check: Check, now: datetime) -> bool:
         return False
 
 
+def _remediation_skip_reason(session: Session, hook: RemediationHook, project: Project, check: Check, now: datetime) -> Optional[str]:
+    if hook.disabled_at is not None or not getattr(hook, "enabled", True):
+        return "disabled"
+    if hook.check_id and hook.check_id != check.id:
+        return "check_mismatch"
+    if getattr(hook, "require_secret", False) and not hook.secret:
+        try:
+            al = AuditLog(actor="worker", action="skip_remediation", target_type="remediation_hook", target_id=hook.id, details="missing_secret", actor_ip=None, user_agent=None)
+            session.add(al)
+            session.commit()
+        except Exception:
+            pass
+        return "missing_secret"
+    if not getattr(hook, "allow_during_maintenance", False) and _in_maintenance(check, project, now):
+        try:
+            al = AuditLog(actor="worker", action="skip_remediation", target_type="remediation_hook", target_id=hook.id, details="maintenance_window", actor_ip=None, user_agent=None)
+            session.add(al)
+            session.commit()
+        except Exception:
+            pass
+        return "maintenance_window"
+    if hook.last_triggered_at and (now - hook.last_triggered_at).total_seconds() < (hook.cooldown_seconds or 0):
+        return "cooldown"
+    max_per_day = getattr(hook, "max_triggers_per_day", None)
+    if max_per_day:
+        day_start = now - timedelta(days=1)
+        recent = session.exec(select(RemediationLog).where(RemediationLog.hook_id == hook.id, RemediationLog.created_at >= day_start)).all()
+        if len(recent) >= max_per_day:
+            try:
+                al = AuditLog(actor="worker", action="skip_remediation", target_type="remediation_hook", target_id=hook.id, details="max_per_day", actor_ip=None, user_agent=None)
+                session.add(al)
+                session.commit()
+            except Exception:
+                pass
+            return "max_per_day"
+    return None
+
+
+def _queue_remediation_approval(session: Session, hook: RemediationHook, project: Project, check: Check, event_type: str, reason: Optional[str], now: datetime) -> bool:
+    existing = session.exec(
+        select(RemediationApproval).where(
+            RemediationApproval.hook_id == hook.id,
+            RemediationApproval.check_id == check.id,
+            RemediationApproval.event_type == event_type,
+            RemediationApproval.status == "pending",
+        )
+    ).first()
+    if existing:
+        return False
+    ttl_min = int(os.environ.get("REMEDIATION_APPROVAL_TTL_MINUTES", "60"))
+    expires_at = now + timedelta(minutes=ttl_min) if ttl_min > 0 else None
+    approval = RemediationApproval(
+        hook_id=hook.id,
+        project_id=project.id,
+        check_id=check.id,
+        event_type=event_type,
+        reason=reason,
+        status="pending",
+        requested_at=now,
+        expires_at=expires_at,
+    )
+    session.add(approval)
+    session.commit()
+    session.refresh(approval)
+    try:
+        al = AuditLog(actor="worker", action="request_remediation_approval", target_type="remediation_approval", target_id=approval.id, details=f"hook_id={hook.id},check_id={check.id}", actor_ip=None, user_agent=None)
+        session.add(al)
+        session.commit()
+    except Exception:
+        pass
+    return True
+
+
+def _execute_remediation_hook(session: Session, project: Project, check: Check, hook: RemediationHook, event_type: str, reason: Optional[str], now: datetime, approval_id: Optional[int] = None) -> Tuple[str, Optional[int], Optional[str]]:
+    payload = {
+        "project_id": project.id,
+        "project": project.name,
+        "check_id": check.id,
+        "check": check.name,
+        "event": event_type,
+        "reason": reason,
+        "timestamp": now.isoformat(),
+    }
+    status = "error"
+    code = None
+    msg = None
+    try:
+        method = (hook.method or "POST").upper()
+        data = json.dumps(payload).encode("utf-8") if method in ("POST", "PUT", "PATCH") else None
+        req = urllib.request.Request(hook.url, data=data, method=method)
+        req.add_header("Content-Type", "application/json")
+        if hook.secret:
+            req.add_header("X-REMEDIATION-SECRET", hook.secret)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            code = resp.getcode()
+        status = "ok" if code and 200 <= code < 300 else "error"
+    except Exception as exc:
+        msg = str(exc)
+    hook.last_triggered_at = now
+    if status != "ok":
+        hook.failure_count = (hook.failure_count or 0) + 1
+        threshold = getattr(hook, "disable_on_failure_count", None)
+        if threshold and hook.failure_count >= threshold:
+            hook.enabled = False
+            hook.disabled_at = now
+            hook.disabled_reason = f"failure_count>={threshold}"
+            try:
+                al = AuditLog(actor="worker", action="disable_remediation", target_type="remediation_hook", target_id=hook.id, details=hook.disabled_reason, actor_ip=None, user_agent=None)
+                session.add(al)
+            except Exception:
+                pass
+    else:
+        hook.failure_count = 0
+    session.add(hook)
+    log = RemediationLog(
+        hook_id=hook.id,
+        project_id=project.id,
+        check_id=check.id,
+        event_type=event_type,
+        status=status,
+        response_code=code,
+        message=msg,
+    )
+    session.add(log)
+    try:
+        detail = f"check_id={check.id}"
+        if approval_id:
+            detail = f"{detail},approval_id={approval_id}"
+        al = AuditLog(actor="worker", action="trigger_remediation", target_type="remediation_hook", target_id=hook.id, details=detail, actor_ip=None, user_agent=None)
+        session.add(al)
+    except Exception:
+        pass
+    session.commit()
+    return status, code, msg
+
+
+def _process_remediation_approvals(session: Session, now: datetime):
+    # expire pending approvals
+    pending = session.exec(select(RemediationApproval).where(RemediationApproval.status == "pending", RemediationApproval.expires_at != None)).all()
+    for ap in pending:
+        if ap.expires_at and ap.expires_at <= now:
+            ap.status = "expired"
+            ap.decided_at = now
+            ap.execution_message = "expired"
+            session.add(ap)
+    if pending:
+        session.commit()
+
+    approvals = session.exec(select(RemediationApproval).where(RemediationApproval.status == "approved", RemediationApproval.executed_at == None)).all()
+    for ap in approvals:
+        hook = session.get(RemediationHook, ap.hook_id)
+        project = session.get(Project, ap.project_id)
+        check = session.get(Check, ap.check_id)
+        if not hook or not project or not check:
+            ap.status = "failed"
+            ap.execution_status = "missing_reference"
+            ap.execution_message = "missing hook/project/check"
+            ap.executed_at = now
+            session.add(ap)
+            session.commit()
+            continue
+        skip_reason = _remediation_skip_reason(session, hook, project, check, now)
+        if skip_reason in ("cooldown", "maintenance_window", "max_per_day"):
+            ap.execution_message = skip_reason
+            session.add(ap)
+            session.commit()
+            continue
+        if skip_reason:
+            ap.status = "failed"
+            ap.execution_status = skip_reason
+            ap.execution_message = skip_reason
+            ap.executed_at = now
+            session.add(ap)
+            session.commit()
+            continue
+        status, code, msg = _execute_remediation_hook(session, project, check, hook, ap.event_type, ap.reason, now, approval_id=ap.id)
+        ap.executed_at = now
+        ap.execution_status = status
+        ap.execution_message = msg
+        ap.status = "executed" if status == "ok" else "failed"
+        session.add(ap)
+        session.commit()
+
+
 def _trigger_remediation(session: Session, project: Project, check: Check, event_type: str, reason: Optional[str], now: datetime):
     try:
         hooks = session.exec(
@@ -285,98 +607,13 @@ def _trigger_remediation(session: Session, project: Project, check: Check, event
             )
         ).all()
         for hook in hooks:
-            if hook.disabled_at is not None:
+            skip_reason = _remediation_skip_reason(session, hook, project, check, now)
+            if skip_reason:
                 continue
-            if hook.check_id and hook.check_id != check.id:
+            if getattr(hook, "require_approval", False):
+                _queue_remediation_approval(session, hook, project, check, event_type, reason, now)
                 continue
-            if getattr(hook, "require_secret", False) and not hook.secret:
-                try:
-                    al = AuditLog(actor="worker", action="skip_remediation", target_type="remediation_hook", target_id=hook.id, details="missing_secret", actor_ip=None, user_agent=None)
-                    session.add(al)
-                    session.commit()
-                except Exception:
-                    pass
-                continue
-            # safety: enforce maintenance suppression unless explicitly allowed
-            if not getattr(hook, "allow_during_maintenance", False):
-                if _in_maintenance(check, project, now):
-                    try:
-                        al = AuditLog(actor="worker", action="skip_remediation", target_type="remediation_hook", target_id=hook.id, details="maintenance_window", actor_ip=None, user_agent=None)
-                        session.add(al)
-                        session.commit()
-                    except Exception:
-                        pass
-                    continue
-            if hook.last_triggered_at and (now - hook.last_triggered_at).total_seconds() < (hook.cooldown_seconds or 0):
-                continue
-            max_per_day = getattr(hook, "max_triggers_per_day", None)
-            if max_per_day:
-                day_start = now - timedelta(days=1)
-                recent = session.exec(select(RemediationLog).where(RemediationLog.hook_id == hook.id, RemediationLog.created_at >= day_start)).all()
-                if len(recent) >= max_per_day:
-                    try:
-                        al = AuditLog(actor="worker", action="skip_remediation", target_type="remediation_hook", target_id=hook.id, details="max_per_day", actor_ip=None, user_agent=None)
-                        session.add(al)
-                        session.commit()
-                    except Exception:
-                        pass
-                    continue
-            payload = {
-                "project_id": project.id,
-                "project": project.name,
-                "check_id": check.id,
-                "check": check.name,
-                "event": event_type,
-                "reason": reason,
-                "timestamp": now.isoformat(),
-            }
-            status = "error"
-            code = None
-            msg = None
-            try:
-                method = (hook.method or "POST").upper()
-                data = json.dumps(payload).encode("utf-8") if method in ("POST", "PUT", "PATCH") else None
-                req = urllib.request.Request(hook.url, data=data, method=method)
-                req.add_header("Content-Type", "application/json")
-                if hook.secret:
-                    req.add_header("X-REMEDIATION-SECRET", hook.secret)
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    code = resp.getcode()
-                status = "ok" if code and 200 <= code < 300 else "error"
-            except Exception as exc:
-                msg = str(exc)
-            hook.last_triggered_at = now
-            if status != "ok":
-                hook.failure_count = (hook.failure_count or 0) + 1
-                threshold = getattr(hook, "disable_on_failure_count", None)
-                if threshold and hook.failure_count >= threshold:
-                    hook.enabled = False
-                    hook.disabled_at = now
-                    hook.disabled_reason = f"failure_count>={threshold}"
-                    try:
-                        al = AuditLog(actor="worker", action="disable_remediation", target_type="remediation_hook", target_id=hook.id, details=hook.disabled_reason, actor_ip=None, user_agent=None)
-                        session.add(al)
-                    except Exception:
-                        pass
-            else:
-                hook.failure_count = 0
-            session.add(hook)
-            log = RemediationLog(
-                hook_id=hook.id,
-                project_id=project.id,
-                check_id=check.id,
-                event_type=event_type,
-                status=status,
-                response_code=code,
-                message=msg,
-            )
-            session.add(log)
-            try:
-                al = AuditLog(actor="worker", action="trigger_remediation", target_type="remediation_hook", target_id=hook.id, details=f"check_id={check.id}", actor_ip=None, user_agent=None)
-                session.add(al)
-            except Exception:
-                pass
-            session.commit()
+            _execute_remediation_hook(session, project, check, hook, event_type, reason, now)
     except Exception:
         logger.exception("Error triggering remediation hooks for check %s", getattr(check, "id", None))
 
@@ -546,8 +783,11 @@ def scan_checks_once(session: Session):
     results = session.exec(stmt).all()
     now = _now()
     processed_oncall = False
+    processed_remediation = False
+    project_ids = set()
     worker_region = os.environ.get("WORKER_REGION")
     for check in results:
+        project_ids.add(check.project_id)
         if not _allow_region_or_failover(session, worker_region, check, now):
             continue
         project = session.get(Project, check.project_id)
@@ -902,6 +1142,27 @@ def scan_checks_once(session: Session):
                 _process_oncall_alerts(session, now)
             except Exception:
                 logger.exception("Error processing on-call alerts")
+        if not processed_remediation:
+            processed_remediation = True
+            try:
+                _process_remediation_approvals(session, now)
+            except Exception:
+                logger.exception("Error processing remediation approvals")
+
+    if not processed_oncall:
+        try:
+            _process_oncall_alerts(session, now)
+        except Exception:
+            logger.exception("Error processing on-call alerts")
+    if not processed_remediation:
+        try:
+            _process_remediation_approvals(session, now)
+        except Exception:
+            logger.exception("Error processing remediation approvals")
+    try:
+        _maybe_log_early_warnings(session, now, project_ids)
+    except Exception:
+        logger.exception("Error computing early warnings")
 
         # After processing checks, compute a short-term uptime/MTTR snapshot (last 24h)
         try:
