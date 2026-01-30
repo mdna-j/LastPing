@@ -12,11 +12,16 @@ on:
 
 jobs:
   archive:
-    if: ${{ secrets.ROLLUP_DATABASE_URL != '' }}
     runs-on: ubuntu-latest
     env:
       DATABASE_URL: ${{ secrets.ROLLUP_DATABASE_URL }}
     steps:
+      - name: Skip if missing DB secret
+        run: |
+          if [[ -z "${DATABASE_URL}" ]]; then
+            echo "ROLLUP_DATABASE_URL is not set; skipping."
+            exit 0
+          fi
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:

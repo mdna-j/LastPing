@@ -42,6 +42,7 @@ python -m src.worker
 - `WORKER_SCAN_INTERVAL` — seconds between worker loop iterations (default: `30`).
 - `WORKER_HEALTH_FILE` — path to write a health file for orchestration (default: `/tmp/lastping_worker.health`).
 - `DATABASE_URL` — SQLAlchemy/SQLModel database URL (set as appropriate for your environment).
+- `ROLLUP_DATABASE_URL` — database URL used by `.github/workflows/rollup_archive.yml` (set as a GitHub Actions secret).
 
 **Docker / Docker Compose**
 
