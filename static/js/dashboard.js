@@ -82,6 +82,7 @@ async function loadDashboard(){
   let snaps = [];
   let trends = null;
   let predictive = null;
+  let anomalies = null;
   try{
     const reqs = [
       fetch(q(`/projects/${pid}/metrics/uptime`), {headers}),
@@ -91,6 +92,7 @@ async function loadDashboard(){
     ];
     if(headers.Authorization){
       reqs.push(fetch(`/projects/${pid}/analytics/predictive?recent_hours=24`, {headers}));
+      reqs.push(fetch(`/projects/${pid}/analytics/anomalies?recent_hours=24`, {headers}));
     }
     const resps = await Promise.all(reqs);
     const uptimeRes = resps[0];
@@ -98,11 +100,13 @@ async function loadDashboard(){
     const snapsRes = resps[2];
     const trendRes = resps[3];
     const predRes = resps[4];
+    const anomRes = resps[5];
     if(uptimeRes && uptimeRes.ok){ uptime = await uptimeRes.json(); }
     if(mttrRes && mttrRes.ok){ mttr = await mttrRes.json(); }
     if(snapsRes && snapsRes.ok){ snaps = await snapsRes.json(); }
     if(trendRes && trendRes.ok){ trends = await trendRes.json(); }
     if(predRes && predRes.ok){ predictive = await predRes.json(); }
+    if(anomRes && anomRes.ok){ anomalies = await anomRes.json(); }
   }catch(e){ /* ignore */ }
 
   // incidents (requires API key)
@@ -143,6 +147,25 @@ async function loadDashboard(){
       }
     }else{
       predEl.innerText = 'Failed to load predictive alerts (check API key).';
+    }
+  }
+
+  const anomEl = document.getElementById('anomalyList');
+  if(anomEl){
+    if(!headers.Authorization){
+      anomEl.innerText = 'Provide API key to load anomaly warnings.';
+    }else if(anomalies && anomalies.warnings){
+      if(!anomalies.warnings.length){
+        anomEl.innerHTML = '<div class="muted">No anomaly warnings in the recent window.</div>';
+      }else{
+        anomEl.innerHTML = anomalies.warnings.map(w => {
+          const score = (w.anomaly_score !== null && w.anomaly_score !== undefined) ? Number(w.anomaly_score).toFixed(2) : 'n/a';
+          const next = (w.predicted_next_hour !== null && w.predicted_next_hour !== undefined) ? Number(w.predicted_next_hour).toFixed(2) : 'n/a';
+          return `<div class="card"><div><strong>Check ${w.check_id}</strong> anomaly score ${score}</div><div class="muted">predicted ${next} · slope ${w.trend_slope_per_hour}</div></div>`;
+        }).join('');
+      }
+    }else{
+      anomEl.innerText = 'Failed to load anomaly warnings (check API key).';
     }
   }
 

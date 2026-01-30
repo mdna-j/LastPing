@@ -362,6 +362,11 @@ def dashboard_page():
       <div id="predictiveList" class="muted">Provide API key to load predictive alerts.</div>
     </div>
 
+    <div class="card">
+      <h3>Anomaly Warnings</h3>
+      <div id="anomalyList" class="muted">Provide API key to load anomaly warnings.</div>
+    </div>
+
     <script src="/static/js/vendor/chart.min.js"></script>
     <script src="/static/js/dashboard.js"></script>
     </body>
@@ -525,6 +530,29 @@ def oncall_page(project_id: int = Path(..., ge=1)):
       <button id="escClearFilterBtn" class="btn btn-secondary">Clear</button>
     </div>
     <div id="escalations"></div>
+    <h2>Policy Builder</h2>
+    <div class="row">
+      <label>Check:
+        <select id="policyCheckSelect" style="width:220px">
+          <option value="">(project-wide)</option>
+        </select>
+      </label>
+      <button id="policyRefreshBtn" class="btn btn-secondary">Refresh Chain</button>
+    </div>
+    <div id="policyChain" class="muted">Select a check to view the escalation chain.</div>
+    <div class="row">
+      <select id="policyType">
+        <option value="rotation">rotation</option>
+        <option value="email">email</option>
+        <option value="sms">sms</option>
+      </select>
+      <input id="policyDelay" placeholder="Delay (min)" style="width:120px" />
+      <input id="policyRotationId" placeholder="Rotation ID" style="width:140px" />
+      <input id="policyTarget" placeholder="Target (email/phone)" style="width:220px" />
+      <label><input type="checkbox" id="policyEnabled" checked /> Enabled</label>
+      <button id="policyAddBtn" class="btn">Add Step</button>
+    </div>
+    <div class="muted">Levels auto-increment for the selected check. Delete and re-add to change order.</div>
     <h2>Open Alerts</h2>
     <div id="alerts"></div>
     <script src="/static/js/oncall.js"></script>

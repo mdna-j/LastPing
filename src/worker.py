@@ -382,6 +382,91 @@ def _maybe_archive_quarterly_rollups(session: Session, now: datetime, project_id
                 logger.exception("Failed to archive quarterly rollup for project %s check %s", pid, r["check_id"])
 
 
+def _maybe_log_rollup_archive_health(session: Session, now: datetime, project_ids):
+    if os.environ.get("ROLLUP_ARCHIVE_ALERTS_ENABLED", "1") != "1":
+        return
+    window_seconds = int(os.environ.get("ROLLUP_ARCHIVE_ALERT_WINDOW_SECONDS", "86400"))
+    monthly_grace_days = int(os.environ.get("ROLLUP_ARCHIVE_GRACE_DAYS", "3"))
+    quarterly_grace_days = int(os.environ.get("ROLLUP_QUARTERLY_GRACE_DAYS", "10"))
+    alert_to = os.environ.get("ROLLUP_ARCHIVE_ALERT_EMAIL") or os.environ.get("ALERT_ESCALATION_EMAIL") or os.environ.get("ALERT_EMAIL_TO")
+
+    month_start = _month_start(now)
+    prev_month_end = month_start
+    prev_month_start = _month_start(month_start - timedelta(days=1))
+    month_period = prev_month_start.strftime("%Y-%m")
+    month_due = now >= (month_start + timedelta(days=monthly_grace_days))
+
+    quarter_start = _quarter_start(now)
+    prev_quarter_end = quarter_start
+    prev_quarter_start = _quarter_start(quarter_start - timedelta(days=1))
+    qnum = (prev_quarter_start.month - 1) // 3 + 1
+    quarter_period = f"{prev_quarter_start.year}-Q{qnum}"
+    quarter_due = now >= (quarter_start + timedelta(days=quarterly_grace_days))
+
+    for pid in project_ids:
+        project = session.get(Project, pid)
+        if not project:
+            continue
+
+        if month_due:
+            exists = session.exec(
+                select(AvailabilityRollup).where(
+                    AvailabilityRollup.project_id == pid,
+                    AvailabilityRollup.check_id == None,
+                    AvailabilityRollup.period_type == "month",
+                    AvailabilityRollup.period == month_period,
+                )
+            ).first()
+            if not exists:
+                cutoff = now - timedelta(seconds=window_seconds)
+                recent = session.exec(
+                    select(AuditLog).where(
+                        AuditLog.action == "rollup_archive_missing",
+                        AuditLog.target_type == "project",
+                        AuditLog.target_id == pid,
+                        AuditLog.created_at >= cutoff,
+                    )
+                ).first()
+                if not recent:
+                    details = json.dumps({"period_type": "month", "period": month_period})
+                    al = AuditLog(actor="worker", action="rollup_archive_missing", target_type="project", target_id=pid, details=details, actor_ip=None, user_agent=None)
+                    session.add(al)
+                    session.commit()
+                    if alert_to:
+                        subj = f"[LastPing] Rollup archive missing: {project.name} ({month_period})"
+                        body = f"Monthly rollup for {project.name} is missing for period {month_period}."
+                        send_email(subj, body, to=alert_to)
+
+        if quarter_due:
+            exists = session.exec(
+                select(AvailabilityRollup).where(
+                    AvailabilityRollup.project_id == pid,
+                    AvailabilityRollup.check_id == None,
+                    AvailabilityRollup.period_type == "quarter",
+                    AvailabilityRollup.period == quarter_period,
+                )
+            ).first()
+            if not exists:
+                cutoff = now - timedelta(seconds=window_seconds)
+                recent = session.exec(
+                    select(AuditLog).where(
+                        AuditLog.action == "rollup_archive_missing",
+                        AuditLog.target_type == "project",
+                        AuditLog.target_id == pid,
+                        AuditLog.created_at >= cutoff,
+                    )
+                ).first()
+                if not recent:
+                    details = json.dumps({"period_type": "quarter", "period": quarter_period})
+                    al = AuditLog(actor="worker", action="rollup_archive_missing", target_type="project", target_id=pid, details=details, actor_ip=None, user_agent=None)
+                    session.add(al)
+                    session.commit()
+                    if alert_to:
+                        subj = f"[LastPing] Rollup archive missing: {project.name} ({quarter_period})"
+                        body = f"Quarterly rollup for {project.name} is missing for period {quarter_period}."
+                        send_email(subj, body, to=alert_to)
+
+
 def _compute_early_warnings(session: Session, project_id: int, now: datetime, recent_hours: int, baseline_days: int, min_events: int, z_threshold: float, ratio_threshold: float):
     recent_start = now - timedelta(hours=recent_hours)
     baseline_start = now - timedelta(days=baseline_days)
@@ -1541,6 +1626,10 @@ def scan_checks_once(session: Session):
         _maybe_archive_quarterly_rollups(session, now, project_ids)
     except Exception:
         logger.exception("Error archiving quarterly rollups")
+    try:
+        _maybe_log_rollup_archive_health(session, now, project_ids)
+    except Exception:
+        logger.exception("Error checking rollup archive health")
     try:
         _maybe_log_predictive_warnings(session, now, project_ids)
     except Exception:

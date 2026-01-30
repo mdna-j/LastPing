@@ -111,3 +111,84 @@ def find_similar_incidents(
             matches.append({**m, "score": round(score, 4)})
     matches.sort(key=lambda r: r["score"], reverse=True)
     return matches[:limit]
+
+
+def cluster_incidents(
+    session: Session,
+    project_id: int,
+    days: int = 90,
+    threshold: float = 0.35,
+    min_cluster_size: int = 2,
+    limit: int = 20,
+):
+    start_dt = datetime.utcnow() - timedelta(days=days)
+    incs = session.exec(
+        select(Incident).where(
+            Incident.project_id == project_id,
+            Incident.started_at >= start_dt,
+        )
+    ).all()
+
+    docs: List[List[str]] = []
+    meta: List[dict] = []
+    for inc in incs:
+        ev = session.exec(select(Event).where(Event.incident_id == inc.id).order_by(Event.created_at)).first()
+        msg = getattr(ev, "message", None) if ev else None
+        tokens = tokenize(msg)
+        if not tokens:
+            continue
+        docs.append(tokens)
+        meta.append({
+            "incident_id": inc.id,
+            "check_id": inc.check_id,
+            "started_at": inc.started_at,
+        })
+
+    if len(docs) < 2:
+        return []
+
+    vectors = _build_tfidf(docs)
+    n = len(vectors)
+
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra = find(a)
+        rb = find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            score = _cosine(vectors[i], vectors[j])
+            if score >= threshold:
+                union(i, j)
+
+    groups: Dict[int, List[int]] = {}
+    for i in range(n):
+        root = find(i)
+        groups.setdefault(root, []).append(i)
+
+    clusters = []
+    for idxs in groups.values():
+        if len(idxs) < min_cluster_size:
+            continue
+        inc_ids = [meta[i]["incident_id"] for i in idxs]
+        check_ids = sorted(list({meta[i]["check_id"] for i in idxs}))
+        started_at = [meta[i]["started_at"] for i in idxs]
+        clusters.append({
+            "incident_ids": inc_ids,
+            "check_ids": check_ids,
+            "count": len(idxs),
+            "first_seen": min(started_at).isoformat(),
+            "last_seen": max(started_at).isoformat(),
+        })
+
+    clusters.sort(key=lambda c: c["count"], reverse=True)
+    return clusters[:limit]

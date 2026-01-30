@@ -8,7 +8,7 @@ from sqlmodel import Session, select
 
 from ..db import get_session
 from ..models import Event, Check, Project, Incident
-from ..analytics_ml import find_similar_incidents
+from ..analytics_ml import find_similar_incidents, cluster_incidents
 from ..deps import require_project_api_key
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["analytics"])
@@ -409,4 +409,95 @@ def predictive_alerts(
         "recent_hours": recent_hours,
         "ratio_threshold": ratio_threshold,
         "warnings": warnings,
+    }
+
+
+@router.get("/analytics/anomalies")
+def anomaly_predictions(
+    project_id: int = Path(..., ge=1),
+    recent_hours: int = Query(24, ge=6, le=168),
+    min_events: int = Query(3, ge=1, le=200),
+    z_threshold: float = Query(2.0, ge=0.5, le=10.0),
+    session: Session = Depends(get_session),
+    _proj: Project = Depends(require_project_api_key),
+):
+    """Detect anomalies using recent hourly event rates and a simple forecast."""
+    now = datetime.utcnow()
+    start = now - timedelta(hours=recent_hours)
+    stmt = select(Event).where(
+        Event.project_id == project_id,
+        Event.created_at >= start,
+        Event.created_at <= now,
+    )
+    events = session.exec(stmt).all()
+
+    buckets: Dict[int, Dict[str, float]] = {}
+    for ev in events:
+        weight = _event_weight(ev.event_type)
+        if weight <= 0:
+            continue
+        hour = ev.created_at.replace(minute=0, second=0, microsecond=0).isoformat()
+        check_bucket = buckets.setdefault(ev.check_id, {})
+        check_bucket[hour] = check_bucket.get(hour, 0.0) + weight
+
+    warnings: List[dict] = []
+    for check_id, counts in buckets.items():
+        series = []
+        for i in range(recent_hours):
+            h = (start + timedelta(hours=i)).replace(minute=0, second=0, microsecond=0).isoformat()
+            series.append(counts.get(h, 0.0))
+        if sum(series) < min_events:
+            continue
+        slope, _intercept, next_val = _linear_forecast(series)
+        mean = sum(series) / len(series)
+        var = sum((v - mean) ** 2 for v in series) / len(series)
+        std = math.sqrt(var) if var > 0 else 0.0
+        score = ((next_val - mean) / std) if std > 0 else None
+        if score is not None and score >= z_threshold and next_val >= min_events:
+            warnings.append({
+                "check_id": check_id,
+                "recent_hours": recent_hours,
+                "mean_per_hour": round(mean, 4),
+                "std_per_hour": round(std, 4),
+                "trend_slope_per_hour": round(slope, 4),
+                "predicted_next_hour": round(next_val, 4),
+                "anomaly_score": round(score, 4),
+            })
+
+    warnings.sort(key=lambda r: (r["anomaly_score"], r["predicted_next_hour"]), reverse=True)
+    return {
+        "project_id": project_id,
+        "recent_start": start.isoformat(),
+        "recent_end": now.isoformat(),
+        "recent_hours": recent_hours,
+        "z_threshold": z_threshold,
+        "warnings": warnings,
+    }
+
+
+@router.get("/analytics/incident-clusters")
+def incident_clusters(
+    project_id: int = Path(..., ge=1),
+    days: int = Query(90, ge=1, le=365),
+    threshold: float = Query(0.35, ge=0.0, le=1.0),
+    min_cluster_size: int = Query(2, ge=2, le=100),
+    limit: int = Query(20, ge=1, le=200),
+    session: Session = Depends(get_session),
+    _proj: Project = Depends(require_project_api_key),
+):
+    """Cluster incidents using TF-IDF similarity."""
+    clusters = cluster_incidents(
+        session=session,
+        project_id=project_id,
+        days=days,
+        threshold=threshold,
+        min_cluster_size=min_cluster_size,
+        limit=limit,
+    )
+    return {
+        "project_id": project_id,
+        "days": days,
+        "threshold": threshold,
+        "min_cluster_size": min_cluster_size,
+        "clusters": clusters,
     }
