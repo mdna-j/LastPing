@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Path, Response
 from sqlmodel import Session, select
 
 from ..db import get_session
-from ..models import Event, Check, Project
+from ..models import Event, Check, Project, AvailabilityRollup
 from ..deps import require_project_api_key
 from ..models import UptimeSnapshot
 
@@ -28,6 +28,38 @@ def _parse_range(start: Optional[str], end: Optional[str]) -> tuple[datetime, da
     if start_dt >= end_dt:
         raise HTTPException(status_code=400, detail="start must be before end")
     return start_dt, end_dt
+
+
+def _rollup_key(dt: datetime, period: str) -> str:
+    if period == "month":
+        return dt.strftime("%Y-%m")
+    if period == "quarter":
+        q = (dt.month - 1) // 3 + 1
+        return f"{dt.year}-Q{q}"
+    return dt.date().isoformat()
+
+
+def _rollup_series(series: List[dict], period: str, slo_target: Optional[float], sla_target: Optional[float]) -> List[dict]:
+    buckets: dict = {}
+    for row in series:
+        day = row.get("day")
+        if not day:
+            continue
+        dt = datetime.fromisoformat(day)
+        key = _rollup_key(dt, period)
+        buckets.setdefault(key, []).append(row.get("uptime_percent", 0.0))
+
+    out = []
+    for key in sorted(buckets.keys()):
+        vals = buckets[key]
+        avg = sum(vals) / len(vals) if vals else 0.0
+        out.append({
+            "period": key,
+            "uptime_percent": avg,
+            "slo_met": (slo_target is not None and avg >= slo_target) if slo_target is not None else None,
+            "sla_met": (sla_target is not None and avg >= sla_target) if sla_target is not None else None,
+        })
+    return out
 
 
 @router.get("/metrics/uptime")
@@ -273,6 +305,76 @@ def availability_report_csv(project_id: int = Path(..., ge=1), check_id: Optiona
     lines.append("day,uptime_percent,slo_met,sla_met")
     for row in data.get("series", []):
         lines.append(f"{row['day']},{row['uptime_percent']},{row.get('slo_met')},{row.get('sla_met')}")
+    csv = "\n".join(lines)
+    return Response(content=csv, media_type="text/csv")
+
+
+@router.get("/metrics/availability/rollup")
+def availability_rollup(project_id: int = Path(..., ge=1), period: str = Query("month", max_length=10), check_id: Optional[int] = Query(None, ge=1), start: Optional[str] = Query(None, max_length=40), end: Optional[str] = Query(None, max_length=40), session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
+    """Return monthly/quarterly availability rollups using daily snapshots."""
+    period = period.lower()
+    if period not in ("month", "quarter"):
+        raise HTTPException(status_code=400, detail="period must be month or quarter")
+    start_dt, end_dt = _parse_range(start, end)
+    project = session.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Prefer precomputed monthly rollups when available.
+    if period == "month":
+        stmt = select(AvailabilityRollup).where(
+            AvailabilityRollup.project_id == project_id,
+            AvailabilityRollup.period_type == "month",
+            AvailabilityRollup.period_start >= start_dt,
+            AvailabilityRollup.period_end <= end_dt,
+        )
+        if check_id:
+            stmt = stmt.where(AvailabilityRollup.check_id == check_id)
+        else:
+            stmt = stmt.where(AvailabilityRollup.check_id == None)
+        rows = session.exec(stmt.order_by(AvailabilityRollup.period_start)).all()
+        if rows:
+            series = [
+                {
+                    "period": r.period,
+                    "uptime_percent": r.uptime_percent,
+                    "slo_met": r.slo_met,
+                    "sla_met": r.sla_met,
+                }
+                for r in rows
+            ]
+            return {
+                "project_id": project_id,
+                "check_id": check_id,
+                "start": start_dt.isoformat(),
+                "end": end_dt.isoformat(),
+                "period": period,
+                "slo_target": project.slo_target,
+                "sla_target": project.sla_target,
+                "series": series,
+            }
+
+    data = availability_history(project_id=project_id, check_id=check_id, start=start, end=end, session=session, _proj=_proj)
+    series = _rollup_series(data.get("series", []), period, data.get("slo_target"), data.get("sla_target"))
+    return {
+        "project_id": project_id,
+        "check_id": check_id,
+        "start": data.get("start"),
+        "end": data.get("end"),
+        "period": period,
+        "slo_target": data.get("slo_target"),
+        "sla_target": data.get("sla_target"),
+        "series": series,
+    }
+
+
+@router.get("/metrics/availability/rollup.csv")
+def availability_rollup_csv(project_id: int = Path(..., ge=1), period: str = Query("month", max_length=10), check_id: Optional[int] = Query(None, ge=1), start: Optional[str] = Query(None, max_length=40), end: Optional[str] = Query(None, max_length=40), session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
+    data = availability_rollup(project_id=project_id, period=period, check_id=check_id, start=start, end=end, session=session, _proj=_proj)
+    lines = []
+    lines.append("period,uptime_percent,slo_met,sla_met")
+    for row in data.get("series", []):
+        lines.append(f"{row['period']},{row['uptime_percent']},{row.get('slo_met')},{row.get('sla_met')}")
     csv = "\n".join(lines)
     return Response(content=csv, media_type="text/csv")
 

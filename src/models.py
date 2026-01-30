@@ -199,6 +199,21 @@ class UptimeSnapshot(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+class AvailabilityRollup(SQLModel, table=True):
+    __tablename__ = "availability_rollup"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    check_id: Optional[int] = Field(default=None, foreign_key="check.id", index=True)
+    period_type: str = Field(default="month", index=True)
+    period: str = Field(index=True)
+    period_start: datetime
+    period_end: datetime
+    uptime_percent: float
+    slo_met: Optional[bool] = None
+    sla_met: Optional[bool] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class ApiKeyUsage(SQLModel, table=True):
     __tablename__ = "api_key_usage"
     """Simple per-minute counter for API key usage enforcement."""

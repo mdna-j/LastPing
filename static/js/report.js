@@ -21,7 +21,8 @@ function getRange(){
   const start = document.getElementById('start').value || null;
   const end = document.getElementById('end').value || null;
   const checkId = document.getElementById('checkId').value || null;
-  return {start, end, checkId};
+  const rollup = document.getElementById('rollup') ? document.getElementById('rollup').value : 'day';
+  return {start, end, checkId, rollup};
 }
 
 async function loadChecks(){
@@ -43,18 +44,25 @@ async function loadChecks(){
 async function loadReport(){
   const pid = document.getElementById('projectId').value || '1';
   const headers = reportHeaders();
-  const {start, end, checkId} = getRange();
+  const {start, end, checkId, rollup} = getRange();
   const params = new URLSearchParams();
   if(start) params.set('start', start);
   if(end) params.set('end', end);
   if(checkId) params.set('check_id', checkId);
-  const url = `/projects/${pid}/metrics/availability/history?${params.toString()}`;
+  let url = `/projects/${pid}/metrics/availability/history?${params.toString()}`;
+  if(rollup && rollup !== 'day'){
+    params.set('period', rollup);
+    url = `/projects/${pid}/metrics/availability/rollup?${params.toString()}`;
+  }
   const res = await fetch(url, {headers});
   if(!res.ok){ alert('Failed to load report'); return; }
   const data = await res.json();
 
   const series = data.series || [];
   const tbody = document.querySelector('#reportTable tbody');
+  const label = rollup === 'day' ? 'day' : 'period';
+  const th = document.querySelector('#reportTable thead th');
+  if(th) th.innerText = rollup === 'day' ? 'Date' : 'Period';
   if(!series.length){
     tbody.innerHTML = '<tr><td colspan="4" class="muted">No data in range.</td></tr>';
   }else{
@@ -63,14 +71,14 @@ async function loadReport(){
       const slaClass = r.sla_met ? 'status-up' : 'status-down';
       const sloText = (r.slo_met === null || r.slo_met === undefined) ? 'n/a' : (r.slo_met ? 'met' : 'missed');
       const slaText = (r.sla_met === null || r.sla_met === undefined) ? 'n/a' : (r.sla_met ? 'met' : 'missed');
-      return `<tr><td>${r.day}</td><td>${Number(r.uptime_percent).toFixed(2)}%</td><td><span class="badge ${sloClass}">${sloText}</span></td><td><span class="badge ${slaClass}">${slaText}</span></td></tr>`;
+      return `<tr><td>${r[label]}</td><td>${Number(r.uptime_percent).toFixed(2)}%</td><td><span class="badge ${sloClass}">${sloText}</span></td><td><span class="badge ${slaClass}">${slaText}</span></td></tr>`;
     }).join('');
   }
 
   try{
     if(typeof Chart !== 'undefined'){
       if(window._reportChart){ try{ window._reportChart.destroy(); }catch(e){} }
-      const labels = series.map(r => r.day);
+      const labels = series.map(r => r[label]);
       const vals = series.map(r => r.uptime_percent);
       const ctx = document.getElementById('reportChart').getContext('2d');
       window._reportChart = new Chart(ctx, {
@@ -85,12 +93,16 @@ async function loadReport(){
 async function exportCsv(){
   const pid = document.getElementById('projectId').value || '1';
   const headers = reportHeaders();
-  const {start, end, checkId} = getRange();
+  const {start, end, checkId, rollup} = getRange();
   const params = new URLSearchParams();
   if(start) params.set('start', start);
   if(end) params.set('end', end);
   if(checkId) params.set('check_id', checkId);
-  const url = `/projects/${pid}/metrics/availability/report.csv?${params.toString()}`;
+  let url = `/projects/${pid}/metrics/availability/report.csv?${params.toString()}`;
+  if(rollup && rollup !== 'day'){
+    params.set('period', rollup);
+    url = `/projects/${pid}/metrics/availability/rollup.csv?${params.toString()}`;
+  }
   const res = await fetch(url, {headers});
   if(!res.ok){ alert('Failed to export CSV'); return; }
   const text = await res.text();
@@ -117,6 +129,8 @@ document.addEventListener('DOMContentLoaded', ()=>{
   document.getElementById('p180d').addEventListener('click', ()=>applyPreset(180));
   document.getElementById('loadBtn').addEventListener('click', loadReport);
   document.getElementById('exportBtn').addEventListener('click', exportCsv);
+  const rollup = document.getElementById('rollup');
+  if(rollup) rollup.addEventListener('change', loadReport);
   const api = document.getElementById('apiKey');
   if(api) api.addEventListener('change', loadChecks);
   const pid = document.getElementById('projectId');

@@ -383,6 +383,13 @@ def reports_page():
     <div class="row">
       <label>Project: <input id="projectId" value="1" style="width:80px"/></label>
       <label>API Key: <input id="apiKey" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></label>
+      <label>Granularity:
+        <select id="rollup" style="width:140px">
+          <option value="day">daily</option>
+          <option value="month">monthly</option>
+          <option value="quarter">quarterly</option>
+        </select>
+      </label>
       <label>Check: <select id="checkId" style="width:140px"><option value="">(all)</option></select></label>
       <label>Start: <input id="start" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
       <label>End: <input id="end" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>

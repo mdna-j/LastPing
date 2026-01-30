@@ -88,3 +88,44 @@ def test_snapshots_endpoint(tmp_path):
     arr = r.json()
     assert isinstance(arr, list)
     assert len(arr) == 3
+
+
+def test_availability_rollup_monthly(tmp_path):
+    os.environ['DATABASE_URL'] = f"sqlite:///{tmp_path / 'rollup.db'}"
+    from sqlmodel import Session
+    from src import db as dbmod
+    from src.models import Project, Check, UptimeSnapshot
+    from src.main import app
+    from fastapi.testclient import TestClient
+
+    dbmod.create_db_and_tables()
+    client = TestClient(app)
+
+    with Session(dbmod.engine) as s:
+        from src.security import hash_api_key
+        plain = 'rollupkey'
+        p = Project(name='rproj', api_key_hash=hash_api_key(plain), slo_target=99.0, sla_target=99.0)
+        s.add(p)
+        s.commit()
+        s.refresh(p)
+        c = Check(project_id=p.id, name='rcheck')
+        s.add(c)
+        s.commit()
+        s.refresh(c)
+
+        jan = datetime(2026, 1, 15, 12, 0, 0)
+        feb = datetime(2026, 2, 15, 12, 0, 0)
+        s.add(UptimeSnapshot(project_id=p.id, check_id=c.id, window_start=jan - timedelta(hours=24), window_end=jan, uptime_percent=98.0, mttr_seconds=10))
+        s.add(UptimeSnapshot(project_id=p.id, check_id=c.id, window_start=feb - timedelta(hours=24), window_end=feb, uptime_percent=99.5, mttr_seconds=5))
+        s.commit()
+        pid = p.id
+
+    headers = {"Authorization": f"Bearer {plain}"}
+    end = datetime(2026, 3, 1, 0, 0, 0).isoformat()
+    start = datetime(2025, 12, 1, 0, 0, 0).isoformat()
+    r = client.get(f"/projects/{pid}/metrics/availability/rollup?period=month&start={start}&end={end}", headers=headers)
+    assert r.status_code == 200
+    data = r.json()
+    series = data.get("series", [])
+    assert any(row["period"].endswith("-01") for row in series)
+    assert any(row["period"].endswith("-02") for row in series)

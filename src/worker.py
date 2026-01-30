@@ -24,7 +24,7 @@ from sqlmodel import Session, select
 from .db import engine
 from .models import Check, CheckType, CheckStatus, Event, EventType, Project, Incident
 from .alerts import notify_down, notify_recovery, notify_degraded, send_email, send_sms
-from .models import UptimeSnapshot, CheckLease, RemediationHook, RemediationLog, RemediationApproval, OnCallAlert, OnCallEscalation, OnCallRotation, OnCallMember, AuditLog
+from .models import UptimeSnapshot, AvailabilityRollup, CheckLease, RemediationHook, RemediationLog, RemediationApproval, OnCallAlert, OnCallEscalation, OnCallRotation, OnCallMember, AuditLog
 from .analytics_ml import find_similar_incidents
 
 logger = logging.getLogger("lastping.worker")
@@ -33,6 +33,7 @@ logger = logging.getLogger("lastping.worker")
 GROUP_WINDOW = int(os.environ.get("INCIDENT_GROUP_WINDOW", "600"))
 _LAST_EARLY_WARNING_RUN: Optional[datetime] = None
 _LAST_PREDICTIVE_RUN: Optional[datetime] = None
+_LAST_ARCHIVE_RUN: Optional[datetime] = None
 
 
 def _now() -> datetime:
@@ -220,6 +221,102 @@ def _linear_forecast(values):
     intercept = y_mean - slope * x_mean
     next_val = slope * n + intercept
     return slope, intercept, next_val
+
+
+def _month_start(dt: datetime) -> datetime:
+    return dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+def _compute_monthly_rollups(session: Session, project: Project, month_start: datetime, month_end: datetime):
+    checks = session.exec(select(Check).where(Check.project_id == project.id)).all()
+    rollups = []
+    for chk in checks:
+        snaps = session.exec(
+            select(UptimeSnapshot)
+            .where(
+                UptimeSnapshot.project_id == project.id,
+                UptimeSnapshot.check_id == chk.id,
+                UptimeSnapshot.window_end >= month_start,
+                UptimeSnapshot.window_end <= month_end,
+            )
+            .order_by(UptimeSnapshot.window_end.desc())
+        ).all()
+        latest = {}
+        for s in snaps:
+            day = s.window_end.date().isoformat()
+            if day not in latest:
+                latest[day] = s
+        vals = [s.uptime_percent for s in latest.values()]
+        if not vals:
+            continue
+        avg = sum(vals) / len(vals)
+        rollups.append({
+            "check_id": chk.id,
+            "uptime_percent": avg,
+            "slo_met": (project.slo_target is not None and avg >= project.slo_target) if project.slo_target is not None else None,
+            "sla_met": (project.sla_target is not None and avg >= project.sla_target) if project.sla_target is not None else None,
+        })
+
+    # project-level aggregate
+    if rollups:
+        agg = sum([r["uptime_percent"] for r in rollups]) / len(rollups)
+        rollups.append({
+            "check_id": None,
+            "uptime_percent": agg,
+            "slo_met": (project.slo_target is not None and agg >= project.slo_target) if project.slo_target is not None else None,
+            "sla_met": (project.sla_target is not None and agg >= project.sla_target) if project.sla_target is not None else None,
+        })
+    return rollups
+
+
+def _maybe_archive_monthly_rollups(session: Session, now: datetime, project_ids):
+    global _LAST_ARCHIVE_RUN
+    interval = int(os.environ.get("ARCHIVE_ROLLUP_INTERVAL_SECONDS", "86400"))
+    if _LAST_ARCHIVE_RUN and (now - _LAST_ARCHIVE_RUN).total_seconds() < interval:
+        return
+    _LAST_ARCHIVE_RUN = now
+
+    # archive previous full month only
+    month_start = _month_start(now)
+    prev_end = month_start
+    prev_start = _month_start(month_start - timedelta(days=1))
+    period = prev_start.strftime("%Y-%m")
+
+    for pid in project_ids:
+        project = session.get(Project, pid)
+        if not project:
+            continue
+        rollups = _compute_monthly_rollups(session, project, prev_start, prev_end)
+        if not rollups:
+            continue
+        for r in rollups:
+            existing = session.exec(
+                select(AvailabilityRollup).where(
+                    AvailabilityRollup.project_id == pid,
+                    AvailabilityRollup.check_id == r["check_id"],
+                    AvailabilityRollup.period_type == "month",
+                    AvailabilityRollup.period == period,
+                )
+            ).first()
+            if existing:
+                continue
+            try:
+                row = AvailabilityRollup(
+                    project_id=pid,
+                    check_id=r["check_id"],
+                    period_type="month",
+                    period=period,
+                    period_start=prev_start,
+                    period_end=prev_end,
+                    uptime_percent=r["uptime_percent"],
+                    slo_met=r["slo_met"],
+                    sla_met=r["sla_met"],
+                )
+                session.add(row)
+                session.commit()
+            except Exception:
+                session.rollback()
+                logger.exception("Failed to archive monthly rollup for project %s check %s", pid, r["check_id"])
 
 
 def _compute_early_warnings(session: Session, project_id: int, now: datetime, recent_hours: int, baseline_days: int, min_events: int, z_threshold: float, ratio_threshold: float):
@@ -1307,6 +1404,10 @@ def scan_checks_once(session: Session):
             _process_remediation_approvals(session, now)
         except Exception:
             logger.exception("Error processing remediation approvals")
+    try:
+        _maybe_archive_monthly_rollups(session, now, project_ids)
+    except Exception:
+        logger.exception("Error archiving monthly rollups")
     try:
         _maybe_log_predictive_warnings(session, now, project_ids)
     except Exception:
