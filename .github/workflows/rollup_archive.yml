@@ -22,6 +22,12 @@ jobs:
             echo "ROLLUP_DATABASE_URL is not set; skipping."
             exit 0
           fi
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install -r requirements.txt
       - name: Validate DATABASE_URL
         run: |
           python - <<'PY'
@@ -35,12 +41,6 @@ jobs:
               print(f"DATABASE_URL invalid: {exc}")
               raise SystemExit(0)
           PY
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Install deps
-        run: pip install -r requirements.txt
       - name: Run rollup archive
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.quarterly }}" == "true" ]]; then
