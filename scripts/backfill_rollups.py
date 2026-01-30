@@ -6,10 +6,16 @@ Example:
   py -3.11 scripts/backfill_rollups.py --project-id 1 --dry-run
 """
 import argparse
+import sys
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 from sqlmodel import Session, select
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from src.db import engine
 from src.models import Project, Check, UptimeSnapshot, AvailabilityRollup

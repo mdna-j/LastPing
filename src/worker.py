@@ -34,6 +34,7 @@ GROUP_WINDOW = int(os.environ.get("INCIDENT_GROUP_WINDOW", "600"))
 _LAST_EARLY_WARNING_RUN: Optional[datetime] = None
 _LAST_PREDICTIVE_RUN: Optional[datetime] = None
 _LAST_ARCHIVE_RUN: Optional[datetime] = None
+_LAST_QUARTERLY_RUN: Optional[datetime] = None
 
 
 def _now() -> datetime:
@@ -228,6 +229,16 @@ def _month_start(dt: datetime) -> datetime:
 
 
 def _compute_monthly_rollups(session: Session, project: Project, month_start: datetime, month_end: datetime):
+    return _compute_rollups_for_range(session, project, month_start, month_end)
+
+
+def _quarter_start(dt: datetime) -> datetime:
+    q = (dt.month - 1) // 3
+    month = q * 3 + 1
+    return dt.replace(month=month, day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+def _compute_rollups_for_range(session: Session, project: Project, start: datetime, end: datetime):
     checks = session.exec(select(Check).where(Check.project_id == project.id)).all()
     rollups = []
     for chk in checks:
@@ -236,8 +247,8 @@ def _compute_monthly_rollups(session: Session, project: Project, month_start: da
             .where(
                 UptimeSnapshot.project_id == project.id,
                 UptimeSnapshot.check_id == chk.id,
-                UptimeSnapshot.window_end >= month_start,
-                UptimeSnapshot.window_end <= month_end,
+                UptimeSnapshot.window_end >= start,
+                UptimeSnapshot.window_end <= end,
             )
             .order_by(UptimeSnapshot.window_end.desc())
         ).all()
@@ -257,7 +268,6 @@ def _compute_monthly_rollups(session: Session, project: Project, month_start: da
             "sla_met": (project.sla_target is not None and avg >= project.sla_target) if project.sla_target is not None else None,
         })
 
-    # project-level aggregate
     if rollups:
         agg = sum([r["uptime_percent"] for r in rollups]) / len(rollups)
         rollups.append({
@@ -317,6 +327,59 @@ def _maybe_archive_monthly_rollups(session: Session, now: datetime, project_ids)
             except Exception:
                 session.rollback()
                 logger.exception("Failed to archive monthly rollup for project %s check %s", pid, r["check_id"])
+
+
+def _maybe_archive_quarterly_rollups(session: Session, now: datetime, project_ids):
+    if os.environ.get("ARCHIVE_QUARTERLY_ENABLED", "0") != "1":
+        return
+    interval = int(os.environ.get("ARCHIVE_QUARTERLY_INTERVAL_SECONDS", "604800"))
+    global _LAST_QUARTERLY_RUN
+    if _LAST_QUARTERLY_RUN and (now - _LAST_QUARTERLY_RUN).total_seconds() < interval:
+        return
+    _LAST_QUARTERLY_RUN = now
+
+    # archive previous full quarter
+    quarter_start = _quarter_start(now)
+    prev_end = quarter_start
+    prev_start = _quarter_start(prev_end - timedelta(days=1))
+    qnum = (prev_start.month - 1) // 3 + 1
+    period = f"{prev_start.year}-Q{qnum}"
+
+    for pid in project_ids:
+        project = session.get(Project, pid)
+        if not project:
+            continue
+        rollups = _compute_rollups_for_range(session, project, prev_start, prev_end)
+        if not rollups:
+            continue
+        for r in rollups:
+            existing = session.exec(
+                select(AvailabilityRollup).where(
+                    AvailabilityRollup.project_id == pid,
+                    AvailabilityRollup.check_id == r["check_id"],
+                    AvailabilityRollup.period_type == "quarter",
+                    AvailabilityRollup.period == period,
+                )
+            ).first()
+            if existing:
+                continue
+            try:
+                row = AvailabilityRollup(
+                    project_id=pid,
+                    check_id=r["check_id"],
+                    period_type="quarter",
+                    period=period,
+                    period_start=prev_start,
+                    period_end=prev_end,
+                    uptime_percent=r["uptime_percent"],
+                    slo_met=r["slo_met"],
+                    sla_met=r["sla_met"],
+                )
+                session.add(row)
+                session.commit()
+            except Exception:
+                session.rollback()
+                logger.exception("Failed to archive quarterly rollup for project %s check %s", pid, r["check_id"])
 
 
 def _compute_early_warnings(session: Session, project_id: int, now: datetime, recent_hours: int, baseline_days: int, min_events: int, z_threshold: float, ratio_threshold: float):
@@ -526,6 +589,72 @@ def _maybe_log_predictive_warnings(session: Session, now: datetime, project_ids)
             except Exception:
                 session.rollback()
                 logger.exception("Failed to log predictive warning for check %s", check_id)
+
+
+def _compute_uptime_snapshots(session: Session, now: datetime):
+    """Compute and persist a short-term uptime/MTTR snapshot (last 24h) for each check."""
+    window_end = now
+    window_start = now - timedelta(hours=24)
+    stmt = select(Check)
+    all_checks = session.exec(stmt).all()
+    for c in all_checks:
+        ev_stmt = select(Event).where(
+            Event.project_id == c.project_id,
+            Event.check_id == c.id,
+            Event.created_at >= window_start,
+            Event.created_at <= window_end,
+        ).order_by(Event.created_at)
+        events = session.exec(ev_stmt).all()
+        prev_stmt = select(Event).where(
+            Event.project_id == c.project_id,
+            Event.check_id == c.id,
+            Event.created_at < window_start,
+        ).order_by(Event.created_at.desc())
+        prev = session.exec(prev_stmt).first()
+        current_state = "up"
+        if prev and prev.event_type in ("down", "http_failure"):
+            current_state = "down"
+        downtime = 0.0
+        last_change = window_start
+        for ev in events:
+            if ev.event_type in ("down", "http_failure") and current_state == "up":
+                current_state = "down"
+                last_change = ev.created_at
+            elif ev.event_type == "up" and current_state == "down":
+                downtime += (ev.created_at - last_change).total_seconds()
+                current_state = "up"
+                last_change = ev.created_at
+        if current_state == "down":
+            downtime += (window_end - last_change).total_seconds()
+        total = (window_end - window_start).total_seconds()
+        uptime_pct = max(0.0, (total - downtime) / total * 100.0) if total > 0 else 100.0
+
+        downs = []
+        for i, ev in enumerate(events):
+            if ev.event_type in ("down", "http_failure"):
+                for j in range(i + 1, len(events)):
+                    if events[j].event_type == "up":
+                        dur = (events[j].created_at - ev.created_at).total_seconds()
+                        downs.append(dur)
+                        break
+        mttr = None
+        if downs:
+            mttr = sum(downs) / len(downs)
+
+        snap = UptimeSnapshot(
+            project_id=c.project_id,
+            check_id=c.id,
+            window_start=window_start,
+            window_end=window_end,
+            uptime_percent=uptime_pct,
+            mttr_seconds=mttr,
+        )
+        try:
+            session.add(snap)
+            session.commit()
+        except Exception:
+            session.rollback()
+            logger.exception("Failed to persist uptime snapshot for check %s", c.id)
 
 
 def _log_similar_incidents(session: Session, project: Project, incident_id: int, reason: Optional[str]):
@@ -1409,6 +1538,10 @@ def scan_checks_once(session: Session):
     except Exception:
         logger.exception("Error archiving monthly rollups")
     try:
+        _maybe_archive_quarterly_rollups(session, now, project_ids)
+    except Exception:
+        logger.exception("Error archiving quarterly rollups")
+    try:
         _maybe_log_predictive_warnings(session, now, project_ids)
     except Exception:
         logger.exception("Error computing predictive warnings")
@@ -1416,61 +1549,11 @@ def scan_checks_once(session: Session):
         _maybe_log_early_warnings(session, now, project_ids)
     except Exception:
         logger.exception("Error computing early warnings")
-
-        # After processing checks, compute a short-term uptime/MTTR snapshot (last 24h)
-        try:
-            window_end = now
-            window_start = now - timedelta(hours=24)
-            # for each check, compute uptime and mttr similar to metrics logic
-            stmt = select(Check)
-            all_checks = session.exec(stmt).all()
-            for c in all_checks:
-                # load events in window
-                ev_stmt = select(Event).where(Event.project_id == c.project_id, Event.check_id == c.id, Event.created_at >= window_start, Event.created_at <= window_end).order_by(Event.created_at)
-                events = session.exec(ev_stmt).all()
-                # determine initial state
-                prev_stmt = select(Event).where(Event.project_id == c.project_id, Event.check_id == c.id, Event.created_at < window_start).order_by(Event.created_at.desc())
-                prev = session.exec(prev_stmt).first()
-                current_state = "up"
-                if prev and prev.event_type in ("down", "http_failure"):
-                    current_state = "down"
-                downtime = 0.0
-                last_change = window_start
-                for ev in events:
-                    if ev.event_type in ("down", "http_failure") and current_state == "up":
-                        current_state = "down"
-                        last_change = ev.created_at
-                    elif ev.event_type == "up" and current_state == "down":
-                        downtime += (ev.created_at - last_change).total_seconds()
-                        current_state = "up"
-                        last_change = ev.created_at
-                if current_state == "down":
-                    downtime += (window_end - last_change).total_seconds()
-                total = (window_end - window_start).total_seconds()
-                uptime_pct = max(0.0, (total - downtime) / total * 100.0) if total > 0 else 100.0
-
-                # compute MTTR for the window
-                downs = []
-                for i, ev in enumerate(events):
-                    if ev.event_type in ("down", "http_failure"):
-                        for j in range(i+1, len(events)):
-                            if events[j].event_type == "up":
-                                dur = (events[j].created_at - ev.created_at).total_seconds()
-                                downs.append(dur)
-                                break
-                mttr = None
-                if downs:
-                    mttr = sum(downs) / len(downs)
-
-                snap = UptimeSnapshot(project_id=c.project_id, check_id=c.id, window_start=window_start, window_end=window_end, uptime_percent=uptime_pct, mttr_seconds=mttr)
-                try:
-                    session.add(snap)
-                    session.commit()
-                except Exception:
-                    session.rollback()
-                    logger.exception("Failed to persist uptime snapshot for check %s", c.id)
-        except Exception:
-            logger.exception("Error computing uptime snapshots")
+    # After processing checks, compute a short-term uptime/MTTR snapshot (last 24h)
+    try:
+        _compute_uptime_snapshots(session, now)
+    except Exception:
+        logger.exception("Error computing uptime snapshots")
 
 
 def main():

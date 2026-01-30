@@ -1,0 +1,37 @@
+name: Archive availability rollups
+
+on:
+  schedule:
+    - cron: "15 3 1 * *"
+  workflow_dispatch:
+    inputs:
+      quarterly:
+        description: "Also archive previous quarter"
+        required: false
+        default: "false"
+
+jobs:
+  archive:
+    if: ${{ secrets.ROLLUP_DATABASE_URL != '' }}
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: ${{ secrets.ROLLUP_DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Run rollup archive
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.quarterly }}" == "true" ]]; then
+            python scripts/archive_rollups.py --quarterly
+            exit 0
+          fi
+          month=$(date +%m)
+          if [[ "$month" == "01" || "$month" == "04" || "$month" == "07" || "$month" == "10" ]]; then
+            python scripts/archive_rollups.py --quarterly
+          else
+            python scripts/archive_rollups.py
+          fi

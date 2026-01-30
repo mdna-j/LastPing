@@ -320,11 +320,11 @@ def availability_rollup(project_id: int = Path(..., ge=1), period: str = Query("
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    # Prefer precomputed monthly rollups when available.
-    if period == "month":
+    # Prefer precomputed monthly/quarterly rollups when available.
+    if period in ("month", "quarter"):
         stmt = select(AvailabilityRollup).where(
             AvailabilityRollup.project_id == project_id,
-            AvailabilityRollup.period_type == "month",
+            AvailabilityRollup.period_type == period,
             AvailabilityRollup.period_start >= start_dt,
             AvailabilityRollup.period_end <= end_dt,
         )
