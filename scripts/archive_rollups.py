@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Archive monthly (and optional quarterly) availability rollups.
 

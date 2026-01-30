@@ -29,6 +29,7 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
       - name: Validate DATABASE_URL
+        if: env.DATABASE_URL != ''
         run: |
           python - <<'PY'
           import os
@@ -42,6 +43,7 @@ jobs:
               raise SystemExit(0)
           PY
       - name: Run rollup archive
+        if: env.DATABASE_URL != ''
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.quarterly }}" == "true" ]]; then
             python scripts/archive_rollups.py --quarterly
