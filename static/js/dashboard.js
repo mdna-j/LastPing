@@ -36,6 +36,29 @@ function statusBadge(status){
   return `<span class="badge ${cls}">${status}</span>`;
 }
 
+async function exportAvailabilityCsv(){
+  const pid = document.getElementById('projectId').value || '1';
+  const headers = dashHeaders();
+  if(!headers.Authorization){ alert('API key required to export CSV'); return; }
+  const {start, end} = getRange();
+  const params = new URLSearchParams();
+  if(start) params.set('start', start);
+  if(end) params.set('end', end);
+  const url = `/projects/${pid}/metrics/availability/report.csv?${params.toString()}`;
+  const res = await fetch(url, {headers});
+  if(!res.ok){ alert('Failed to export CSV'); return; }
+  const text = await res.text();
+  const blob = new Blob([text], {type: 'text/csv'});
+  const dl = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = dl;
+  a.download = `availability_${pid}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(dl);
+}
+
 async function loadDashboard(){
   const pid = document.getElementById('projectId').value || '1';
   const headers = dashHeaders();
@@ -58,17 +81,28 @@ async function loadDashboard(){
   let mttr = null;
   let snaps = [];
   let trends = null;
+  let predictive = null;
   try{
-    const [uptimeRes, mttrRes, snapsRes, trendRes] = await Promise.all([
+    const reqs = [
       fetch(q(`/projects/${pid}/metrics/uptime`), {headers}),
       fetch(q(`/projects/${pid}/metrics/mttr`), {headers}),
       fetch(`/projects/${pid}/metrics/snapshots?limit=30`, {headers}),
       fetch(`/projects/${pid}/analytics/trends?days=7&interval=day`, {headers}),
-    ]);
-    if(uptimeRes.ok){ uptime = await uptimeRes.json(); }
-    if(mttrRes.ok){ mttr = await mttrRes.json(); }
-    if(snapsRes.ok){ snaps = await snapsRes.json(); }
-    if(trendRes.ok){ trends = await trendRes.json(); }
+    ];
+    if(headers.Authorization){
+      reqs.push(fetch(`/projects/${pid}/analytics/predictive?recent_hours=24`, {headers}));
+    }
+    const resps = await Promise.all(reqs);
+    const uptimeRes = resps[0];
+    const mttrRes = resps[1];
+    const snapsRes = resps[2];
+    const trendRes = resps[3];
+    const predRes = resps[4];
+    if(uptimeRes && uptimeRes.ok){ uptime = await uptimeRes.json(); }
+    if(mttrRes && mttrRes.ok){ mttr = await mttrRes.json(); }
+    if(snapsRes && snapsRes.ok){ snaps = await snapsRes.json(); }
+    if(trendRes && trendRes.ok){ trends = await trendRes.json(); }
+    if(predRes && predRes.ok){ predictive = await predRes.json(); }
   }catch(e){ /* ignore */ }
 
   // incidents (requires API key)
@@ -93,6 +127,25 @@ async function loadDashboard(){
     if(incCountEl) incCountEl.innerText = 'locked';
   }
 
+  const predEl = document.getElementById('predictiveList');
+  if(predEl){
+    if(!headers.Authorization){
+      predEl.innerText = 'Provide API key to load predictive alerts.';
+    }else if(predictive && predictive.warnings){
+      if(!predictive.warnings.length){
+        predEl.innerHTML = '<div class="muted">No predictive alerts in the recent window.</div>';
+      }else{
+        predEl.innerHTML = predictive.warnings.map(w => {
+          const ratio = (w.ratio !== null && w.ratio !== undefined) ? Number(w.ratio).toFixed(2) : 'n/a';
+          const next = (w.predicted_next_hour !== null && w.predicted_next_hour !== undefined) ? Number(w.predicted_next_hour).toFixed(2) : 'n/a';
+          return `<div class="card"><div><strong>Check ${w.check_id}</strong> predicted ${next} events</div><div class="muted">ratio ${ratio} · slope ${w.trend_slope_per_hour}</div></div>`;
+        }).join('');
+      }
+    }else{
+      predEl.innerText = 'Failed to load predictive alerts (check API key).';
+    }
+  }
+
   // cards
   const cards = document.getElementById('cards');
   const uptimePct = uptime && uptime.uptime !== undefined ? uptime.uptime : (uptime && uptime.project_uptime_percent !== undefined ? uptime.project_uptime_percent : null);
@@ -102,7 +155,10 @@ async function loadDashboard(){
   html += `<div class="card" style="min-width:180px"><div class="muted">Uptime</div><div><strong>${uptimePct !== null ? uptimePct.toFixed(2) + '%' : 'n/a'}</strong></div><div class="muted">range</div></div>`;
   html += `<div class="card" style="min-width:180px"><div class="muted">MTTR</div><div><strong>${mttrVal !== null ? mttrVal.toFixed(1) + 's' : 'n/a'}</strong></div><div class="muted">range</div></div>`;
   html += `<div class="card" style="min-width:180px"><div class="muted">Open incidents</div><div><strong id="openIncidentsCount">${headers.Authorization ? '…' : 'locked'}</strong></div><div class="muted">API key required</div></div>`;
+  html += `<div class="card" style="min-width:180px"><div class="muted">Availability CSV</div><div><button id="exportAvailabilityCsvBtn" class="btn btn-secondary">Export</button></div><div class="muted">Uses range</div></div>`;
   cards.innerHTML = html;
+  const exportBtn = document.getElementById('exportAvailabilityCsvBtn');
+  if(exportBtn) exportBtn.onclick = exportAvailabilityCsv;
 
   // checks table
   const tbody = document.querySelector('#checksTable tbody');

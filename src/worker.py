@@ -32,6 +32,7 @@ logger = logging.getLogger("lastping.worker")
 # Window (seconds) in which separate failures may be grouped into a single incident
 GROUP_WINDOW = int(os.environ.get("INCIDENT_GROUP_WINDOW", "600"))
 _LAST_EARLY_WARNING_RUN: Optional[datetime] = None
+_LAST_PREDICTIVE_RUN: Optional[datetime] = None
 
 
 def _now() -> datetime:
@@ -204,6 +205,23 @@ def _event_weight(event_type: str) -> float:
     return 0.0
 
 
+def _linear_forecast(values):
+    n = len(values)
+    if n == 0:
+        return 0.0, 0.0, 0.0
+    if n == 1:
+        return 0.0, values[0], values[0]
+    x_vals = list(range(n))
+    x_mean = sum(x_vals) / n
+    y_mean = sum(values) / n
+    num = sum((x - x_mean) * (y - y_mean) for x, y in zip(x_vals, values))
+    den = sum((x - x_mean) ** 2 for x in x_vals) or 1.0
+    slope = num / den
+    intercept = y_mean - slope * x_mean
+    next_val = slope * n + intercept
+    return slope, intercept, next_val
+
+
 def _compute_early_warnings(session: Session, project_id: int, now: datetime, recent_hours: int, baseline_days: int, min_events: int, z_threshold: float, ratio_threshold: float):
     recent_start = now - timedelta(hours=recent_hours)
     baseline_start = now - timedelta(days=baseline_days)
@@ -326,6 +344,91 @@ def _maybe_log_early_warnings(session: Session, now: datetime, project_ids):
             except Exception:
                 session.rollback()
                 logger.exception("Failed to log early warning for check %s", check_id)
+
+
+def _compute_predictive_warnings(session: Session, project_id: int, now: datetime, recent_hours: int, min_events: int, ratio_threshold: float):
+    start = now - timedelta(hours=recent_hours)
+    stmt = select(Event).where(
+        Event.project_id == project_id,
+        Event.created_at >= start,
+        Event.created_at <= now,
+    )
+    events = session.exec(stmt).all()
+    buckets = {}
+    for ev in events:
+        weight = _event_weight(ev.event_type)
+        if weight <= 0:
+            continue
+        hour = ev.created_at.replace(minute=0, second=0, microsecond=0).isoformat()
+        check_bucket = buckets.setdefault(ev.check_id, {})
+        check_bucket[hour] = check_bucket.get(hour, 0.0) + weight
+
+    warnings = []
+    for check_id, counts in buckets.items():
+        series = []
+        for i in range(recent_hours):
+            h = (start + timedelta(hours=i)).replace(minute=0, second=0, microsecond=0).isoformat()
+            series.append(counts.get(h, 0.0))
+        if sum(series) < min_events:
+            continue
+        slope, _intercept, next_val = _linear_forecast(series)
+        base_mean = sum(series) / len(series)
+        ratio = (next_val / base_mean) if base_mean > 0 else None
+        if next_val >= min_events and ratio is not None and ratio >= ratio_threshold and slope > 0:
+            warnings.append({
+                "check_id": check_id,
+                "recent_hours": recent_hours,
+                "recent_total": round(sum(series), 4),
+                "baseline_mean_per_hour": round(base_mean, 4),
+                "trend_slope_per_hour": round(slope, 4),
+                "predicted_next_hour": round(next_val, 4),
+                "ratio": round(ratio, 4),
+            })
+    return warnings
+
+
+def _maybe_log_predictive_warnings(session: Session, now: datetime, project_ids):
+    global _LAST_PREDICTIVE_RUN
+    interval = int(os.environ.get("PREDICTIVE_RUN_INTERVAL_SECONDS", "900"))
+    if _LAST_PREDICTIVE_RUN and (now - _LAST_PREDICTIVE_RUN).total_seconds() < interval:
+        return
+    _LAST_PREDICTIVE_RUN = now
+
+    recent_hours = int(os.environ.get("PREDICTIVE_RECENT_HOURS", "24"))
+    min_events = int(os.environ.get("PREDICTIVE_MIN_EVENTS", "3"))
+    ratio_threshold = float(os.environ.get("PREDICTIVE_RATIO_THRESHOLD", "2.0"))
+    log_window = int(os.environ.get("PREDICTIVE_LOG_WINDOW_SECONDS", "3600"))
+
+    for pid in project_ids:
+        warnings = _compute_predictive_warnings(session, pid, now, recent_hours, min_events, ratio_threshold)
+        for warn in warnings:
+            check_id = warn.get("check_id")
+            cutoff = now - timedelta(seconds=log_window)
+            existing = session.exec(
+                select(AuditLog).where(
+                    AuditLog.action == "predictive_warning",
+                    AuditLog.target_type == "check",
+                    AuditLog.target_id == check_id,
+                    AuditLog.created_at >= cutoff,
+                )
+            ).first()
+            if existing:
+                continue
+            try:
+                al = AuditLog(
+                    actor="worker",
+                    action="predictive_warning",
+                    target_type="check",
+                    target_id=check_id,
+                    details=json.dumps(warn),
+                    actor_ip=None,
+                    user_agent=None,
+                )
+                session.add(al)
+                session.commit()
+            except Exception:
+                session.rollback()
+                logger.exception("Failed to log predictive warning for check %s", check_id)
 
 
 def _log_similar_incidents(session: Session, project: Project, incident_id: int, reason: Optional[str]):
@@ -1204,6 +1307,10 @@ def scan_checks_once(session: Session):
             _process_remediation_approvals(session, now)
         except Exception:
             logger.exception("Error processing remediation approvals")
+    try:
+        _maybe_log_predictive_warnings(session, now, project_ids)
+    except Exception:
+        logger.exception("Error computing predictive warnings")
     try:
         _maybe_log_early_warnings(session, now, project_ids)
     except Exception:

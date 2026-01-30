@@ -40,6 +40,24 @@ def _event_weight(event_type: str) -> float:
     return 0.0
 
 
+def _linear_forecast(values: List[float]) -> tuple[float, float, float]:
+    """Return (slope, intercept, next_value) for a simple linear trend."""
+    n = len(values)
+    if n == 0:
+        return 0.0, 0.0, 0.0
+    if n == 1:
+        return 0.0, values[0], values[0]
+    x_vals = list(range(n))
+    x_mean = sum(x_vals) / n
+    y_mean = sum(values) / n
+    num = sum((x - x_mean) * (y - y_mean) for x, y in zip(x_vals, values))
+    den = sum((x - x_mean) ** 2 for x in x_vals) or 1.0
+    slope = num / den
+    intercept = y_mean - slope * x_mean
+    next_val = slope * n + intercept
+    return slope, intercept, next_val
+
+
 @router.get("/analytics/failures")
 def failure_summary(project_id: int = Path(..., ge=1), days: int = Query(30, ge=1, le=365), session: Session = Depends(get_session), _proj: Project = Depends(require_project_api_key)):
     """Return top failing checks by down events in the window."""
@@ -328,6 +346,67 @@ def early_warning(
         "recent_hours": recent_hours,
         "baseline_days": baseline_days,
         "z_threshold": z_threshold,
+        "ratio_threshold": ratio_threshold,
+        "warnings": warnings,
+    }
+
+
+@router.get("/analytics/predictive")
+def predictive_alerts(
+    project_id: int = Path(..., ge=1),
+    recent_hours: int = Query(24, ge=6, le=168),
+    min_events: int = Query(3, ge=1, le=200),
+    ratio_threshold: float = Query(2.0, ge=1.1, le=20.0),
+    session: Session = Depends(get_session),
+    _proj: Project = Depends(require_project_api_key),
+):
+    """Forecast next-hour failure volume using a simple linear trend."""
+    now = datetime.utcnow()
+    start = now - timedelta(hours=recent_hours)
+    stmt = select(Event).where(
+        Event.project_id == project_id,
+        Event.created_at >= start,
+        Event.created_at <= now,
+    )
+    events = session.exec(stmt).all()
+
+    buckets: Dict[int, Dict[str, float]] = {}
+    for ev in events:
+        weight = _event_weight(ev.event_type)
+        if weight <= 0:
+            continue
+        hour = ev.created_at.replace(minute=0, second=0, microsecond=0).isoformat()
+        check_bucket = buckets.setdefault(ev.check_id, {})
+        check_bucket[hour] = check_bucket.get(hour, 0.0) + weight
+
+    warnings: List[dict] = []
+    for check_id, counts in buckets.items():
+        series_hours = []
+        for i in range(recent_hours):
+            h = (start + timedelta(hours=i)).replace(minute=0, second=0, microsecond=0).isoformat()
+            series_hours.append(counts.get(h, 0.0))
+        if sum(series_hours) < min_events:
+            continue
+        slope, intercept, next_val = _linear_forecast(series_hours)
+        base_mean = sum(series_hours) / len(series_hours)
+        ratio = (next_val / base_mean) if base_mean > 0 else None
+        if next_val >= min_events and ratio is not None and ratio >= ratio_threshold and slope > 0:
+            warnings.append({
+                "check_id": check_id,
+                "recent_hours": recent_hours,
+                "recent_total": round(sum(series_hours), 4),
+                "baseline_mean_per_hour": round(base_mean, 4),
+                "trend_slope_per_hour": round(slope, 4),
+                "predicted_next_hour": round(next_val, 4),
+                "ratio": round(ratio, 4),
+            })
+
+    warnings.sort(key=lambda r: (r["predicted_next_hour"], r["trend_slope_per_hour"]), reverse=True)
+    return {
+        "project_id": project_id,
+        "recent_start": start.isoformat(),
+        "recent_end": now.isoformat(),
+        "recent_hours": recent_hours,
         "ratio_threshold": ratio_threshold,
         "warnings": warnings,
     }

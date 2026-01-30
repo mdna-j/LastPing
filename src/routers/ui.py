@@ -357,6 +357,11 @@ def dashboard_page():
       <div id="incidentsList" class="muted">Provide API key to load incidents.</div>
     </div>
 
+    <div class="card">
+      <h3>Predictive Alerts</h3>
+      <div id="predictiveList" class="muted">Provide API key to load predictive alerts.</div>
+    </div>
+
     <script src="/static/js/vendor/chart.min.js"></script>
     <script src="/static/js/dashboard.js"></script>
     </body>
@@ -484,6 +489,11 @@ def oncall_page(project_id: int = Path(..., ge=1)):
     <div id="members"></div>
     <h2>Escalations</h2>
     <div class="row">
+      <label>Check:
+        <select id="escCheckSelect" style="width:200px">
+          <option value="">(project-wide)</option>
+        </select>
+      </label>
       <input id="escCheckId" placeholder="Check ID (optional)" style="width:140px" />
       <input id="escLevel" placeholder="Level" style="width:80px" />
       <input id="escDelay" placeholder="Delay (min)" style="width:120px" />
@@ -496,7 +506,13 @@ def oncall_page(project_id: int = Path(..., ge=1)):
       <input id="escTarget" placeholder="Target (email/phone)" style="width:220px" />
       <button id="addEscBtn" class="btn">Add Escalation</button>
     </div>
+    <div class="muted">Tip: pick a check from the dropdown to create per-check escalation rules.</div>
     <div class="row">
+      <label>Filter:
+        <select id="escFilterCheckSelect" style="width:200px">
+          <option value="">(all checks)</option>
+        </select>
+      </label>
       <input id="escFilterCheckId" placeholder="Filter by Check ID" style="width:160px" />
       <button id="escFilterBtn" class="btn btn-secondary">Filter</button>
       <button id="escClearFilterBtn" class="btn btn-secondary">Clear</button>

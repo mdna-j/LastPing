@@ -41,6 +41,30 @@ async function refreshOncall(){
   alertDiv.innerHTML = alertJson.map(a => `<div class="card"><div>Alert ${a.id} check:${a.check_id} event:${a.event_type} level:${a.escalation_level}</div><div class="muted">${a.message||''}</div><button class="btn" onclick="closeAlert(${pid}, ${a.id})">Close</button></div>`).join('');
 }
 
+async function loadChecksForEscalations(){
+  const pid = document.getElementById('projectId').value || '1';
+  const h = headersOncall();
+  const select = document.getElementById('escCheckSelect');
+  const filterSelect = document.getElementById('escFilterCheckSelect');
+  if(!select || !filterSelect) return;
+  select.innerHTML = '<option value="">(project-wide)</option>';
+  filterSelect.innerHTML = '<option value="">(all checks)</option>';
+  if(!h.Authorization) return;
+  try{
+    const res = await fetch(`/projects/${pid}/checks`, {headers: h});
+    if(!res.ok) return;
+    const arr = await res.json();
+    for(const c of arr){
+      const opt = document.createElement('option');
+      opt.value = c.id;
+      opt.text = `${c.name || 'check'} (#${c.id})`;
+      select.appendChild(opt);
+      const opt2 = opt.cloneNode(true);
+      filterSelect.appendChild(opt2);
+    }
+  }catch(e){ }
+}
+
 async function addRotation(){
   const pid = document.getElementById('projectId').value || '1';
   const payload = {
@@ -111,7 +135,30 @@ document.addEventListener('DOMContentLoaded', ()=>{
   document.getElementById('escFilterBtn').addEventListener('click', refreshOncall);
   document.getElementById('escClearFilterBtn').addEventListener('click', ()=>{
     document.getElementById('escFilterCheckId').value = '';
+    const sel = document.getElementById('escFilterCheckSelect');
+    if(sel) sel.value = '';
     refreshOncall();
   });
+  const escSelect = document.getElementById('escCheckSelect');
+  if(escSelect){
+    escSelect.addEventListener('change', ()=>{
+      document.getElementById('escCheckId').value = escSelect.value || '';
+    });
+  }
+  const escFilterSelect = document.getElementById('escFilterCheckSelect');
+  if(escFilterSelect){
+    escFilterSelect.addEventListener('change', ()=>{
+      document.getElementById('escFilterCheckId').value = escFilterSelect.value || '';
+    });
+  }
+  const apiKey = document.getElementById('apiKey');
+  if(apiKey){
+    apiKey.addEventListener('change', loadChecksForEscalations);
+  }
+  const pid = document.getElementById('projectId');
+  if(pid){
+    pid.addEventListener('change', loadChecksForEscalations);
+  }
+  loadChecksForEscalations();
   refreshOncall();
 });
