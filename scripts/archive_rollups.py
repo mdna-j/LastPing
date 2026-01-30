@@ -7,6 +7,7 @@ Designed for cron/CI:
   py -3.11 scripts/archive_rollups.py --project-id 1 --dry-run
 """
 import argparse
+import os
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -16,9 +17,6 @@ from sqlmodel import Session, select
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
-
-from src.db import engine
-from src.models import Project, Check, UptimeSnapshot, AvailabilityRollup
 
 
 def _month_start(dt: datetime) -> datetime:
@@ -114,6 +112,22 @@ def main() -> int:
     ap.add_argument("--quarterly", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
+
+    db_url = os.environ.get("DATABASE_URL", "").strip()
+    if not db_url:
+        print("DATABASE_URL is not set; skipping.")
+        return 0
+    try:
+        from sqlalchemy.engine import url as sa_url
+        sa_url.make_url(db_url)
+    except Exception as exc:
+        print(f"DATABASE_URL invalid: {exc}")
+        return 0
+
+    # Late imports to avoid failing when DATABASE_URL is missing/invalid.
+    global engine, Project, Check, UptimeSnapshot, AvailabilityRollup
+    from src.db import engine
+    from src.models import Project, Check, UptimeSnapshot, AvailabilityRollup
 
     now = datetime.utcnow()
     cur_month = _month_start(now)
