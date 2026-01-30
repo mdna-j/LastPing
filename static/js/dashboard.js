@@ -142,7 +142,7 @@ async function loadDashboard(){
         predEl.innerHTML = predictive.warnings.map(w => {
           const ratio = (w.ratio !== null && w.ratio !== undefined) ? Number(w.ratio).toFixed(2) : 'n/a';
           const next = (w.predicted_next_hour !== null && w.predicted_next_hour !== undefined) ? Number(w.predicted_next_hour).toFixed(2) : 'n/a';
-          return `<div class="card"><div><strong>Check ${w.check_id}</strong> predicted ${next} events</div><div class="muted">ratio ${ratio} · slope ${w.trend_slope_per_hour}</div></div>`;
+          return `<div class="card" style="background:#fff"><div><strong>Check ${w.check_id}</strong> · forecast ${next} events</div><div class="muted">ratio ${ratio} · slope ${w.trend_slope_per_hour}</div></div>`;
         }).join('');
       }
     }else{
@@ -161,7 +161,7 @@ async function loadDashboard(){
         anomEl.innerHTML = anomalies.warnings.map(w => {
           const score = (w.anomaly_score !== null && w.anomaly_score !== undefined) ? Number(w.anomaly_score).toFixed(2) : 'n/a';
           const next = (w.predicted_next_hour !== null && w.predicted_next_hour !== undefined) ? Number(w.predicted_next_hour).toFixed(2) : 'n/a';
-          return `<div class="card"><div><strong>Check ${w.check_id}</strong> anomaly score ${score}</div><div class="muted">predicted ${next} · slope ${w.trend_slope_per_hour}</div></div>`;
+          return `<div class="card" style="background:#fff"><div><strong>Check ${w.check_id}</strong> · anomaly ${score}</div><div class="muted">predicted ${next} · slope ${w.trend_slope_per_hour}</div></div>`;
         }).join('');
       }
     }else{

@@ -359,11 +359,13 @@ def dashboard_page():
 
     <div class="card">
       <h3>Predictive Alerts</h3>
+      <div class="muted">Forward-looking signals based on recent failure trends.</div>
       <div id="predictiveList" class="muted">Provide API key to load predictive alerts.</div>
     </div>
 
     <div class="card">
       <h3>Anomaly Warnings</h3>
+      <div class="muted">Unexpected spikes versus recent baseline.</div>
       <div id="anomalyList" class="muted">Provide API key to load anomaly warnings.</div>
     </div>
 
