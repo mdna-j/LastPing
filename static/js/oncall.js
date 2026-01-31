@@ -1,5 +1,7 @@
 let oncallChecks = [];
 let oncallEscalations = [];
+let oncallRotations = [];
+let policyDragLevel = null;
 
 function headersOncall(){
   const apiKey = document.getElementById('apiKey').value;
@@ -10,8 +12,34 @@ function headersOncall(){
   return h;
 }
 
+function getProjectId(){
+  return document.getElementById('projectId').value || '1';
+}
+
+function getSelectedPolicyCheck(){
+  const select = document.getElementById('policyCheckSelect');
+  return select && select.value ? parseInt(select.value) : null;
+}
+
+function getPolicyChain(checkId){
+  if(checkId){
+    return oncallEscalations.filter(e => e.check_id === checkId);
+  }
+  return oncallEscalations.filter(e => e.check_id == null);
+}
+
+function groupByLevel(chain){
+  const map = {};
+  for(const e of chain){
+    const lvl = e.level || 0;
+    if(!map[lvl]) map[lvl] = [];
+    map[lvl].push(e);
+  }
+  return Object.keys(map).map(k => ({level: parseInt(k), items: map[k]})).sort((a,b)=>a.level-b.level);
+}
+
 async function refreshOncall(){
-  const pid = document.getElementById('projectId').value || '1';
+  const pid = getProjectId();
   const h = headersOncall();
   const escFilter = document.getElementById('escFilterCheckId').value;
   const escUrl = escFilter ? `/projects/${pid}/oncall/escalations?check_id=${encodeURIComponent(escFilter)}` : `/projects/${pid}/oncall/escalations`;
@@ -24,6 +52,7 @@ async function refreshOncall(){
   const rotJson = await rots.json();
   const escJson = await escs.json();
   const alertJson = await alerts.json();
+  oncallRotations = rotJson || [];
   oncallEscalations = escJson || [];
 
   const rotDiv = document.getElementById('rotations');
@@ -39,16 +68,22 @@ async function refreshOncall(){
   }
 
   const escDiv = document.getElementById('escalations');
-  escDiv.innerHTML = escJson.map(e => `<div class="card"><div>${e.check_id? 'check:'+e.check_id:'project-wide'} level:${e.level} ${e.target_type} delay:${e.delay_minutes} ${e.rotation_id? 'rotation:'+e.rotation_id:''} ${e.target_value? 'target:'+e.target_value:''}</div><button class="btn" onclick="deleteEscalation(${pid}, ${e.id})">Delete</button></div>`).join('');
+  escDiv.innerHTML = escJson.map(e => {
+    const scope = e.check_id ? `check:${e.check_id}` : 'project-wide';
+    const target = e.target_type === 'rotation' ? `rotation:${e.rotation_id}` : (e.target_value || '');
+    const filt = e.event_types ? ` events:${e.event_types}` : '';
+    return `<div class="card"><div>${scope} level:${e.level} ${e.target_type} delay:${e.delay_minutes} ${target}${filt} ${e.enabled === false ? '(disabled)' : ''}</div><button class="btn" onclick="deleteEscalation(${pid}, ${e.id})">Delete</button></div>`;
+  }).join('');
 
   const alertDiv = document.getElementById('alerts');
   alertDiv.innerHTML = alertJson.map(a => `<div class="card"><div>Alert ${a.id} check:${a.check_id} event:${a.event_type} level:${a.escalation_level}</div><div class="muted">${a.message||''}</div><button class="btn" onclick="closeAlert(${pid}, ${a.id})">Close</button></div>`).join('');
 
   renderPolicyChain();
+  renderPolicyPreview();
 }
 
 async function loadChecksForEscalations(){
-  const pid = document.getElementById('projectId').value || '1';
+  const pid = getProjectId();
   const h = headersOncall();
   const select = document.getElementById('escCheckSelect');
   const filterSelect = document.getElementById('escFilterCheckSelect');
@@ -81,45 +116,169 @@ async function loadChecksForEscalations(){
 function renderPolicyChain(){
   const container = document.getElementById('policyChain');
   if(!container) return;
-  const select = document.getElementById('policyCheckSelect');
-  const selected = select ? select.value : '';
-  const checkId = selected ? parseInt(selected) : null;
-  const chain = oncallEscalations.filter(e => (checkId ? e.check_id === checkId : e.check_id === null));
-  chain.sort((a, b) => (a.level || 0) - (b.level || 0));
-  if(!chain.length){
-    container.innerHTML = '<div class="muted">No escalation steps for this selection.</div>';
+  const checkId = getSelectedPolicyCheck();
+  const chain = getPolicyChain(checkId);
+  const steps = groupByLevel(chain);
+  if(!steps.length){
+    container.innerHTML = '<div class="muted">No escalation steps for this selection. Use Add Step or apply the project template.</div>';
     return;
   }
-  const rows = chain.map(e => {
+  container.innerHTML = steps.map(step => renderPolicyStep(step, checkId)).join('');
+  attachDragHandlers();
+}
+
+function renderPolicyStep(step, checkId){
+  const level = step.level;
+  const items = step.items;
+  const delay = items[0]?.delay_minutes ?? 0;
+  const eventTypes = items[0]?.event_types ?? '';
+  const scope = checkId ? `check ${checkId}` : 'project-wide';
+  const channels = items.map(e => {
     const target = e.target_type === 'rotation' ? `rotation:${e.rotation_id}` : (e.target_value || '');
     const enabled = e.enabled === false ? 'disabled' : 'enabled';
-    return `<div class="card"><div>level ${e.level} · ${e.target_type} · ${target} · delay ${e.delay_minutes}m · ${enabled}</div><button class="btn btn-secondary" onclick="deleteEscalation(${document.getElementById('projectId').value || '1'}, ${e.id})">Delete</button></div>`;
+    const toggleLabel = e.enabled === false ? 'Enable' : 'Disable';
+    return `<div class="row" style="margin-bottom:6px">
+      <div style="flex:1">${e.target_type} · ${target} · ${enabled}</div>
+      <button class="btn btn-secondary" onclick="toggleEscalation(${e.id}, ${e.enabled === false ? 'true' : 'false'})">${toggleLabel}</button>
+      <button class="btn btn-secondary" onclick="deleteEscalation(${getProjectId()}, ${e.id})">Delete</button>
+    </div>`;
   }).join('');
-  container.innerHTML = rows;
+  return `<div class="card policy-step" draggable="true" data-level="${level}">
+    <div class="row">
+      <div class="drag-handle" title="Drag to reorder">::</div>
+      <div style="flex:1"><strong>Step ${level + 1}</strong> (${scope})</div>
+    </div>
+    <div class="row">
+      <label>Delay (min): <input id="stepDelay-${level}" value="${delay}" style="width:120px"/></label>
+      <label>Event filter:
+        <select id="stepEvent-${level}" style="width:160px">
+          <option value="" ${eventTypes ? '' : 'selected'}>any</option>
+          <option value="down" ${eventTypes === 'down' ? 'selected' : ''}>down only</option>
+          <option value="degraded" ${eventTypes === 'degraded' ? 'selected' : ''}>degraded only</option>
+          <option value="down,degraded" ${eventTypes === 'down,degraded' ? 'selected' : ''}>down+degraded</option>
+        </select>
+      </label>
+      <button class="btn btn-secondary" onclick="saveStep(${level})">Save Step</button>
+      <button class="btn btn-secondary" onclick="deleteStep(${level})">Delete Step</button>
+    </div>
+    <div>${channels}</div>
+    <div class="row">
+      <select id="stepType-${level}">
+        <option value="rotation">rotation</option>
+        <option value="email">email</option>
+        <option value="sms">sms</option>
+      </select>
+      <input id="stepRotation-${level}" placeholder="Rotation ID" style="width:140px" />
+      <input id="stepTarget-${level}" placeholder="Target (email/phone)" style="width:220px" />
+      <button class="btn" onclick="addChannelToStep(${level})">Add Channel</button>
+    </div>
+  </div>`;
+}
+
+function attachDragHandlers(){
+  const steps = document.querySelectorAll('.policy-step');
+  steps.forEach(step => {
+    step.addEventListener('dragstart', (ev)=>{
+      policyDragLevel = parseInt(step.dataset.level);
+      ev.dataTransfer.effectAllowed = 'move';
+    });
+    step.addEventListener('dragover', (ev)=>{
+      ev.preventDefault();
+      ev.dataTransfer.dropEffect = 'move';
+    });
+    step.addEventListener('drop', (ev)=>{
+      ev.preventDefault();
+      const targetLevel = parseInt(step.dataset.level);
+      if(policyDragLevel === null || policyDragLevel === targetLevel) return;
+      reorderSteps(policyDragLevel, targetLevel);
+    });
+  });
+}
+
+async function reorderSteps(fromLevel, toLevel){
+  const pid = getProjectId();
+  const checkId = getSelectedPolicyCheck();
+  const chain = getPolicyChain(checkId);
+  const groups = groupByLevel(chain);
+  const levels = groups.map(g => g.level);
+  const fromIdx = levels.indexOf(fromLevel);
+  const toIdx = levels.indexOf(toLevel);
+  if(fromIdx < 0 || toIdx < 0) return;
+  const [moved] = levels.splice(fromIdx, 1);
+  levels.splice(toIdx, 0, moved);
+  const levelMap = {};
+  levels.forEach((lvl, idx) => { levelMap[lvl] = idx; });
+  for(const esc of chain){
+    const newLevel = levelMap[esc.level || 0];
+    if(newLevel !== (esc.level || 0)){
+      await updateEscalation(pid, esc.id, {level: newLevel});
+    }
+  }
+  await refreshOncall();
 }
 
 async function addPolicyStep(){
-  const pid = document.getElementById('projectId').value || '1';
-  const checkSel = document.getElementById('policyCheckSelect');
-  const checkId = checkSel && checkSel.value ? parseInt(checkSel.value) : null;
+  const pid = getProjectId();
+  const checkId = getSelectedPolicyCheck();
   const type = document.getElementById('policyType').value;
   const delay = parseInt(document.getElementById('policyDelay').value || '0') || 0;
   const rotationId = parseInt(document.getElementById('policyRotationId').value || '0') || null;
   const target = document.getElementById('policyTarget').value || null;
   const enabled = document.getElementById('policyEnabled').checked;
-  const chain = oncallEscalations.filter(e => (checkId ? e.check_id === checkId : e.check_id === null));
+  const eventTypes = document.getElementById('policyEventTypes') ? document.getElementById('policyEventTypes').value : null;
+  const chain = getPolicyChain(checkId);
   const maxLevel = chain.reduce((m, e) => Math.max(m, e.level || 0), -1);
   const level = maxLevel + 1;
   if(type === 'rotation' && !rotationId){ alert('Rotation ID required'); return; }
   if((type === 'email' || type === 'sms') && !target){ alert('Target required'); return; }
-  const payload = {check_id: checkId, level, delay_minutes: delay, target_type: type, rotation_id: rotationId, target_value: target, enabled};
+  const payload = {check_id: checkId, level, delay_minutes: delay, target_type: type, rotation_id: rotationId, target_value: target, enabled, event_types: eventTypes || null};
   const res = await fetch(`/projects/${pid}/oncall/escalations`, {method:'POST', headers: headersOncall(), body: JSON.stringify(payload)});
   if(!res.ok){ alert('Failed to add escalation'); return; }
   refreshOncall();
 }
 
+async function addChannelToStep(level){
+  const pid = getProjectId();
+  const checkId = getSelectedPolicyCheck();
+  const type = document.getElementById(`stepType-${level}`).value;
+  const rotationId = parseInt(document.getElementById(`stepRotation-${level}`).value || '0') || null;
+  const target = document.getElementById(`stepTarget-${level}`).value || null;
+  const delay = parseInt(document.getElementById(`stepDelay-${level}`).value || '0') || 0;
+  const eventTypes = document.getElementById(`stepEvent-${level}`).value || null;
+  if(type === 'rotation' && !rotationId){ alert('Rotation ID required'); return; }
+  if((type === 'email' || type === 'sms') && !target){ alert('Target required'); return; }
+  const payload = {check_id: checkId, level, delay_minutes: delay, target_type: type, rotation_id: rotationId, target_value: target, enabled: true, event_types: eventTypes || null};
+  const res = await fetch(`/projects/${pid}/oncall/escalations`, {method:'POST', headers: headersOncall(), body: JSON.stringify(payload)});
+  if(!res.ok){ alert('Failed to add channel'); return; }
+  refreshOncall();
+}
+
+async function saveStep(level){
+  const pid = getProjectId();
+  const delay = parseInt(document.getElementById(`stepDelay-${level}`).value || '0') || 0;
+  const eventTypes = document.getElementById(`stepEvent-${level}`).value || null;
+  const checkId = getSelectedPolicyCheck();
+  const chain = getPolicyChain(checkId).filter(e => (e.level || 0) === level);
+  for(const esc of chain){
+    await updateEscalation(pid, esc.id, {delay_minutes: delay, event_types: eventTypes || null});
+  }
+  refreshOncall();
+}
+
+async function deleteStep(level){
+  const pid = getProjectId();
+  const checkId = getSelectedPolicyCheck();
+  const chain = getPolicyChain(checkId).filter(e => (e.level || 0) === level);
+  if(!chain.length) return;
+  if(!confirm(`Delete step ${level + 1} and all channels?`)) return;
+  for(const esc of chain){
+    await deleteEscalation(pid, esc.id, false);
+  }
+  refreshOncall();
+}
+
 async function addRotation(){
-  const pid = document.getElementById('projectId').value || '1';
+  const pid = getProjectId();
   const payload = {
     name: document.getElementById('rotName').value,
     interval_minutes: parseInt(document.getElementById('rotInterval').value || '0') || 1440
@@ -130,7 +289,7 @@ async function addRotation(){
 }
 
 async function addMember(){
-  const pid = document.getElementById('projectId').value || '1';
+  const pid = getProjectId();
   const rotId = parseInt(document.getElementById('memberRotationId').value || '0');
   if(!rotId){ alert('Rotation ID required'); return; }
   const payload = {
@@ -146,7 +305,7 @@ async function addMember(){
 }
 
 async function addEscalation(){
-  const pid = document.getElementById('projectId').value || '1';
+  const pid = getProjectId();
   const payload = {
     check_id: parseInt(document.getElementById('escCheckId').value || '0') || null,
     level: parseInt(document.getElementById('escLevel').value || '0') || 0,
@@ -167,16 +326,82 @@ async function deleteRotation(pid, rid){
   refreshOncall();
 }
 
-async function deleteEscalation(pid, eid){
-  if(!confirm('Delete escalation '+eid+'?')) return;
+async function deleteEscalation(pid, eid, confirmDelete=true){
+  if(confirmDelete && !confirm('Delete escalation '+eid+'?')) return;
   const res = await fetch(`/projects/${pid}/oncall/escalations/${eid}`, {method:'DELETE', headers: headersOncall()});
   if(!res.ok){ alert('Delete failed'); return; }
-  refreshOncall();
+  if(confirmDelete) refreshOncall();
 }
 
 async function closeAlert(pid, aid){
   const res = await fetch(`/projects/${pid}/oncall/alerts/${aid}/close`, {method:'POST', headers: headersOncall()});
   if(!res.ok){ alert('Close failed'); return; }
+  refreshOncall();
+}
+
+async function updateEscalation(pid, eid, payload){
+  const res = await fetch(`/projects/${pid}/oncall/escalations/${eid}`, {method:'PATCH', headers: headersOncall(), body: JSON.stringify(payload)});
+  if(!res.ok){
+    const msg = await res.text();
+    alert(`Update failed: ${msg}`);
+    return false;
+  }
+  return true;
+}
+
+async function toggleEscalation(eid, enabled){
+  const pid = getProjectId();
+  await updateEscalation(pid, eid, {enabled});
+  refreshOncall();
+}
+
+async function renderPolicyPreview(){
+  const preview = document.getElementById('policyPreview');
+  if(!preview) return;
+  const pid = getProjectId();
+  const checkId = getSelectedPolicyCheck();
+  const eventType = document.getElementById('policyPreviewEvent')?.value || '';
+  const params = new URLSearchParams();
+  if(checkId) params.set('check_id', checkId);
+  if(eventType) params.set('event_type', eventType);
+  const res = await fetch(`/projects/${pid}/oncall/escalations/preview?${params.toString()}`, {headers: headersOncall()});
+  if(!res.ok){
+    preview.textContent = 'Failed to load preview.';
+    return;
+  }
+  const data = await res.json();
+  if(!data.steps || !data.steps.length){
+    preview.textContent = 'No steps found for this selection.';
+    return;
+  }
+  const html = data.steps.map(step => {
+    const channels = step.channels.map(c => {
+      const target = c.target_type === 'rotation' ? `rotation:${c.rotation_id}` : (c.target_value || '');
+      return `<div class="muted">${c.target_type} · ${target}</div>`;
+    }).join('');
+    const filt = step.event_types ? `events:${step.event_types}` : 'events:any';
+    return `<div class="card"><div>level ${step.level} · delay ${step.delay_minutes}m · ${filt}</div>${channels}</div>`;
+  }).join('');
+  preview.innerHTML = html;
+}
+
+async function applyProjectTemplate(){
+  const pid = getProjectId();
+  const checkId = getSelectedPolicyCheck();
+  if(!checkId){ alert('Select a check to apply the project template.'); return; }
+  const payload = {source_check_id: null, target_check_id: checkId, overwrite: true};
+  const res = await fetch(`/projects/${pid}/oncall/escalations/apply-template`, {method:'POST', headers: headersOncall(), body: JSON.stringify(payload)});
+  if(!res.ok){ alert('Failed to apply template'); return; }
+  refreshOncall();
+}
+
+async function saveProjectTemplate(){
+  const pid = getProjectId();
+  const checkId = getSelectedPolicyCheck();
+  if(!checkId){ alert('Select a check to save as the project template.'); return; }
+  const payload = {source_check_id: checkId, target_check_id: null, overwrite: true};
+  const res = await fetch(`/projects/${pid}/oncall/escalations/apply-template`, {method:'POST', headers: headersOncall(), body: JSON.stringify(payload)});
+  if(!res.ok){ alert('Failed to save template'); return; }
   refreshOncall();
 }
 
@@ -188,6 +413,14 @@ document.addEventListener('DOMContentLoaded', ()=>{
   document.getElementById('policyAddBtn').addEventListener('click', addPolicyStep);
   const policyRefresh = document.getElementById('policyRefreshBtn');
   if(policyRefresh) policyRefresh.addEventListener('click', renderPolicyChain);
+  const policyPreviewBtn = document.getElementById('policyPreviewBtn');
+  if(policyPreviewBtn) policyPreviewBtn.addEventListener('click', renderPolicyPreview);
+  const policyPreviewEvent = document.getElementById('policyPreviewEvent');
+  if(policyPreviewEvent) policyPreviewEvent.addEventListener('change', renderPolicyPreview);
+  const policyApply = document.getElementById('policyApplyTemplateBtn');
+  if(policyApply) policyApply.addEventListener('click', applyProjectTemplate);
+  const policySave = document.getElementById('policySaveTemplateBtn');
+  if(policySave) policySave.addEventListener('click', saveProjectTemplate);
   document.getElementById('escFilterBtn').addEventListener('click', refreshOncall);
   document.getElementById('escClearFilterBtn').addEventListener('click', ()=>{
     document.getElementById('escFilterCheckId').value = '';
@@ -209,7 +442,10 @@ document.addEventListener('DOMContentLoaded', ()=>{
   }
   const policySelect = document.getElementById('policyCheckSelect');
   if(policySelect){
-    policySelect.addEventListener('change', renderPolicyChain);
+    policySelect.addEventListener('change', ()=>{
+      renderPolicyChain();
+      renderPolicyPreview();
+    });
   }
   const apiKey = document.getElementById('apiKey');
   if(apiKey){

@@ -1088,6 +1088,45 @@ def _oncall_enabled_for_check(project: Project, check: Check) -> bool:
     return bool(getattr(project, "oncall_enabled", False))
 
 
+def _event_type_matches(esc: OnCallEscalation, event_type: str) -> bool:
+    raw = getattr(esc, "event_types", None)
+    if not raw:
+        return True
+    parts = [p.strip().lower() for p in raw.split(",") if p.strip()]
+    return event_type.lower() in parts
+
+
+def _load_oncall_escalations(session: Session, project: Project, check: Check, event_type: str):
+    def _fetch(cid):
+        return session.exec(
+            select(OnCallEscalation)
+            .where(
+                OnCallEscalation.project_id == project.id,
+                OnCallEscalation.enabled == True,
+                OnCallEscalation.check_id == cid,
+            )
+            .order_by(OnCallEscalation.level)
+        ).all()
+
+    escs = _fetch(check.id)
+    escs = [e for e in escs if _event_type_matches(e, event_type)]
+    if not escs:
+        escs = _fetch(None)
+        escs = [e for e in escs if _event_type_matches(e, event_type)]
+    return escs
+
+
+def _group_escalations_by_level(escalations):
+    steps = {}
+    for esc in escalations:
+        lvl = esc.level or 0
+        steps.setdefault(lvl, []).append(esc)
+    ordered = []
+    for lvl in sorted(steps.keys()):
+        ordered.append((lvl, steps[lvl]))
+    return ordered
+
+
 def _send_oncall_target(session: Session, project: Project, check: Check, alert: OnCallAlert, esc: OnCallEscalation, now: datetime) -> bool:
     msg = f"[LastPing] {alert.event_type.upper()}: {project.name}/{check.name} {alert.message or ''}".strip()
     try:
@@ -1118,25 +1157,7 @@ def _send_oncall_target(session: Session, project: Project, check: Check, alert:
 def _ensure_oncall_alert(session: Session, project: Project, check: Check, event_type: str, message: Optional[str], now: datetime):
     if not _oncall_enabled_for_check(project, check):
         return
-    escs = session.exec(
-        select(OnCallEscalation)
-        .where(
-            OnCallEscalation.project_id == project.id,
-            OnCallEscalation.enabled == True,
-            OnCallEscalation.check_id == check.id,
-        )
-        .order_by(OnCallEscalation.level)
-    ).all()
-    if not escs:
-        escs = session.exec(
-            select(OnCallEscalation)
-            .where(
-                OnCallEscalation.project_id == project.id,
-                OnCallEscalation.enabled == True,
-                OnCallEscalation.check_id == None,
-            )
-            .order_by(OnCallEscalation.level)
-        ).all()
+    escs = _load_oncall_escalations(session, project, check, event_type)
     if not escs:
         return
     existing = session.exec(select(OnCallAlert).where(OnCallAlert.project_id == project.id, OnCallAlert.check_id == check.id, OnCallAlert.status == "open")).first()
@@ -1184,42 +1205,30 @@ def _process_oncall_alerts(session: Session, now: datetime):
             session.add(alert)
             session.commit()
             continue
-        escs = session.exec(
-            select(OnCallEscalation)
-            .where(
-                OnCallEscalation.project_id == project.id,
-                OnCallEscalation.enabled == True,
-                OnCallEscalation.check_id == check.id,
-            )
-            .order_by(OnCallEscalation.level)
-        ).all()
-        if not escs:
-            escs = session.exec(
-                select(OnCallEscalation)
-                .where(
-                    OnCallEscalation.project_id == project.id,
-                    OnCallEscalation.enabled == True,
-                    OnCallEscalation.check_id == None,
-                )
-                .order_by(OnCallEscalation.level)
-            ).all()
-        if not escs or alert.escalation_level >= len(escs):
+        escs = _load_oncall_escalations(session, project, check, alert.event_type)
+        steps = _group_escalations_by_level(escs)
+        if not steps or alert.escalation_level >= len(steps):
             alert.status = "closed"
             session.add(alert)
             session.commit()
             continue
-        esc = escs[alert.escalation_level]
-        ok = _send_oncall_target(session, project, check, alert, esc, now)
-        if ok:
+        _, step_escalations = steps[alert.escalation_level]
+        step_ok = False
+        max_delay = 0
+        for esc in step_escalations:
+            ok = _send_oncall_target(session, project, check, alert, esc, now)
+            step_ok = step_ok or ok
+            max_delay = max(max_delay, esc.delay_minutes or 0)
+            if ok:
+                try:
+                    al = AuditLog(actor="worker", action="oncall_notify", target_type="oncall_escalation", target_id=esc.id, details=f"alert_id={alert.id}", actor_ip=None, user_agent=None)
+                    session.add(al)
+                except Exception:
+                    pass
+        if step_ok:
             alert.last_notified_at = now
             alert.escalation_level = alert.escalation_level + 1
-            delay = esc.delay_minutes or 0
-            alert.next_escalation_at = now + timedelta(minutes=max(delay, 1))
-            try:
-                al = AuditLog(actor="worker", action="oncall_notify", target_type="oncall_escalation", target_id=esc.id, details=f"alert_id={alert.id}", actor_ip=None, user_agent=None)
-                session.add(al)
-            except Exception:
-                pass
+            alert.next_escalation_at = now + timedelta(minutes=max(max_delay, 1))
         else:
             alert.next_escalation_at = now + timedelta(minutes=5)
         session.add(alert)

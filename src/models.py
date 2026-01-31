@@ -408,6 +408,8 @@ class OnCallEscalation(SQLModel, table=True):
     rotation_id: Optional[int] = Field(default=None, foreign_key="oncall_rotation.id")
     target_value: Optional[str] = None
     enabled: bool = Field(default=True)
+    # Optional comma-separated event filters, e.g. "down" or "down,degraded"
+    event_types: Optional[str] = Field(default=None)
 
 
 class OnCallAlert(SQLModel, table=True):

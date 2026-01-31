@@ -539,22 +539,43 @@ def oncall_page(project_id: int = Path(..., ge=1)):
           <option value="">(project-wide)</option>
         </select>
       </label>
+      <label>Preview event:
+        <select id="policyPreviewEvent" style="width:140px">
+          <option value="">any</option>
+          <option value="down">down</option>
+          <option value="degraded">degraded</option>
+        </select>
+      </label>
       <button id="policyRefreshBtn" class="btn btn-secondary">Refresh Chain</button>
+      <button id="policyPreviewBtn" class="btn btn-secondary">Preview</button>
+      <button id="policyApplyTemplateBtn" class="btn btn-secondary">Apply Project Template</button>
+      <button id="policySaveTemplateBtn" class="btn btn-secondary">Save as Project Template</button>
     </div>
+    <div class="muted">Drag steps to reorder. Add multiple channels per step (rotation + email + SMS). Use event filters to target down vs degraded alerts.</div>
     <div id="policyChain" class="muted">Select a check to view the escalation chain.</div>
+    <div id="policyPreview" class="card">Preview will show the effective chain used for the selected event.</div>
+    <h3>Add Step</h3>
     <div class="row">
+      <label>Event filter:
+        <select id="policyEventTypes" style="width:160px">
+          <option value="">any</option>
+          <option value="down">down only</option>
+          <option value="degraded">degraded only</option>
+          <option value="down,degraded">down+degraded</option>
+        </select>
+      </label>
+      <input id="policyDelay" placeholder="Delay (min)" style="width:120px" />
       <select id="policyType">
         <option value="rotation">rotation</option>
         <option value="email">email</option>
         <option value="sms">sms</option>
       </select>
-      <input id="policyDelay" placeholder="Delay (min)" style="width:120px" />
       <input id="policyRotationId" placeholder="Rotation ID" style="width:140px" />
       <input id="policyTarget" placeholder="Target (email/phone)" style="width:220px" />
       <label><input type="checkbox" id="policyEnabled" checked /> Enabled</label>
       <button id="policyAddBtn" class="btn">Add Step</button>
     </div>
-    <div class="muted">Levels auto-increment for the selected check. Delete and re-add to change order.</div>
+    <div class="muted">Use Add Step to append a new escalation level for the selected scope.</div>
     <h2>Open Alerts</h2>
     <div id="alerts"></div>
     <script src="/static/js/oncall.js"></script>

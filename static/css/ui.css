@@ -15,3 +15,5 @@ th,td{padding:8px;border:1px solid #eee}
 .badge{display:inline-block;padding:2px 6px;border-radius:6px;font-size:0.8em;margin-left:6px}
 .status-up{background:#e6f4ea;color:#1f7a3b;border:1px solid #b7e2c3}
 .status-down{background:#fde7e7;color:#b33a3a;border:1px solid #f6b3b3}
+.policy-step{border:1px dashed #d7d7d7}
+.drag-handle{cursor:grab;font-weight:bold;padding:4px 6px;background:#eee;border-radius:6px}
