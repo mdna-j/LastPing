@@ -11,6 +11,16 @@ c = HeartbeatClient("https://example.com", "API_KEY")
 c.send(project_id=1, name="my-check")
 ```
 
+Client context manager example
+
+```python
+from lastping_sdk import HeartbeatClient
+
+c = HeartbeatClient("https://example.com", "API_KEY")
+with c.heartbeat_context(1, "my-check"):
+    run_job()
+```
+
 Decorator example
 
 ```python
