@@ -7,6 +7,7 @@ drive scheduling and detection logic.
 """
 
 from typing import List, Optional, Literal
+import json
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status, Header, Request, Path, Body
@@ -20,6 +21,20 @@ from ..schemas import StrictBaseModel
 
 
 router = APIRouter(prefix="/projects/{project_id}/checks", tags=["checks"])
+
+
+def _diff_details(before: dict, after: dict) -> Optional[str]:
+    changes = {}
+    for key, old_val in before.items():
+        new_val = after.get(key)
+        if old_val != new_val:
+            changes[key] = {"from": old_val, "to": new_val}
+    if not changes:
+        return None
+    try:
+        return json.dumps(changes, default=str)
+    except Exception:
+        return str(changes)
 
 
 class CheckCreate(StrictBaseModel):
@@ -223,6 +238,35 @@ def update_check(project_id: int = Path(..., ge=1), check_id: int = Path(..., ge
     check = session.get(CheckModel, check_id)
     if not check or check.project_id != project_id:
         raise HTTPException(status_code=404, detail="Check not found")
+    before = {
+        "name": check.name,
+        "url": check.url,
+        "interval": check.interval,
+        "expected_interval": check.expected_interval,
+        "grace_period": check.grace_period,
+        "host": check.host,
+        "port": check.port,
+        "dns_record_type": check.dns_record_type,
+        "latency_threshold_ms": check.latency_threshold_ms,
+        "region": check.region,
+        "alert_enabled": check.alert_enabled,
+        "alert_after": check.alert_after,
+        "alert_cooldown": check.alert_cooldown,
+        "alert_sms_enabled": check.alert_sms_enabled,
+        "alert_oncall_enabled": check.alert_oncall_enabled,
+        "alert_slack_enabled": check.alert_slack_enabled,
+        "alert_discord_enabled": check.alert_discord_enabled,
+        "alert_pagerduty_enabled": check.alert_pagerduty_enabled,
+        "alert_webhook_enabled": check.alert_webhook_enabled,
+        "alert_sms_to": check.alert_sms_to,
+        "alert_oncall_email": check.alert_oncall_email,
+        "alert_slack_webhook_url": check.alert_slack_webhook_url,
+        "alert_discord_webhook_url": check.alert_discord_webhook_url,
+        "alert_pagerduty_integration_key": check.alert_pagerduty_integration_key,
+        "alert_generic_webhook_url": check.alert_generic_webhook_url,
+        "escalation_after_minutes": check.escalation_after_minutes,
+        "escalation_cooldown_seconds": check.escalation_cooldown_seconds,
+    }
     if payload.name is not None:
         # ensure name uniqueness
         existing = session.exec(select(CheckModel).where(CheckModel.project_id == project_id, CheckModel.name == payload.name, CheckModel.id != check_id)).first()
@@ -286,7 +330,36 @@ def update_check(project_id: int = Path(..., ge=1), check_id: int = Path(..., ge
     session.refresh(check)
     try:
         actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
-        al = AuditLog(actor=actor, action="update_check", target_type="check", target_id=check.id, details=None, actor_ip=actor_ip, user_agent=user_agent)
+        after = {
+            "name": check.name,
+            "url": check.url,
+            "interval": check.interval,
+            "expected_interval": check.expected_interval,
+            "grace_period": check.grace_period,
+            "host": check.host,
+            "port": check.port,
+            "dns_record_type": check.dns_record_type,
+            "latency_threshold_ms": check.latency_threshold_ms,
+            "region": check.region,
+            "alert_enabled": check.alert_enabled,
+            "alert_after": check.alert_after,
+            "alert_cooldown": check.alert_cooldown,
+            "alert_sms_enabled": check.alert_sms_enabled,
+            "alert_oncall_enabled": check.alert_oncall_enabled,
+            "alert_slack_enabled": check.alert_slack_enabled,
+            "alert_discord_enabled": check.alert_discord_enabled,
+            "alert_pagerduty_enabled": check.alert_pagerduty_enabled,
+            "alert_webhook_enabled": check.alert_webhook_enabled,
+            "alert_sms_to": check.alert_sms_to,
+            "alert_oncall_email": check.alert_oncall_email,
+            "alert_slack_webhook_url": check.alert_slack_webhook_url,
+            "alert_discord_webhook_url": check.alert_discord_webhook_url,
+            "alert_pagerduty_integration_key": check.alert_pagerduty_integration_key,
+            "alert_generic_webhook_url": check.alert_generic_webhook_url,
+            "escalation_after_minutes": check.escalation_after_minutes,
+            "escalation_cooldown_seconds": check.escalation_cooldown_seconds,
+        }
+        al = AuditLog(actor=actor, action="update_check", target_type="check", target_id=check.id, details=_diff_details(before, after), actor_ip=actor_ip, user_agent=user_agent)
         session.add(al)
         session.commit()
     except Exception:
@@ -362,6 +435,10 @@ def set_check_maintenance(project_id: int = Path(..., ge=1), check_id: int = Pat
     check = session.get(CheckModel, check_id)
     if not check or check.project_id != project_id:
         raise HTTPException(status_code=404, detail="Check not found")
+    before = {
+        "maintenance_starts_at": check.maintenance_starts_at,
+        "maintenance_ends_at": check.maintenance_ends_at,
+    }
     check.maintenance_starts_at = payload.maintenance_starts_at
     check.maintenance_ends_at = payload.maintenance_ends_at
     session.add(check)
@@ -369,7 +446,11 @@ def set_check_maintenance(project_id: int = Path(..., ge=1), check_id: int = Pat
     session.refresh(check)
     try:
         actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
-        al = AuditLog(actor=actor, action="set_check_maintenance", target_type="check", target_id=check.id, details=None, actor_ip=actor_ip, user_agent=user_agent)
+        after = {
+            "maintenance_starts_at": check.maintenance_starts_at,
+            "maintenance_ends_at": check.maintenance_ends_at,
+        }
+        al = AuditLog(actor=actor, action="set_check_maintenance", target_type="check", target_id=check.id, details=_diff_details(before, after), actor_ip=actor_ip, user_agent=user_agent)
         session.add(al)
         session.commit()
     except Exception:

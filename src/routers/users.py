@@ -67,6 +67,20 @@ def login(payload: LoginIn, session: Session = Depends(get_session)):
     ut = UserToken(user_id=user.id, token=token, created_at=datetime.utcnow(), expires_at=expires)
     session.add(ut)
     session.commit()
+    try:
+        al = AuditLog(
+            actor=f"user:{user.id}",
+            action="user_login",
+            target_type="user",
+            target_id=user.id,
+            details=f"token_expires_at={expires.isoformat()}",
+            actor_ip=None,
+            user_agent=None,
+        )
+        session.add(al)
+        session.commit()
+    except Exception:
+        pass
     return TokenOut(access_token=token, expires_at=expires)
 
 
@@ -103,7 +117,7 @@ def my_role(project_id: int = Path(..., ge=1), authorization: Optional[str] = He
 
 
 @router.get("/projects/{project_id}/membership")
-def list_members(project_id: int = Path(..., ge=1), authorization: Optional[str] = Header(None), session: Session = Depends(get_session)):
+def list_members(project_id: int = Path(..., ge=1), request: Request = None, authorization: Optional[str] = Header(None), session: Session = Depends(get_session)):
     # only allow project owners to list members
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token")
@@ -122,6 +136,13 @@ def list_members(project_id: int = Path(..., ge=1), authorization: Optional[str]
     for m in members:
         u = session.get(User, m.user_id)
         out.append({"id": u.id, "email": u.email, "role": m.role})
+    try:
+        actor, actor_ip, user_agent = get_audit_context(request, authorization, None, session)
+        al = AuditLog(actor=actor, action="list_project_members", target_type="project", target_id=project_id, details=f"count={len(out)}", actor_ip=actor_ip, user_agent=user_agent)
+        session.add(al)
+        session.commit()
+    except Exception:
+        pass
     return out
 
 
@@ -152,6 +173,13 @@ def add_member(project_id: int = Path(..., ge=1), payload: MembershipIn = Body(.
         session.add(target)
         session.commit()
         session.refresh(target)
+        try:
+            actor, actor_ip, user_agent = get_audit_context(request, authorization, None, session)
+            al = AuditLog(actor=actor, action="invite_user", target_type="user", target_id=target.id, details=f"email={target.email}", actor_ip=actor_ip, user_agent=user_agent)
+            session.add(al)
+            session.commit()
+        except Exception:
+            pass
 
     # ensure membership
     existing = session.exec(select(ProjectMembership).where(ProjectMembership.user_id == target.id, ProjectMembership.project_id == project_id)).first()

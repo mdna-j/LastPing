@@ -20,9 +20,24 @@ from ..security import generate_api_key, hash_api_key
 from ..deps import limit_by_api_key, get_audit_context, limit_public_requests
 from ..schemas import StrictBaseModel
 import os
+import json
 
 
 router = APIRouter(prefix="/projects", tags=["projects"])
+
+
+def _diff_details(before: dict, after: dict) -> Optional[str]:
+    changes = {}
+    for key, old_val in before.items():
+        new_val = after.get(key)
+        if old_val != new_val:
+            changes[key] = {"from": old_val, "to": new_val}
+    if not changes:
+        return None
+    try:
+        return json.dumps(changes, default=str)
+    except Exception:
+        return str(changes)
 
 
 class ProjectCreate(StrictBaseModel):
@@ -132,6 +147,12 @@ def update_project_webhooks(project_id: int = Path(..., ge=1), payload: WebhookU
     project = session.get(ProjectModel, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+    before = {
+        "discord_webhook_url": project.discord_webhook_url,
+        "slack_webhook_url": project.slack_webhook_url,
+        "pagerduty_integration_key": project.pagerduty_integration_key,
+        "generic_webhook_url": project.generic_webhook_url,
+    }
     project.discord_webhook_url = payload.discord_webhook_url
     project.slack_webhook_url = payload.slack_webhook_url
     project.pagerduty_integration_key = payload.pagerduty_integration_key
@@ -141,7 +162,13 @@ def update_project_webhooks(project_id: int = Path(..., ge=1), payload: WebhookU
     session.refresh(project)
     try:
         actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
-        al = AuditLog(actor=actor, action="update_project_webhooks", target_type="project", target_id=project_id, details=None, actor_ip=actor_ip, user_agent=user_agent)
+        after = {
+            "discord_webhook_url": project.discord_webhook_url,
+            "slack_webhook_url": project.slack_webhook_url,
+            "pagerduty_integration_key": project.pagerduty_integration_key,
+            "generic_webhook_url": project.generic_webhook_url,
+        }
+        al = AuditLog(actor=actor, action="update_project_webhooks", target_type="project", target_id=project_id, details=_diff_details(before, after), actor_ip=actor_ip, user_agent=user_agent)
         session.add(al)
         session.commit()
     except Exception:
@@ -162,6 +189,10 @@ def set_project_maintenance(project_id: int = Path(..., ge=1), payload: Maintena
     project = session.get(ProjectModel, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+    before = {
+        "maintenance_starts_at": project.maintenance_starts_at,
+        "maintenance_ends_at": project.maintenance_ends_at,
+    }
     project.maintenance_starts_at = payload.maintenance_starts_at
     project.maintenance_ends_at = payload.maintenance_ends_at
     session.add(project)
@@ -169,7 +200,11 @@ def set_project_maintenance(project_id: int = Path(..., ge=1), payload: Maintena
     session.refresh(project)
     try:
         actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
-        al = AuditLog(actor=actor, action="set_project_maintenance", target_type="project", target_id=project_id, details=None, actor_ip=actor_ip, user_agent=user_agent)
+        after = {
+            "maintenance_starts_at": project.maintenance_starts_at,
+            "maintenance_ends_at": project.maintenance_ends_at,
+        }
+        al = AuditLog(actor=actor, action="set_project_maintenance", target_type="project", target_id=project_id, details=_diff_details(before, after), actor_ip=actor_ip, user_agent=user_agent)
         session.add(al)
         session.commit()
     except Exception:
@@ -270,6 +305,7 @@ def set_project_slo(project_id: int = Path(..., ge=1), payload: SloSettings = Bo
     project = session.get(ProjectModel, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+    before = {"slo_target": project.slo_target, "sla_target": project.sla_target}
     if payload.slo_target is not None:
         project.slo_target = payload.slo_target
     if payload.sla_target is not None:
@@ -279,7 +315,8 @@ def set_project_slo(project_id: int = Path(..., ge=1), payload: SloSettings = Bo
     session.refresh(project)
     try:
         actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
-        al = AuditLog(actor=actor, action="set_project_slo", target_type="project", target_id=project_id, details=None, actor_ip=actor_ip, user_agent=user_agent)
+        after = {"slo_target": project.slo_target, "sla_target": project.sla_target}
+        al = AuditLog(actor=actor, action="set_project_slo", target_type="project", target_id=project_id, details=_diff_details(before, after), actor_ip=actor_ip, user_agent=user_agent)
         session.add(al)
         session.commit()
     except Exception:
@@ -305,6 +342,12 @@ def set_project_alert_settings(project_id: int = Path(..., ge=1), payload: Alert
     project = session.get(ProjectModel, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+    before = {
+        "sms_enabled": project.sms_enabled,
+        "sms_to": project.sms_to,
+        "oncall_enabled": project.oncall_enabled,
+        "oncall_email": project.oncall_email,
+    }
     if payload.sms_enabled is not None:
         project.sms_enabled = payload.sms_enabled
     if payload.sms_to is not None:
@@ -318,7 +361,13 @@ def set_project_alert_settings(project_id: int = Path(..., ge=1), payload: Alert
     session.refresh(project)
     try:
         actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
-        al = AuditLog(actor=actor, action="set_project_alert_settings", target_type="project", target_id=project_id, details=None, actor_ip=actor_ip, user_agent=user_agent)
+        after = {
+            "sms_enabled": project.sms_enabled,
+            "sms_to": project.sms_to,
+            "oncall_enabled": project.oncall_enabled,
+            "oncall_email": project.oncall_email,
+        }
+        al = AuditLog(actor=actor, action="set_project_alert_settings", target_type="project", target_id=project_id, details=_diff_details(before, after), actor_ip=actor_ip, user_agent=user_agent)
         session.add(al)
         session.commit()
     except Exception:
