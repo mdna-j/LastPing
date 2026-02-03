@@ -38,3 +38,21 @@ try (LastPingClient.HeartbeatContext ctx = client.heartbeatContext(1, "my-check"
     // do work
 }
 ```
+
+## Build (Gradle)
+
+```
+./gradlew build
+```
+
+Publish locally:
+
+```
+./gradlew publishToMavenLocal
+```
+
+## Build (Maven)
+
+```
+mvn -q -f pom.xml package
+```
