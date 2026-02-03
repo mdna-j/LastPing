@@ -1,6 +1,6 @@
-# LastPing Java SDK (stub)
+# LastPing Java SDK
 
-This is a minimal stub to show how a Java client could call the LastPing API.
+This is a minimal Java client for the LastPing API.
 It is not packaged or published yet.
 
 ## Example
@@ -16,10 +16,25 @@ client.sendHeartbeat(1, "my-check");
 client.sendEvent(1, "my-check", "down", "exception: timeout");
 ```
 
+## Send with timestamp
+
+```
+client.sendHeartbeat(1, "my-check", "2026-02-03T12:00:00Z");
+client.sendEvent(1, "my-check", "down", "timeout", "2026-02-03T12:01:00Z");
+```
+
 ## Wrap a job with error capture
 
 ```
 client.runWithHeartbeat(1, "my-check", () -> {
     // do work
 }, true, "down");
+```
+
+## Try-with-resources context
+
+```
+try (LastPingClient.HeartbeatContext ctx = client.heartbeatContext(1, "my-check")) {
+    // do work
+}
 ```
