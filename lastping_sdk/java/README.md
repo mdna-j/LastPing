@@ -56,3 +56,10 @@ Publish locally:
 ```
 mvn -q -f pom.xml package
 ```
+
+## Publish to GitHub Packages (Maven)
+
+```
+mvn -q -f pom.xml deploy -DskipTests \
+  -DaltDeploymentRepository=github::https://maven.pkg.github.com/<OWNER>/<REPO>
+```
