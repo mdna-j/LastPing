@@ -89,6 +89,24 @@ If you want the CI to run async tests, install dev requirements which include `a
 pip install -r requirements.txt
 ```
 
+**Java SDK publish guide**
+
+The Java SDK lives in `lastping_sdk/java` and can be built with Gradle or Maven.
+
+Build locally:
+
+```bash
+cd lastping_sdk/java
+./gradlew build
+# or
+mvn -q -f pom.xml package
+```
+
+Publish to GitHub Packages on tags:
+
+- Create a tag like `java-sdk-v0.1.1` and push it.
+- The workflow `.github/workflows/java_sdk_ci.yml` will publish to GitHub Packages.
+
 **Tests**
 
 Unit tests live under `tests/`. Run `python -m pytest -q` to run them locally. The project includes

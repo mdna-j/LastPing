@@ -1,7 +1,7 @@
 # LastPing Java SDK
 
 This is a minimal Java client for the LastPing API.
-It is not packaged or published yet.
+See `../CHANGELOG.md` for release notes.
 
 ## Example
 

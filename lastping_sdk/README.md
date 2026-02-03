@@ -1,6 +1,7 @@
 # LastPing Python SDK (minimal)
 
 Small helper for sending heartbeats to a LastPing server.
+See `CHANGELOG.md` for release notes.
 
 Quick example
 

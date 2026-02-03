@@ -144,7 +144,7 @@ public class LastPingClient {
         }
     }
 
-    private static String escapeJson(String value) {
+    static String escapeJson(String value) {
         if (value == null) {
             return "";
         }
@@ -154,7 +154,7 @@ public class LastPingClient {
                 .replace("\r", "\\r");
     }
 
-    private static String formatException(Exception exc, boolean includeTraceback) {
+    static String formatException(Exception exc, boolean includeTraceback) {
         if (!includeTraceback) {
             return "exception: " + exc.getClass().getSimpleName() + ": " + exc.getMessage();
         }

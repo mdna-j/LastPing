@@ -31,8 +31,10 @@ jobs:
           if [ -f "./gradlew" ]; then
             chmod +x ./gradlew
             ./gradlew build
-          else
+          elif command -v gradle >/dev/null 2>&1; then
             gradle build
+          else
+            echo "Gradle not available; skipping Gradle build."
           fi
 
       - name: Build with Maven
@@ -63,8 +65,10 @@ jobs:
           if [ -f "./gradlew" ]; then
             chmod +x ./gradlew
             ./gradlew publish
-          else
+          elif command -v gradle >/dev/null 2>&1; then
             gradle publish
+          else
+            echo "Gradle not available; skipping Gradle publish."
           fi
 
       - name: Publish to GitHub Packages (Maven)

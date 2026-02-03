@@ -4,7 +4,7 @@ plugins {
 }
 
 group = 'lastping'
-version = '0.1.0'
+version = '0.1.1'
 
 java {
     sourceCompatibility = JavaVersion.VERSION_1_8
@@ -13,6 +13,14 @@ java {
 
 repositories {
     mavenCentral()
+}
+
+dependencies {
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+}
+
+test {
+    useJUnitPlatform()
 }
 
 publishing {
