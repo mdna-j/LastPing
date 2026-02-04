@@ -3,12 +3,19 @@ from typing import Optional, Dict, List
 import re
 import math
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Path
+from fastapi import APIRouter, Depends, HTTPException, Query, Path, Body
+from pydantic import BaseModel, conint
 from sqlmodel import Session, select
 
 from ..db import get_session
-from ..models import Event, Check, Project, Incident
+from ..models import Event, Check, Project, Incident, PredictiveModel
 from ..analytics_ml import find_similar_incidents, cluster_incidents
+from ..predictive_models import (
+    MODEL_TYPE_SEASONAL,
+    list_active_models,
+    predictive_warnings_from_models,
+    train_seasonal_hourly_models,
+)
 from ..deps import require_project_api_key
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["analytics"])
@@ -56,6 +63,13 @@ def _linear_forecast(values: List[float]) -> tuple[float, float, float]:
     intercept = y_mean - slope * x_mean
     next_val = slope * n + intercept
     return slope, intercept, next_val
+
+
+class PredictiveTrainIn(BaseModel):
+    check_id: Optional[int] = None
+    days: conint(ge=1, le=365) = 30
+    min_events: conint(ge=1, le=10000) = 10
+    model_type: str = MODEL_TYPE_SEASONAL
 
 
 @router.get("/analytics/failures")
@@ -357,11 +371,34 @@ def predictive_alerts(
     recent_hours: int = Query(24, ge=6, le=168),
     min_events: int = Query(3, ge=1, le=200),
     ratio_threshold: float = Query(2.0, ge=1.1, le=20.0),
+    z_threshold: float = Query(2.0, ge=0.5, le=10.0),
     session: Session = Depends(get_session),
     _proj: Project = Depends(require_project_api_key),
 ):
     """Forecast next-hour failure volume using a simple linear trend."""
     now = datetime.utcnow()
+
+    models = list_active_models(session, project_id)
+    if models:
+        warnings = predictive_warnings_from_models(
+            session=session,
+            project_id=project_id,
+            now=now,
+            recent_hours=recent_hours,
+            min_events=min_events,
+            z_threshold=z_threshold,
+        )
+        return {
+            "project_id": project_id,
+            "recent_start": (now - timedelta(hours=recent_hours)).isoformat(),
+            "recent_end": now.isoformat(),
+            "recent_hours": recent_hours,
+            "model_used": True,
+            "model_type": MODEL_TYPE_SEASONAL,
+            "model_count": len(models),
+            "warnings": warnings,
+        }
+
     start = now - timedelta(hours=recent_hours)
     stmt = select(Event).where(
         Event.project_id == project_id,
@@ -408,7 +445,83 @@ def predictive_alerts(
         "recent_end": now.isoformat(),
         "recent_hours": recent_hours,
         "ratio_threshold": ratio_threshold,
+        "model_used": False,
         "warnings": warnings,
+    }
+
+
+@router.post("/analytics/predictive/train")
+def train_predictive_models(
+    project_id: int = Path(..., ge=1),
+    payload: PredictiveTrainIn = Body(...),
+    session: Session = Depends(get_session),
+    _proj: Project = Depends(require_project_api_key),
+):
+    if payload.model_type != MODEL_TYPE_SEASONAL:
+        raise HTTPException(status_code=400, detail="unsupported model_type")
+    if payload.check_id is not None:
+        chk = session.get(Check, payload.check_id)
+        if not chk or chk.project_id != project_id:
+            raise HTTPException(status_code=404, detail="check not found")
+    models = train_seasonal_hourly_models(
+        session=session,
+        project_id=project_id,
+        check_id=payload.check_id,
+        days=payload.days,
+        min_events=payload.min_events,
+        model_type=payload.model_type,
+    )
+    return {
+        "project_id": project_id,
+        "trained": len(models),
+        "models": [
+            {
+                "id": m.id,
+                "check_id": m.check_id,
+                "model_type": m.model_type,
+                "version": m.version,
+                "trained_at": m.trained_at.isoformat(),
+                "window_start": m.window_start.isoformat() if m.window_start else None,
+                "window_end": m.window_end.isoformat() if m.window_end else None,
+            }
+            for m in models
+        ],
+    }
+
+
+@router.get("/analytics/predictive/models")
+def list_predictive_models(
+    project_id: int = Path(..., ge=1),
+    check_id: Optional[int] = Query(None, ge=1),
+    session: Session = Depends(get_session),
+    _proj: Project = Depends(require_project_api_key),
+):
+    models = session.exec(
+        select(PredictiveModel).where(
+            PredictiveModel.project_id == project_id,
+            PredictiveModel.active == True,
+            PredictiveModel.model_type == MODEL_TYPE_SEASONAL,
+        )
+    ).all()
+    if check_id is not None:
+        models = [m for m in models if m.check_id == check_id]
+    return {
+        "project_id": project_id,
+        "count": len(models),
+        "models": [
+            {
+                "id": m.id,
+                "check_id": m.check_id,
+                "model_type": m.model_type,
+                "version": m.version,
+                "trained_at": m.trained_at.isoformat(),
+                "window_start": m.window_start.isoformat() if m.window_start else None,
+                "window_end": m.window_end.isoformat() if m.window_end else None,
+                "active": m.active,
+                "metrics_json": m.metrics_json,
+            }
+            for m in models
+        ],
     }
 
 

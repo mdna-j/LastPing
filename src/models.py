@@ -214,6 +214,21 @@ class AvailabilityRollup(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+class PredictiveModel(SQLModel, table=True):
+    __tablename__ = "predictive_model"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    check_id: Optional[int] = Field(default=None, foreign_key="check.id", index=True)
+    model_type: str = Field(default="seasonal_hourly_v1", index=True)
+    version: int = Field(default=1)
+    trained_at: datetime = Field(default_factory=datetime.utcnow)
+    window_start: Optional[datetime] = None
+    window_end: Optional[datetime] = None
+    params_json: str = Field(default="{}", description="model parameters JSON")
+    metrics_json: Optional[str] = None
+    active: bool = Field(default=True, index=True)
+
+
 class ApiKeyUsage(SQLModel, table=True):
     __tablename__ = "api_key_usage"
     """Simple per-minute counter for API key usage enforcement."""

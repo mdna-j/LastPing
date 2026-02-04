@@ -136,13 +136,17 @@ async function loadDashboard(){
     if(!headers.Authorization){
       predEl.innerText = 'Provide API key to load predictive alerts.';
     }else if(predictive && predictive.warnings){
+      const modelNote = predictive.model_used ? `<div class="muted">Model: ${predictive.model_type || 'trained'} (${predictive.model_count || 0})</div>` : '';
       if(!predictive.warnings.length){
-        predEl.innerHTML = '<div class="muted">No predictive alerts in the recent window.</div>';
+        predEl.innerHTML = modelNote + '<div class="muted">No predictive alerts in the recent window.</div>';
       }else{
-        predEl.innerHTML = predictive.warnings.map(w => {
-          const ratio = (w.ratio !== null && w.ratio !== undefined) ? Number(w.ratio).toFixed(2) : 'n/a';
+        predEl.innerHTML = modelNote + predictive.warnings.map(w => {
           const next = (w.predicted_next_hour !== null && w.predicted_next_hour !== undefined) ? Number(w.predicted_next_hour).toFixed(2) : 'n/a';
-          return `<div class="card" style="background:#fff"><div><strong>Check ${w.check_id}</strong> · forecast ${next} events</div><div class="muted">ratio ${ratio} · slope ${w.trend_slope_per_hour}</div></div>`;
+          const slope = (w.trend_slope_per_hour !== null && w.trend_slope_per_hour !== undefined) ? Number(w.trend_slope_per_hour).toFixed(3) : 'n/a';
+          const ratio = (w.ratio !== null && w.ratio !== undefined) ? Number(w.ratio).toFixed(2) : null;
+          const z = (w.zscore !== null && w.zscore !== undefined) ? Number(w.zscore).toFixed(2) : null;
+          const detail = z ? `z ${z} · slope ${slope}` : `ratio ${ratio || 'n/a'} · slope ${slope}`;
+          return `<div class="card" style="background:#fff"><div><strong>Check ${w.check_id}</strong> · forecast ${next} events</div><div class="muted">${detail}</div></div>`;
         }).join('');
       }
     }else{

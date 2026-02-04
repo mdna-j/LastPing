@@ -642,9 +642,48 @@ def _maybe_log_predictive_warnings(session: Session, now: datetime, project_ids)
     recent_hours = int(os.environ.get("PREDICTIVE_RECENT_HOURS", "24"))
     min_events = int(os.environ.get("PREDICTIVE_MIN_EVENTS", "3"))
     ratio_threshold = float(os.environ.get("PREDICTIVE_RATIO_THRESHOLD", "2.0"))
+    ml_z_threshold = float(os.environ.get("PREDICTIVE_ML_Z_THRESHOLD", "2.0"))
     log_window = int(os.environ.get("PREDICTIVE_LOG_WINDOW_SECONDS", "3600"))
 
     for pid in project_ids:
+        # ML-backed predictive warnings (if trained models exist)
+        try:
+            from .predictive_models import predictive_warnings_from_models
+            ml_warnings = predictive_warnings_from_models(
+                session=session,
+                project_id=pid,
+                now=now,
+                recent_hours=recent_hours,
+                min_events=min_events,
+                z_threshold=ml_z_threshold,
+            )
+            for warn in ml_warnings:
+                check_id = warn.get("check_id")
+                cutoff = now - timedelta(seconds=log_window)
+                existing = session.exec(
+                    select(AuditLog).where(
+                        AuditLog.action == "predictive_ml_warning",
+                        AuditLog.target_type == "check",
+                        AuditLog.target_id == check_id,
+                        AuditLog.created_at >= cutoff,
+                    )
+                ).first()
+                if existing:
+                    continue
+                al = AuditLog(
+                    actor="worker",
+                    action="predictive_ml_warning",
+                    target_type="check",
+                    target_id=check_id,
+                    details=json.dumps(warn),
+                    actor_ip=None,
+                    user_agent=None,
+                )
+                session.add(al)
+                session.commit()
+        except Exception:
+            logger.exception("Failed to compute ML predictive warnings")
+
         warnings = _compute_predictive_warnings(session, pid, now, recent_hours, min_events, ratio_threshold)
         for warn in warnings:
             check_id = warn.get("check_id")
