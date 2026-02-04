@@ -126,3 +126,8 @@ python scripts/validate_multi_region.py --region us-east --simulate-failover --s
 Notes:
 - The script expects `docker compose` to be available if you pass `--stop-primary`.
 - For faster tests, lower `WORKER_LEASE_SECONDS` and `WORKER_FAILOVER_AFTER_SECONDS`.
+
+## Production-like validation
+
+See `docs/multi_region_validation.md` for a staging checklist and acceptance criteria,
+plus the `scripts/multi_region_report.py` helper.
