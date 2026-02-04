@@ -1,0 +1,39 @@
+name: Multi-Region Report
+
+on:
+  workflow_dispatch:
+    inputs:
+      recent_hours:
+        description: "Event window in hours"
+        required: false
+        default: "2"
+      down_threshold:
+        description: "Down-event threshold to flag checks"
+        required: false
+        default: "3"
+
+jobs:
+  multi_region_report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m pip install -e .
+      - name: Run multi-region report
+        env:
+          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          RECENT_HOURS: ${{ inputs.recent_hours }}
+          DOWN_THRESHOLD: ${{ inputs.down_threshold }}
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "STAGING_DATABASE_URL not set; skipping report."
+            exit 0
+          fi
+          python scripts/multi_region_report.py --recent-hours "${RECENT_HOURS:-2}" --down-threshold "${DOWN_THRESHOLD:-3}"
