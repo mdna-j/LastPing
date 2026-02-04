@@ -14,7 +14,7 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/projects/{project_id}", tags=["webhooks"])
+router = APIRouter(prefix="/projects/{project_id}", tags=["webhooks"]) 
 
 
 class WebhookIn(StrictBaseModel):
@@ -25,6 +25,7 @@ class WebhookIn(StrictBaseModel):
 
     @root_validator(pre=True)
     def _coerce_legacy_fields(cls, values):
+        # Support legacy keys while still rejecting unexpected fields.
         if "check_name" not in values:
             for alt in ("check", "name"):
                 if alt in values:
@@ -40,7 +41,10 @@ class WebhookIn(StrictBaseModel):
 
 
 def _try_limit(project_id: int, authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), session: Session = Depends(get_session)):
-    """Call `limit_by_api_key` but return None on 401/403 so primary project API key still works."""
+    """Call `limit_by_api_key` but return None on 401/403 so primary project API key (verified by `require_project_api_key`) still works.
+
+    Returns the matched ApiKey or `None` when rate-limiting is not applicable.
+    """
     try:
         return limit_by_api_key(project_id=project_id, authorization=authorization, x_api_key=x_api_key, x_admin_token=x_admin_token, session=session)
     except HTTPException as he:
@@ -65,6 +69,7 @@ def receive_webhook(project_id: int = Path(..., ge=1), payload: Optional[Webhook
     update `last_ping` for heartbeat events. It respects project/check
     maintenance windows and returns 202 on acceptance.
     """
+    # normalize payload
     if payload is None:
         raise HTTPException(status_code=400, detail="Payload required")
     name = payload.check_name
@@ -84,26 +89,31 @@ def receive_webhook(project_id: int = Path(..., ge=1), payload: Optional[Webhook
 
     proj = session.get(Project, project_id)
 
-    from ..worker import _in_maintenance
+    # respect maintenance windows
     now = datetime.utcnow()
+    from ..worker import _in_maintenance
     if _in_maintenance(chk, proj, now):
-        e = EventModel(check_id=chk.id, project_id=project_id, event_type=EventType.DOWN if ev_type == EventType.DOWN else ev_type, message=(msg or "suppressed due to maintenance"))
+        # create suppressed event for history
+        e = EventModel(check_id=chk.id, project_id=project_id, event_type=EventType.DOWN if ev_type==EventType.DOWN else ev_type, message=(msg or "suppressed due to maintenance"))
         session.add(e)
         session.commit()
         logger.info("suppressed event created for check_id=%s", chk.id)
         return {"accepted": True, "suppressed": True}
 
+    # map heartbeat to update last_ping
     if ev_type == EventType.HEARTBEAT:
         chk.last_ping = ts or datetime.utcnow()
         chk.consecutive_failures = 0
         chk.status = "UP"
         session.add(chk)
+        # add heartbeat event
         e = EventModel(check_id=chk.id, project_id=project_id, event_type=EventType.HEARTBEAT, message=msg)
         session.add(e)
         session.commit()
         logger.info("heartbeat recorded for check_id=%s last_ping=%s", chk.id, chk.last_ping)
         return {"accepted": True, "status": chk.status}
 
+    # create event for UP/DOWN/HTTP failure
     if ev_type == EventType.DOWN:
         e = EventModel(check_id=chk.id, project_id=project_id, event_type=EventType.DOWN, message=msg)
     elif ev_type == EventType.UP:
@@ -116,6 +126,7 @@ def receive_webhook(project_id: int = Path(..., ge=1), payload: Optional[Webhook
         e = EventModel(check_id=chk.id, project_id=project_id, event_type=EventType.DOWN, message=msg)
 
     session.add(e)
+    # update check status
     if ev_type in (EventType.DOWN, EventType.HTTP_FAILURE):
         chk.status = "DOWN"
         chk.consecutive_failures = (chk.consecutive_failures or 0) + 1
@@ -127,5 +138,5 @@ def receive_webhook(project_id: int = Path(..., ge=1), payload: Optional[Webhook
         chk.consecutive_failures = 0
     session.add(chk)
     session.commit()
-    logger.info("event committed check_id=%s event_id=%s", chk.id, getattr(e, "id", None))
+    logger.info("event committed check_id=%s event_id=%s", chk.id, getattr(e, 'id', None))
     return {"accepted": True}

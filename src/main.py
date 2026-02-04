@@ -11,7 +11,7 @@ from .routers.users import router as users_router
 from .routers.metrics import router as metrics_router
 from .routers.incidents import router as incidents_router, public_router as incidents_public_router
 from .routers.ui import router as ui_router
-from .routers.webhooks_fixed import router as webhooks_router
+from .routers.webhooks import router as webhooks_router
 from .routers.analytics import router as analytics_router
 from .routers.oncall import router as oncall_router
 from .routers.remediation import router as remediation_router
