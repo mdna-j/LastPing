@@ -25,3 +25,7 @@
 - Region priority list per check.
 - Lease/lock mechanism for stronger single-region execution.
 - Health-based region reassignment.
+
+## Local validation
+See `multi_region.md` at repo root and `scripts/validate_multi_region.py` for
+the current multi-region simulation checklist and helper script.

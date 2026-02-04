@@ -595,6 +595,53 @@ def test_region_list_allows(tmp_path, monkeypatch):
         assert allow_check.last_ping is not None
 
 
+def test_region_failover_requires_expired_lease(tmp_path, monkeypatch):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_region_failover.sqlite'}"
+    monkeypatch.setenv("WORKER_REGION_FAILOVER", "1")
+    monkeypatch.setenv("WORKER_FAILOVER_AFTER_SECONDS", "300")
+
+    from sqlmodel import Session
+    from src import db as dbmod
+    from src.models import Project, Check, CheckType, CheckStatus, CheckLease
+    from src import worker
+
+    dbmod.create_db_and_tables()
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="proj_region_failover")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        chk = Check(
+            project_id=project.id,
+            name="http_region_failover",
+            type=CheckType.HTTP,
+            url="http://example.ok/health",
+            region="us-east",
+            status=CheckStatus.UP,
+        )
+        session.add(chk)
+        session.commit()
+        session.refresh(chk)
+
+        now = datetime.utcnow()
+        # Without a lease, non-matching regions should not be allowed.
+        assert worker._allow_region_or_failover(session, "eu-west", chk, now) is False
+
+        # With a lease that is not expired beyond grace, still not allowed.
+        lease = CheckLease(check_id=chk.id, lease_owner="us-east-1", lease_expires_at=now + timedelta(seconds=60), updated_at=now)
+        session.add(lease)
+        session.commit()
+        assert worker._allow_region_or_failover(session, "eu-west", chk, now) is False
+
+        # When the lease is expired beyond grace, failover is allowed.
+        lease.lease_expires_at = now - timedelta(seconds=301)
+        session.add(lease)
+        session.commit()
+        assert worker._allow_region_or_failover(session, "eu-west", chk, now) is True
+
+
 def test_degraded_recovery(tmp_path, monkeypatch):
     os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_deg_recover.sqlite'}"
 

@@ -112,3 +112,17 @@ docker compose start worker_us
 
 9) Optional: set `region=us-east,eu-west` on a check to observe active-active
    checks while leases prevent double-processing.
+
+## Automated validation (optional)
+
+For a repeatable local check, use the helper script which creates a region-pinned
+heartbeat check, waits for a lease, and can optionally stop the primary worker
+to observe failover:
+
+```
+python scripts/validate_multi_region.py --region us-east --simulate-failover --stop-primary --start-primary
+```
+
+Notes:
+- The script expects `docker compose` to be available if you pass `--stop-primary`.
+- For faster tests, lower `WORKER_LEASE_SECONDS` and `WORKER_FAILOVER_AFTER_SECONDS`.
