@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Path
+from fastapi.responses import HTMLResponse
 from sqlmodel import Session, select
 
 from ..db import get_session
@@ -8,7 +9,7 @@ from ..deps import limit_public_requests
 router = APIRouter(prefix="/ui", tags=["ui"], dependencies=[Depends(limit_public_requests)])
 
 
-@router.get("/incidents")
+@router.get("/incidents", response_class=HTMLResponse)
 def incidents_page():
     return """
     <html>
@@ -32,7 +33,7 @@ def incidents_page():
     """
 
 
-@router.get('/checks')
+@router.get('/checks', response_class=HTMLResponse)
 def checks_page():
     return """
     <html>
@@ -137,7 +138,7 @@ def checks_page():
     """
 
 
-@router.get('/checks/{check_id}')
+@router.get('/checks/{check_id}', response_class=HTMLResponse)
 def checks_manage_page(check_id: int = Path(..., ge=1)):
     html = """
     <html>
@@ -247,7 +248,7 @@ def checks_manage_page(check_id: int = Path(..., ge=1)):
     return html.replace('__CHECK_ID__', str(check_id))
 
 
-@router.get("/incidents/{incident_id}")
+@router.get("/incidents/{incident_id}", response_class=HTMLResponse)
 def incident_detail_page(incident_id: int = Path(..., ge=1)):
     return """
     <html>
@@ -273,7 +274,7 @@ def incident_detail_page(incident_id: int = Path(..., ge=1)):
     """
 
 
-@router.get('/snapshots')
+@router.get('/snapshots', response_class=HTMLResponse)
 def snapshots_page():
     return """
     <html>
@@ -309,7 +310,7 @@ def snapshots_page():
     """
 
 
-@router.get("/dashboard")
+@router.get("/dashboard", response_class=HTMLResponse)
 def dashboard_page():
     return """
     <html>
@@ -376,7 +377,7 @@ def dashboard_page():
     """
 
 
-@router.get("/reports")
+@router.get("/reports", response_class=HTMLResponse)
 def reports_page():
     return """
     <html>
@@ -428,7 +429,7 @@ def reports_page():
     """
 
 
-@router.get("/projects/{project_id}/settings")
+@router.get("/projects/{project_id}/settings", response_class=HTMLResponse)
 def project_settings_page(project_id: int = Path(..., ge=1)):
     return f"""
     <html>
@@ -467,7 +468,7 @@ def project_settings_page(project_id: int = Path(..., ge=1)):
     """
 
 
-@router.get("/projects/{project_id}/oncall")
+@router.get("/projects/{project_id}/oncall", response_class=HTMLResponse)
 def oncall_page(project_id: int = Path(..., ge=1)):
     return f"""
     <html>
@@ -584,7 +585,7 @@ def oncall_page(project_id: int = Path(..., ge=1)):
     """
 
 
-@router.get("/projects/{project_id}/remediation")
+@router.get("/projects/{project_id}/remediation", response_class=HTMLResponse)
 def remediation_page(project_id: int = Path(..., ge=1)):
     return f"""
     <html>
@@ -640,7 +641,7 @@ def remediation_page(project_id: int = Path(..., ge=1)):
     """
 
 
-@router.get("/status/{project_id}")
+@router.get("/status/{project_id}", response_class=HTMLResponse)
 def public_status_page(project_id: int = Path(..., ge=1)):
     return f"""
     <html>
