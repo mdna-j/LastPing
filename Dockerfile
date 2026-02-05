@@ -22,6 +22,9 @@ RUN pip install --upgrade pip && pip install --no-cache-dir -r ${APP_HOME}/requi
 
 # Copy app and set ownership
 COPY . ${APP_HOME}
+# Ensure the entrypoint is executable (Windows checkouts may drop the exec bit)
+RUN sed -i 's/\r$//' ${APP_HOME}/docker-entrypoint.sh \
+    && chmod 755 ${APP_HOME}/docker-entrypoint.sh
 RUN chown -R ${APP_USER}:${APP_GROUP} ${APP_HOME}
 
 EXPOSE 8000

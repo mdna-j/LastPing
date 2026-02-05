@@ -1,5 +1,5 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 # Simple entrypoint: run DB migrations (if alembic present) then exec command
 cd "$(dirname "$0")"
