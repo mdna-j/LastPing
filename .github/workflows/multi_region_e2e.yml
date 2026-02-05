@@ -61,29 +61,14 @@ jobs:
       - name: Create Project + Region-Pinned Check (us-east)
         run: |
           resp="$(curl -fsS -X POST http://localhost:8000/projects/ -H 'Content-Type: application/json' -d '{"name":"ci-multi-region"}')"
-          project_id="$(python - <<'PY' <<<"$resp"
-          import json,sys
-          data=json.load(sys.stdin)
-          print(data["project"]["id"])
-          PY
-          )"
-          api_key="$(python - <<'PY' <<<"$resp"
-          import json,sys
-          data=json.load(sys.stdin)
-          print(data["api_key"])
-          PY
-          )"
+          project_id="$(python -c 'import json,sys; data=json.load(sys.stdin); print(data["project"]["id"])' <<<"$resp")"
+          api_key="$(python -c 'import json,sys; data=json.load(sys.stdin); print(data["api_key"])' <<<"$resp")"
 
           check_resp="$(curl -fsS -X POST "http://localhost:8000/projects/${project_id}/checks/" \
             -H 'Content-Type: application/json' \
             -H "X-API-KEY: ${api_key}" \
             -d '{"name":"ci-us-east","type":"heartbeat","expected_interval":60,"grace_period":0,"region":"us-east","alert_enabled":false}')"
-          check_id="$(python - <<'PY' <<<"$check_resp"
-          import json,sys
-          data=json.load(sys.stdin)
-          print(data["id"])
-          PY
-          )"
+          check_id="$(python -c 'import json,sys; data=json.load(sys.stdin); print(data["id"])' <<<"$check_resp")"
 
           {
             echo "PROJECT_ID=${project_id}"
