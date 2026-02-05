@@ -1,0 +1,131 @@
+name: Multi-Region E2E
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - "src/worker.py"
+      - "src/models.py"
+      - "docker-compose.yml"
+      - "multi_region.md"
+      - "docs/multi_region_validation.md"
+      - ".github/workflows/multi_region_e2e.yml"
+  pull_request:
+    branches: [ main ]
+    paths:
+      - "src/worker.py"
+      - "src/models.py"
+      - "docker-compose.yml"
+      - "multi_region.md"
+      - "docs/multi_region_validation.md"
+      - ".github/workflows/multi_region_e2e.yml"
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create .env For Compose
+        run: |
+          cat > .env <<'EOF'
+          DATABASE_URL=postgresql://lastping:lastping@db:5432/lastping
+          WORKER_SCAN_INTERVAL=2
+          WORKER_LEASE_SECONDS=10
+          WORKER_FAILOVER_AFTER_SECONDS=5
+          EOF
+
+      - name: Start Multi-Region Stack
+        run: |
+          docker compose --profile multi-region up -d --build --scale worker=0
+
+      - name: Wait For API Health
+        run: |
+          for i in {1..60}; do
+            if curl -fsS http://localhost:8000/health >/dev/null; then
+              echo "API healthy."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "API did not become healthy in time."
+          docker compose logs --tail=200 api || true
+          exit 1
+
+      - name: Create Project + Region-Pinned Check (us-east)
+        run: |
+          resp="$(curl -fsS -X POST http://localhost:8000/projects/ -H 'Content-Type: application/json' -d '{"name":"ci-multi-region"}')"
+          project_id="$(python - <<'PY' <<<"$resp"
+          import json,sys
+          data=json.load(sys.stdin)
+          print(data["project"]["id"])
+          PY
+          )"
+          api_key="$(python - <<'PY' <<<"$resp"
+          import json,sys
+          data=json.load(sys.stdin)
+          print(data["api_key"])
+          PY
+          )"
+
+          check_resp="$(curl -fsS -X POST "http://localhost:8000/projects/${project_id}/checks/" \
+            -H 'Content-Type: application/json' \
+            -H "X-API-KEY: ${api_key}" \
+            -d '{"name":"ci-us-east","type":"heartbeat","expected_interval":60,"grace_period":0,"region":"us-east","alert_enabled":false}')"
+          check_id="$(python - <<'PY' <<<"$check_resp"
+          import json,sys
+          data=json.load(sys.stdin)
+          print(data["id"])
+          PY
+          )"
+
+          {
+            echo "PROJECT_ID=${project_id}"
+            echo "API_KEY=${api_key}"
+            echo "CHECK_ID=${check_id}"
+          } >> "$GITHUB_ENV"
+
+      - name: Wait For Initial Lease (Expect us-east-1)
+        run: |
+          for i in {1..60}; do
+            owner="$(docker compose exec -T db psql -U lastping -d lastping -t -A -c "select lease_owner from check_lease where check_id=${CHECK_ID};" | tr -d '\r' | xargs)"
+            if [ -n "$owner" ]; then
+              echo "Initial lease owner: $owner"
+              if [ "$owner" != "us-east-1" ]; then
+                echo "Expected initial lease owner us-east-1, got: $owner"
+                docker compose logs --tail=200 worker_us || true
+                docker compose logs --tail=200 worker_eu || true
+                docker compose logs --tail=200 worker_ap || true
+                exit 1
+              fi
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Timed out waiting for initial lease acquisition."
+          docker compose logs --tail=200 worker_us || true
+          exit 1
+
+      - name: Stop Primary Worker And Wait For Failover
+        run: |
+          docker compose stop worker_us
+          for i in {1..90}; do
+            owner="$(docker compose exec -T db psql -U lastping -d lastping -t -A -c "select lease_owner from check_lease where check_id=${CHECK_ID};" | tr -d '\r' | xargs)"
+            if [ -n "$owner" ] && [ "$owner" != "us-east-1" ]; then
+              echo "Failover observed. New lease owner: $owner"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Timed out waiting for failover lease owner change."
+          docker compose logs --tail=200 worker_eu || true
+          docker compose logs --tail=200 worker_ap || true
+          exit 1
+
+      - name: Teardown
+        if: always()
+        run: |
+          docker compose down -v
+

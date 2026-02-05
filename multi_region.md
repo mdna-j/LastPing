@@ -131,3 +131,10 @@ Notes:
 
 See `docs/multi_region_validation.md` for a staging checklist and acceptance criteria,
 plus the `scripts/multi_region_report.py` helper.
+
+## GitHub Actions validation (optional)
+
+There is also a lightweight CI check that runs the docker-compose multi-region profile,
+creates a region-pinned check, and asserts lease acquisition + failover:
+
+- `.github/workflows/multi_region_e2e.yml`

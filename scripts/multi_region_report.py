@@ -10,9 +10,15 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import List
+import sys
 
 from sqlmodel import Session, select
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from src.db import engine
 from src.models import Check, CheckLease, Event

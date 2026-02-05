@@ -21,6 +21,10 @@ from datetime import datetime, timedelta
 
 from sqlmodel import Session
 
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
 from src.db import engine, create_db_and_tables
 from src.models import Project, Check, CheckType, CheckStatus, CheckLease
 
