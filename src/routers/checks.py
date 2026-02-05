@@ -11,7 +11,7 @@ import json
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status, Header, Request, Path, Body
-from pydantic import BaseModel, AnyHttpUrl, conint, constr, root_validator, EmailStr
+from pydantic import BaseModel, AnyHttpUrl, conint, constr, root_validator, EmailStr, validator
 from sqlmodel import Session, select
 
 from ..db import get_session
@@ -39,7 +39,7 @@ def _diff_details(before: dict, after: dict) -> Optional[str]:
 
 class CheckCreate(StrictBaseModel):
     name: constr(min_length=1, max_length=120)
-    type: Optional[Literal["heartbeat", "http", "tcp", "dns"]] = CheckType.HEARTBEAT
+    type: Optional[Literal["heartbeat", "http", "tcp", "dns", "script"]] = CheckType.HEARTBEAT
     expected_interval: Optional[conint(ge=1, le=86400)] = 600
     grace_period: Optional[conint(ge=0, le=86400)] = 600
     url: Optional[AnyHttpUrl] = None
@@ -48,6 +48,8 @@ class CheckCreate(StrictBaseModel):
     host: Optional[constr(min_length=1, max_length=253)] = None
     port: Optional[conint(ge=1, le=65535)] = None
     dns_record_type: Optional[constr(regex=r"^[A-Za-z0-9_-]{1,10}$")] = None
+    script_path: Optional[constr(min_length=1, max_length=200, regex=r"^[A-Za-z0-9._\\/-]+$")] = None
+    script_args: Optional[List[constr(min_length=1, max_length=200)]] = None
     interval: Optional[conint(ge=1, le=86400)] = 60
     latency_threshold_ms: Optional[conint(ge=1, le=600000)] = None
     region: Optional[constr(regex=r"^[A-Za-z0-9._-]{1,32}$")] = None
@@ -69,6 +71,14 @@ class CheckCreate(StrictBaseModel):
     escalation_after_minutes: Optional[conint(ge=1, le=10080)] = None
     escalation_cooldown_seconds: Optional[conint(ge=0, le=86400)] = 3600
 
+    @validator("script_args")
+    def _validate_script_args(cls, v):
+        if v is None:
+            return v
+        if len(v) > 20:
+            raise ValueError("script_args may have at most 20 entries")
+        return v
+
     @root_validator
     def _validate_by_type(cls, values):
         ctype = values.get("type") or CheckType.HEARTBEAT
@@ -87,6 +97,20 @@ class CheckCreate(StrictBaseModel):
                 raise ValueError("host is required for dns checks")
             if not values.get("dns_record_type"):
                 raise ValueError("dns_record_type is required for dns checks")
+        if ctype == "script":
+            sp = values.get("script_path")
+            if not sp:
+                raise ValueError("script_path is required for script checks")
+            if sp.startswith(("/", "\\")) or ":" in sp:
+                raise ValueError("script_path must be a relative path (no drive letters or leading slashes)")
+            parts = [p for p in sp.replace("\\", "/").split("/") if p]
+            if any(p == ".." for p in parts):
+                raise ValueError("script_path must not contain '..'")
+        else:
+            if values.get("script_path") is not None:
+                raise ValueError("script_path is only valid for script checks")
+            if values.get("script_args") is not None:
+                raise ValueError("script_args is only valid for script checks")
         return values
 
 
@@ -103,6 +127,8 @@ class CheckRead(BaseModel):
     host: Optional[str] = None
     port: Optional[int] = None
     dns_record_type: Optional[str] = None
+    script_path: Optional[str] = None
+    script_args: Optional[List[str]] = None
     interval: Optional[int] = None
     latency_threshold_ms: Optional[int] = None
     last_latency_ms: Optional[float] = None
@@ -124,6 +150,21 @@ class CheckRead(BaseModel):
     alert_generic_webhook_url: Optional[str] = None
     escalation_after_minutes: Optional[int] = None
     escalation_cooldown_seconds: Optional[int] = None
+
+    @validator("script_args", pre=True)
+    def _parse_script_args(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, list):
+            return v
+        if isinstance(v, str):
+            try:
+                parsed = json.loads(v)
+                if isinstance(parsed, list):
+                    return [str(x) for x in parsed]
+            except Exception:
+                return None
+        return None
 
     class Config:
         orm_mode = True
@@ -160,6 +201,8 @@ def create_check(project_id: int = Path(..., ge=1), payload: CheckCreate = Body(
         host=payload.host,
         port=payload.port,
         dns_record_type=payload.dns_record_type,
+        script_path=payload.script_path,
+        script_args=(json.dumps(payload.script_args) if payload.script_args is not None else None),
         timeout=payload.timeout,
         retries=payload.retries,
         interval=payload.interval,
@@ -206,6 +249,8 @@ class CheckUpdate(StrictBaseModel):
     host: Optional[constr(min_length=1, max_length=253)] = None
     port: Optional[conint(ge=1, le=65535)] = None
     dns_record_type: Optional[constr(regex=r"^[A-Za-z0-9_-]{1,10}$")] = None
+    script_path: Optional[constr(min_length=1, max_length=200, regex=r"^[A-Za-z0-9._\\/-]+$")] = None
+    script_args: Optional[List[constr(min_length=1, max_length=200)]] = None
     latency_threshold_ms: Optional[conint(ge=1, le=600000)] = None
     region: Optional[constr(regex=r"^[A-Za-z0-9._-]{1,32}$")] = None
     alert_enabled: Optional[bool] = None
@@ -226,6 +271,14 @@ class CheckUpdate(StrictBaseModel):
     escalation_after_minutes: Optional[conint(ge=1, le=10080)] = None
     escalation_cooldown_seconds: Optional[conint(ge=0, le=86400)] = None
 
+    @validator("script_args")
+    def _validate_script_args(cls, v):
+        if v is None:
+            return v
+        if len(v) > 20:
+            raise ValueError("script_args may have at most 20 entries")
+        return v
+
 
 @router.put("/{check_id}", response_model=CheckRead)
 def update_check(project_id: int = Path(..., ge=1), check_id: int = Path(..., ge=1), payload: CheckUpdate = Body(...), request: Request = None, x_admin_token: Optional[str] = Header(None), authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), session: Session = Depends(get_session)):
@@ -238,6 +291,19 @@ def update_check(project_id: int = Path(..., ge=1), check_id: int = Path(..., ge
     check = session.get(CheckModel, check_id)
     if not check or check.project_id != project_id:
         raise HTTPException(status_code=404, detail="Check not found")
+
+    # Script checks are intentionally constrained: you can only point at an on-disk script
+    # under CUSTOM_CHECKS_DIR. We reject script fields on non-script checks to prevent
+    # confusing configuration that the worker will ignore.
+    if check.type != CheckType.SCRIPT and (payload.script_path is not None or payload.script_args is not None):
+        raise HTTPException(status_code=400, detail="script_path/script_args are only valid for script checks")
+    if check.type == CheckType.SCRIPT and payload.script_path is not None:
+        sp = payload.script_path
+        if sp.startswith(("/", "\\")) or ":" in sp:
+            raise HTTPException(status_code=400, detail="script_path must be relative (no drive letters or leading slashes)")
+        parts = [p for p in sp.replace("\\", "/").split("/") if p]
+        if any(p == ".." for p in parts):
+            raise HTTPException(status_code=400, detail="script_path must not contain '..'")
     before = {
         "name": check.name,
         "url": check.url,
@@ -247,6 +313,8 @@ def update_check(project_id: int = Path(..., ge=1), check_id: int = Path(..., ge
         "host": check.host,
         "port": check.port,
         "dns_record_type": check.dns_record_type,
+        "script_path": getattr(check, "script_path", None),
+        "script_args": getattr(check, "script_args", None),
         "latency_threshold_ms": check.latency_threshold_ms,
         "region": check.region,
         "alert_enabled": check.alert_enabled,
@@ -287,6 +355,10 @@ def update_check(project_id: int = Path(..., ge=1), check_id: int = Path(..., ge
         check.port = payload.port
     if payload.dns_record_type is not None:
         check.dns_record_type = payload.dns_record_type
+    if payload.script_path is not None:
+        check.script_path = payload.script_path
+    if payload.script_args is not None:
+        check.script_args = json.dumps(payload.script_args)
     if payload.latency_threshold_ms is not None:
         check.latency_threshold_ms = payload.latency_threshold_ms
     if payload.region is not None:
@@ -339,6 +411,8 @@ def update_check(project_id: int = Path(..., ge=1), check_id: int = Path(..., ge
             "host": check.host,
             "port": check.port,
             "dns_record_type": check.dns_record_type,
+            "script_path": getattr(check, "script_path", None),
+            "script_args": getattr(check, "script_args", None),
             "latency_threshold_ms": check.latency_threshold_ms,
             "region": check.region,
             "alert_enabled": check.alert_enabled,

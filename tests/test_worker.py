@@ -535,6 +535,156 @@ def test_tcp_dns_failure(tmp_path, monkeypatch):
         assert any("dns_nxdomain" in (r or "") for r in called["reasons"])
 
 
+def test_script_check_success(tmp_path, monkeypatch):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_script_ok.sqlite'}"
+    os.environ["CUSTOM_CHECKS_DIR"] = str(tmp_path / "custom_checks")
+
+    from sqlmodel import Session
+    from src import db as dbmod
+    from src.models import Project, Check, CheckType, CheckStatus
+    from src import worker
+
+    dbmod.create_db_and_tables()
+
+    custom_dir = tmp_path / "custom_checks"
+    custom_dir.mkdir(parents=True, exist_ok=True)
+    script = custom_dir / "ok.py"
+    script.write_text("import sys\nprint('ok')\nsys.exit(0)\n", encoding="utf-8")
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="proj_script_ok")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        chk = Check(
+            project_id=project.id,
+            name="script_ok",
+            type=CheckType.SCRIPT,
+            script_path="ok.py",
+            interval=60,
+            timeout=2,
+            retries=1,
+            status=CheckStatus.UP,
+            alert_enabled=False,
+        )
+        session.add(chk)
+        session.commit()
+
+        worker.scan_checks_once(session)
+
+        session.refresh(chk)
+        assert chk.last_ping is not None
+        assert chk.last_latency_ms is not None
+        assert chk.next_run is not None
+        assert chk.status in (CheckStatus.UP, CheckStatus.DEGRADED)
+
+
+def test_script_scheduling_skips(tmp_path, monkeypatch):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_script_skip.sqlite'}"
+    os.environ["CUSTOM_CHECKS_DIR"] = str(tmp_path / "custom_checks2")
+
+    from sqlmodel import Session
+    from src import db as dbmod
+    from src.models import Project, Check, CheckType, CheckStatus
+    from src import worker
+
+    dbmod.create_db_and_tables()
+
+    custom_dir = tmp_path / "custom_checks2"
+    custom_dir.mkdir(parents=True, exist_ok=True)
+    script = custom_dir / "ok.py"
+    script.write_text("import sys\nprint('ok')\nsys.exit(0)\n", encoding="utf-8")
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="proj_script_skip")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        now = datetime.utcnow()
+        chk = Check(
+            project_id=project.id,
+            name="script_skip",
+            type=CheckType.SCRIPT,
+            script_path="ok.py",
+            interval=60,
+            next_run=now + timedelta(seconds=300),
+            timeout=2,
+            retries=1,
+            status=CheckStatus.UP,
+        )
+        session.add(chk)
+        session.commit()
+
+        monkeypatch.setattr(worker, "_script_check", lambda *a, **k: (_ for _ in ()).throw(AssertionError("Script should be skipped")))
+        worker.scan_checks_once(session)
+        session.refresh(chk)
+        assert chk.last_ping is None
+
+
+def test_script_check_failure(tmp_path, monkeypatch):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_script_fail.sqlite'}"
+    os.environ["CUSTOM_CHECKS_DIR"] = str(tmp_path / "custom_checks3")
+
+    from sqlmodel import Session, select
+    from src import db as dbmod
+    from src.models import Project, Check, CheckType, CheckStatus, Event, EventType
+    from src import worker
+
+    dbmod.create_db_and_tables()
+
+    custom_dir = tmp_path / "custom_checks3"
+    custom_dir.mkdir(parents=True, exist_ok=True)
+    script = custom_dir / "fail.py"
+    script.write_text("import sys\nprint('nope')\nsys.exit(2)\n", encoding="utf-8")
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="proj_script_fail")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        chk = Check(
+            project_id=project.id,
+            name="script_fail",
+            type=CheckType.SCRIPT,
+            script_path="fail.py",
+            interval=60,
+            timeout=2,
+            retries=1,
+            status=CheckStatus.UP,
+            alert_enabled=True,
+            alert_after=1,
+            alert_cooldown=0,
+        )
+        session.add(chk)
+        session.commit()
+        session.refresh(chk)
+
+        called = {}
+
+        def fake_notify_down(chk2, proj, reason=None):
+            called["reason"] = reason
+
+        monkeypatch.setattr(worker, "notify_down", fake_notify_down)
+
+        worker.scan_checks_once(session)
+        session.refresh(chk)
+        assert chk.status == CheckStatus.DOWN
+        evs = session.exec(select(Event).where(Event.check_id == chk.id)).all()
+        assert any(e.event_type == EventType.DOWN for e in evs)
+        assert "reason" in called
+        assert "exit=2" in (called["reason"] or "")
+
+
+def test_check_schema_requires_script_path_for_script_type():
+    from src.routers.checks import CheckCreate
+
+    with pytest.raises(Exception):
+        CheckCreate(name="x", type="script")
+
+
 def test_region_filtering(tmp_path, monkeypatch):
     os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_region.sqlite'}"
     os.environ["WORKER_REGION"] = "us-east"

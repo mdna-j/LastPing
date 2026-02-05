@@ -62,6 +62,7 @@ class CheckType(str):
     HTTP = "http"
     TCP = "tcp"
     DNS = "dns"
+    SCRIPT = "script"
 
 
 class CheckStatus(str):
@@ -117,6 +118,17 @@ class Check(SQLModel, table=True):
     host: Optional[str] = None
     port: Optional[int] = None
     dns_record_type: Optional[str] = None
+    # script-based checks (advanced)
+    # NOTE: `script_args` stores a JSON-encoded list of args (List[str]).
+    # We store JSON to keep the DB schema simple and keep the API ergonomic.
+    script_path: Optional[str] = Field(
+        default=None,
+        description="relative path under CUSTOM_CHECKS_DIR to execute for script checks",
+    )
+    script_args: Optional[str] = Field(
+        default=None,
+        description="JSON list of args for script checks",
+    )
     # scheduling for HTTP checks
     interval: Optional[int] = Field(default=60, description="interval in seconds for HTTP checks")
     next_run: Optional[datetime] = None

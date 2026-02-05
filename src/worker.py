@@ -4,6 +4,9 @@ import logging
 import json
 import re
 import math
+import subprocess
+import sys
+import signal
 """
 Background worker: scans checks and executes monitoring logic.
 
@@ -114,6 +117,188 @@ def _dns_check(host: str, record_type: Optional[str] = None) -> Tuple[bool, str,
         return True, "dns_ok", latency_ms
     except Exception as exc:
         return False, str(exc), None
+
+
+def _truncate(text: str, limit: int = 500) -> str:
+    if not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "...(truncated)"
+
+
+def _parse_script_args(args_json: Optional[str]) -> list[str]:
+    """Parse Check.script_args JSON (List[str]) safely."""
+    if not args_json:
+        return []
+    if isinstance(args_json, list):
+        return [str(x) for x in args_json]
+    if not isinstance(args_json, str):
+        return []
+    try:
+        parsed = json.loads(args_json)
+        if isinstance(parsed, list):
+            return [str(x) for x in parsed if x is not None]
+    except Exception:
+        return []
+    return []
+
+
+def _resolve_script_path(script_path: str) -> Optional[str]:
+    """Resolve a relative script path within CUSTOM_CHECKS_DIR.
+
+    We intentionally disallow absolute paths and path traversal so that
+    "script checks" can only execute scripts the server operator has placed
+    under a dedicated directory.
+    """
+    if not script_path or not isinstance(script_path, str):
+        return None
+
+    sp = script_path.strip()
+    if not sp:
+        return None
+    # absolute paths or drive letters are not allowed
+    if sp.startswith(("/", "\\")) or ":" in sp:
+        return None
+
+    parts = [p for p in sp.replace("\\", "/").split("/") if p]
+    if any(p == ".." for p in parts):
+        return None
+
+    base_dir = os.environ.get("CUSTOM_CHECKS_DIR") or os.path.join(os.getcwd(), "custom_checks")
+    base_real = os.path.realpath(base_dir)
+    full_real = os.path.realpath(os.path.join(base_real, *parts))
+
+    # ensure path stays under base dir
+    base_prefix = base_real if base_real.endswith(os.sep) else (base_real + os.sep)
+    if not (full_real == base_real or full_real.startswith(base_prefix)):
+        return None
+    if not os.path.isfile(full_real):
+        return None
+    return full_real
+
+
+def _run_subprocess_sandboxed(cmd: list[str], timeout_s: int, env: dict) -> tuple[int, str, str, bool]:
+    """Run a subprocess with basic safety controls.
+
+    Returns (returncode, stdout, stderr, timed_out).
+    """
+    timeout_s = max(1, int(timeout_s or 1))
+
+    # Best-effort resource limits on POSIX.
+    preexec_fn = None
+    if os.name == "posix":
+        def _limit():
+            try:
+                import resource
+
+                # CPU seconds hard limit (a little above timeout).
+                resource.setrlimit(resource.RLIMIT_CPU, (timeout_s + 1, timeout_s + 1))
+                # Max file size written by the process (bytes).
+                resource.setrlimit(resource.RLIMIT_FSIZE, (1_000_000, 1_000_000))
+                # Max processes (defense-in-depth; not supported everywhere).
+                try:
+                    resource.setrlimit(resource.RLIMIT_NPROC, (32, 32))
+                except Exception:
+                    pass
+                # Address space cap (bytes) to avoid runaway memory usage.
+                try:
+                    mem = int(os.environ.get("SCRIPT_CHECK_MAX_MEMORY_MB", "256")) * 1024 * 1024
+                    resource.setrlimit(resource.RLIMIT_AS, (mem, mem))
+                except Exception:
+                    pass
+            except Exception:
+                return
+
+        preexec_fn = _limit
+
+    # Put the process in its own group/session so we can kill children on timeout.
+    popen_kwargs = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+        "env": env,
+    }
+    if os.name == "posix":
+        popen_kwargs["start_new_session"] = True
+        popen_kwargs["preexec_fn"] = preexec_fn
+    else:
+        try:
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+    proc = subprocess.Popen(cmd, **popen_kwargs)  # noqa: S603
+    try:
+        out, err = proc.communicate(timeout=timeout_s)
+        return proc.returncode or 0, out or "", err or "", False
+    except subprocess.TimeoutExpired:
+        # Kill the whole process group if possible.
+        try:
+            if os.name == "posix":
+                os.killpg(proc.pid, signal.SIGKILL)
+            else:
+                proc.kill()
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        try:
+            out, err = proc.communicate(timeout=2)
+        except Exception:
+            out, err = "", ""
+        return 124, out or "", err or "", True
+
+
+def _script_check(check: Check, project: Project, timeout: int, retries: int) -> Tuple[bool, str, Optional[float]]:
+    """Execute a custom script check.
+
+    Success is exit code 0. Failure is any non-zero exit code or timeout.
+    """
+    script_path = getattr(check, "script_path", None)
+    resolved = _resolve_script_path(script_path or "")
+    if not resolved:
+        return False, f"script_not_found:{script_path}", None
+
+    args = _parse_script_args(getattr(check, "script_args", None))
+    # If the script is a python file, run it with the current interpreter for portability.
+    cmd = [sys.executable, resolved] if resolved.endswith(".py") else [resolved]
+    cmd.extend(args)
+
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "PYTHONUNBUFFERED": "1",
+        "LASTPING_PROJECT_ID": str(getattr(project, "id", "")),
+        "LASTPING_CHECK_ID": str(getattr(check, "id", "")),
+        "LASTPING_CHECK_NAME": str(getattr(check, "name", "")),
+        "LASTPING_CHECK_TYPE": str(getattr(check, "type", "")),
+    }
+
+    last_reason = "unknown"
+    for attempt in range(max(1, int(retries or 1))):
+        start = time.time()
+        rc, out, err, timed_out = _run_subprocess_sandboxed(cmd, timeout, env)
+        latency_ms = (time.time() - start) * 1000.0
+
+        out_t = _truncate((out or "").strip())
+        err_t = _truncate((err or "").strip())
+
+        if timed_out:
+            last_reason = f"timeout>{timeout}s"
+        elif rc == 0:
+            msg = out_t or "ok"
+            return True, msg, latency_ms
+        else:
+            # Prefer stderr for failure reason.
+            detail = err_t or out_t or "error"
+            last_reason = f"exit={rc} {detail}".strip()
+        # brief backoff between attempts
+        if attempt < max(1, int(retries or 1)) - 1:
+            time.sleep(0.5)
+
+    return False, last_reason, None
 
 
 def _project_is_throttled(session: Session, project: Project, now: datetime) -> bool:
@@ -1440,8 +1625,8 @@ def scan_checks_once(session: Session):
                         session.add(check)
                         session.commit()
 
-        # HTTP/TCP/DNS checks are actively polled according to `interval` and `next_run`.
-        elif check.type in (CheckType.HTTP, CheckType.TCP, CheckType.DNS):
+        # HTTP/TCP/DNS/SCRIPT checks are actively polled according to `interval` and `next_run`.
+        elif check.type in (CheckType.HTTP, CheckType.TCP, CheckType.DNS, CheckType.SCRIPT):
             timeout = check.timeout or 5
             retries = check.retries or 1
             interval = getattr(check, "interval", None) or 60
@@ -1463,6 +1648,8 @@ def scan_checks_once(session: Session):
                 if not check.host:
                     continue
                 ok, reason, latency_ms = _dns_check(check.host, check.dns_record_type)
+            elif check.type == CheckType.SCRIPT:
+                ok, reason, latency_ms = _script_check(check, project, timeout, retries)
 
             if ok:
                 check.last_ping = now
