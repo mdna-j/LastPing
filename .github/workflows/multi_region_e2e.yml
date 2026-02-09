@@ -7,8 +7,11 @@ on:
     paths:
       - "Dockerfile"
       - "docker-entrypoint.sh"
+      - "src/deps.py"
       - "src/worker.py"
       - "src/models.py"
+      - "src/routers/projects.py"
+      - "src/routers/checks.py"
       - "docker-compose.yml"
       - "multi_region.md"
       - "docs/multi_region_validation.md"
@@ -18,8 +21,11 @@ on:
     paths:
       - "Dockerfile"
       - "docker-entrypoint.sh"
+      - "src/deps.py"
       - "src/worker.py"
       - "src/models.py"
+      - "src/routers/projects.py"
+      - "src/routers/checks.py"
       - "docker-compose.yml"
       - "multi_region.md"
       - "docs/multi_region_validation.md"

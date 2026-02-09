@@ -179,8 +179,23 @@ def rotate_project_key(project_id: int = Query(..., ge=1), request: Request = No
     project = session.get(Project, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+    old_hash = getattr(project, "api_key_hash", None)
     new = generate_api_key()
-    project.api_key_hash = hash_api_key(new)
+    new_hash = hash_api_key(new)
+    project.api_key_hash = new_hash
+    # Keep `api_key` table in sync for the primary key.
+    try:
+        if old_hash:
+            ak = session.exec(select(ApiKey).where(ApiKey.project_id == project_id, ApiKey.key_hash == old_hash)).first()
+        else:
+            ak = None
+        if ak:
+            ak.key_hash = new_hash
+            session.add(ak)
+        else:
+            session.add(ApiKey(project_id=project_id, key_hash=new_hash, rate_limit_per_minute=0))
+    except Exception:
+        pass
     session.add(project)
     session.commit()
     # audit

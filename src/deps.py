@@ -185,7 +185,8 @@ def limit_by_api_key(project_id: int, authorization: Optional[str] = Header(None
     """Enforce per-API-key rate limits for write endpoints.
 
     - Admin token bypasses rate limiting.
-    - Expects an API key belonging to the project; raises 401/403 if missing/invalid.
+    - Accepts either a project-scoped key in `api_key` table or the project's primary API key hash stored on `Project.api_key_hash`.
+      Raises 401/403 if missing/invalid.
     - Increments a per-minute counter stored in `ApiKeyUsage` and raises 429 when exceeded.
     Returns the matched `ApiKey` on success, or None for admin token.
     """
@@ -207,6 +208,12 @@ def limit_by_api_key(project_id: int, authorization: Optional[str] = Header(None
             matched = ak
             break
     if not matched:
+        # Backwards compatibility: allow the project's primary API key stored on `Project.api_key_hash`
+        # even when no `ApiKey` rows exist yet.
+        project = session.get(Project, project_id)
+        if project and getattr(project, "api_key_hash", None) and verify_api_key(key, project.api_key_hash):
+            return None
+
         # If no API key matched, allow bearer user tokens and apply per-user rate limits.
         if authorization and authorization.lower().startswith('bearer '):
             token = authorization.split(None, 1)[1].strip()

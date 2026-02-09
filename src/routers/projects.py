@@ -15,7 +15,7 @@ from pydantic import BaseModel, EmailStr, AnyHttpUrl, confloat, constr, root_val
 from sqlmodel import select, Session
 
 from ..db import get_session
-from ..models import Project as ProjectModel, AuditLog
+from ..models import Project as ProjectModel, AuditLog, ApiKey
 from ..security import generate_api_key, hash_api_key
 from ..deps import limit_by_api_key, get_audit_context, limit_public_requests
 from ..schemas import StrictBaseModel
@@ -72,6 +72,13 @@ def create_project(payload: ProjectCreate, request: Request = None, authorizatio
     session.add(project)
     session.commit()
     session.refresh(project)
+    # Ensure the primary project API key is also represented in the `api_key`
+    # table so write endpoints guarded by `limit_by_api_key` accept it.
+    try:
+        session.add(ApiKey(project_id=project.id, key_hash=api_key_hash, rate_limit_per_minute=0))
+        session.commit()
+    except Exception:
+        session.rollback()
     try:
         actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
         al = AuditLog(actor=actor, action="create_project", target_type="project", target_id=project.id, details=None, actor_ip=actor_ip, user_agent=user_agent)
@@ -218,7 +225,22 @@ def rotate_api_key(project_id: int = Path(..., ge=1), request: Request = None, s
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     new_key = generate_api_key()
-    project.api_key_hash = hash_api_key(new_key)
+    old_hash = getattr(project, "api_key_hash", None)
+    new_hash = hash_api_key(new_key)
+    project.api_key_hash = new_hash
+    # Keep `api_key` table in sync for the primary key.
+    try:
+        if old_hash:
+            ak = session.exec(select(ApiKey).where(ApiKey.project_id == project_id, ApiKey.key_hash == old_hash)).first()
+        else:
+            ak = None
+        if ak:
+            ak.key_hash = new_hash
+            session.add(ak)
+        else:
+            session.add(ApiKey(project_id=project_id, key_hash=new_hash, rate_limit_per_minute=0))
+    except Exception:
+        pass
     # Email the new key to the project owner when configured. This is
     # the safe most practical delivery mechanism for production usage.
     from ..alerts import send_email
@@ -261,8 +283,23 @@ def rotate_all_keys(request: Request = None, x_admin_token: Optional[str] = Head
     projects = session.exec(select(ProjectModel)).all()
     result = {}
     for p in projects:
+        old_hash = getattr(p, "api_key_hash", None)
         new_key = generate_api_key()
-        p.api_key_hash = hash_api_key(new_key)
+        new_hash = hash_api_key(new_key)
+        p.api_key_hash = new_hash
+        # Keep `api_key` table in sync for the primary key.
+        try:
+            if old_hash:
+                ak = session.exec(select(ApiKey).where(ApiKey.project_id == p.id, ApiKey.key_hash == old_hash)).first()
+            else:
+                ak = None
+            if ak:
+                ak.key_hash = new_hash
+                session.add(ak)
+            else:
+                session.add(ApiKey(project_id=p.id, key_hash=new_hash, rate_limit_per_minute=0))
+        except Exception:
+            pass
         session.add(p)
         result[p.id] = new_key
         # email rotated key to owner when available
