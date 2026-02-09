@@ -60,15 +60,25 @@ jobs:
 
       - name: Create Project + Region-Pinned Check (us-east)
         run: |
-          resp="$(curl -fsS -X POST http://localhost:8000/projects/ -H 'Content-Type: application/json' -d '{"name":"ci-multi-region"}')"
-          project_id="$(python -c 'import json,sys; data=json.load(sys.stdin); print(data["project"]["id"])' <<<"$resp")"
-          api_key="$(python -c 'import json,sys; data=json.load(sys.stdin); print(data["api_key"])' <<<"$resp")"
+          code="$(curl -sS -o /tmp/project_resp.json -w '%{http_code}' -X POST http://localhost:8000/projects/ -H 'Content-Type: application/json' -d '{"name":"ci-multi-region"}')"
+          if [ "$code" -ge 400 ]; then
+            echo "Create project failed: HTTP $code"
+            cat /tmp/project_resp.json || true
+            exit 1
+          fi
+          project_id="$(python -c 'import json,sys; data=json.load(sys.stdin); print(data["project"]["id"])' </tmp/project_resp.json)"
+          api_key="$(python -c 'import json,sys; data=json.load(sys.stdin); print(data["api_key"])' </tmp/project_resp.json)"
 
-          check_resp="$(curl -fsS -X POST "http://localhost:8000/projects/${project_id}/checks/" \
+          code="$(curl -sS -o /tmp/check_resp.json -w '%{http_code}' -X POST "http://localhost:8000/projects/${project_id}/checks/" \
             -H 'Content-Type: application/json' \
             -H "X-API-KEY: ${api_key}" \
             -d '{"name":"ci-us-east","type":"heartbeat","expected_interval":60,"grace_period":0,"region":"us-east","alert_enabled":false}')"
-          check_id="$(python -c 'import json,sys; data=json.load(sys.stdin); print(data["id"])' <<<"$check_resp")"
+          if [ "$code" -ge 400 ]; then
+            echo "Create check failed: HTTP $code"
+            cat /tmp/check_resp.json || true
+            exit 1
+          fi
+          check_id="$(python -c 'import json,sys; data=json.load(sys.stdin); print(data["id"])' </tmp/check_resp.json)"
 
           {
             echo "PROJECT_ID=${project_id}"
