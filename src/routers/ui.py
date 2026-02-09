@@ -577,6 +577,100 @@ def oncall_page(project_id: int = Path(..., ge=1)):
       <button id="policyAddBtn" class="btn">Add Step</button>
     </div>
     <div class="muted">Use Add Step to append a new escalation level for the selected scope.</div>
+    <h2>Per-check Routing &amp; Channel Overrides</h2>
+    <div class="muted">
+      Select a check in <strong>Policy Builder</strong> above to edit overrides.
+      Use <em>inherit</em> (blank) to fall back to project defaults. Blank destination fields clear overrides.
+      Saving requires an admin token (or an owner user token).
+    </div>
+    <div class="row">
+      <button id="routingSaveBtn" class="btn">Save Overrides</button>
+      <button id="routingResetBtn" class="btn btn-secondary">Reset (inherit)</button>
+      <div id="routingScope" class="muted"></div>
+    </div>
+    <div class="card">
+      <div class="row">
+        <label>On-call:
+          <select id="routingOncallEnabled" style="width:160px">
+            <option value="">inherit</option>
+            <option value="true">enabled</option>
+            <option value="false">disabled</option>
+          </select>
+        </label>
+        <label>On-call Email:
+          <input id="routingOncallEmail" placeholder="oncall@example.com" style="width:260px"/>
+        </label>
+        <label>SMS:
+          <select id="routingSmsEnabled" style="width:160px">
+            <option value="">inherit</option>
+            <option value="true">enabled</option>
+            <option value="false">disabled</option>
+          </select>
+        </label>
+        <label>SMS To:
+          <input id="routingSmsTo" placeholder="+15551234567" style="width:180px"/>
+        </label>
+      </div>
+      <div class="row">
+        <label>Slack:
+          <select id="routingSlackEnabled" style="width:160px">
+            <option value="">inherit</option>
+            <option value="true">enabled</option>
+            <option value="false">disabled</option>
+          </select>
+        </label>
+        <label>Slack Webhook:
+          <input id="routingSlackWebhook" type="url" placeholder="https://hooks.slack.com/..." style="width:360px"/>
+        </label>
+      </div>
+      <div class="row">
+        <label>Discord:
+          <select id="routingDiscordEnabled" style="width:160px">
+            <option value="">inherit</option>
+            <option value="true">enabled</option>
+            <option value="false">disabled</option>
+          </select>
+        </label>
+        <label>Discord Webhook:
+          <input id="routingDiscordWebhook" type="url" placeholder="https://discord.com/api/webhooks/..." style="width:360px"/>
+        </label>
+      </div>
+      <div class="row">
+        <label>PagerDuty:
+          <select id="routingPagerdutyEnabled" style="width:160px">
+            <option value="">inherit</option>
+            <option value="true">enabled</option>
+            <option value="false">disabled</option>
+          </select>
+        </label>
+        <label>Integration Key:
+          <input id="routingPagerdutyKey" placeholder="(optional)" style="width:260px"/>
+        </label>
+      </div>
+      <div class="row">
+        <label>Generic Webhook:
+          <select id="routingWebhookEnabled" style="width:160px">
+            <option value="">inherit</option>
+            <option value="true">enabled</option>
+            <option value="false">disabled</option>
+          </select>
+        </label>
+        <label>Webhook URL:
+          <input id="routingGenericWebhook" type="url" placeholder="https://example.com/webhook" style="width:360px"/>
+        </label>
+      </div>
+      <div class="row">
+        <label>Escalate after (min):
+          <input id="routingEscAfter" placeholder="(disabled)" style="width:160px"/>
+        </label>
+        <label>Escalation cooldown (s):
+          <input id="routingEscCooldown" placeholder="3600" style="width:160px"/>
+        </label>
+      </div>
+      <div class="muted">
+        Validation hints: SMS To should look like <code>+15551234567</code>. Webhook URLs must be <code>http(s)://</code>.
+      </div>
+    </div>
     <h2>Open Alerts</h2>
     <div id="alerts"></div>
     <script src="/static/js/oncall.js"></script>

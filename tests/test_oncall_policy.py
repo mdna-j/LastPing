@@ -130,3 +130,79 @@ def test_oncall_apply_template(tmp_path):
     rows = list_resp.json()
     assert len(rows) == 2
     assert all(r["check_id"] == check_id for r in rows)
+
+
+def test_oncall_patch_check_routing_allows_null_clears(tmp_path):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'oncall_routing.db'}"
+    os.environ["ADMIN_TOKEN"] = "adminkey"
+
+    from sqlmodel import Session
+    from src import db as dbmod
+    from src.main import app
+    from src.models import Project, Check, CheckType, CheckStatus
+    from src.security import hash_api_key
+
+    dbmod.create_db_and_tables()
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="routeproj", api_key_hash=hash_api_key("routekey"), oncall_enabled=True, oncall_email="proj@example.com")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        check = Check(
+            project_id=project.id,
+            name="api",
+            type=CheckType.HTTP,
+            status=CheckStatus.UP,
+            alert_slack_webhook_url="https://example.com/slack",
+            escalation_after_minutes=10,
+            escalation_cooldown_seconds=3600,
+        )
+        session.add(check)
+        session.commit()
+        session.refresh(check)
+        project_id = project.id
+        check_id = check.id
+
+    client = TestClient(app)
+    admin_headers = {"X-ADMIN-TOKEN": "adminkey"}
+
+    # Update a subset of fields; omitted fields should remain unchanged.
+    resp = client.patch(
+        f"/projects/{project_id}/oncall/checks/{check_id}/routing",
+        json={
+            "alert_oncall_enabled": True,
+            "alert_oncall_email": "check@example.com",
+            "alert_sms_enabled": False,
+            "alert_sms_to": None,  # explicit null clears override
+            "escalation_after_minutes": None,  # explicit null disables per-check escalation timer
+            "escalation_cooldown_seconds": 120,
+        },
+        headers=admin_headers,
+    )
+    assert resp.status_code == 200, resp.text
+
+    with Session(dbmod.engine) as session:
+        chk = session.get(Check, check_id)
+        assert chk is not None
+        assert chk.alert_oncall_enabled is True
+        assert chk.alert_oncall_email == "check@example.com"
+        assert chk.alert_sms_enabled is False
+        assert chk.alert_sms_to is None
+        assert chk.escalation_after_minutes is None
+        assert chk.escalation_cooldown_seconds == 120
+        # unchanged because omitted
+        assert chk.alert_slack_webhook_url == "https://example.com/slack"
+
+    # Now clear slack override explicitly.
+    resp2 = client.patch(
+        f"/projects/{project_id}/oncall/checks/{check_id}/routing",
+        json={"alert_slack_webhook_url": None},
+        headers=admin_headers,
+    )
+    assert resp2.status_code == 200, resp2.text
+
+    with Session(dbmod.engine) as session:
+        chk = session.get(Check, check_id)
+        assert chk.alert_slack_webhook_url is None

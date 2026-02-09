@@ -21,6 +21,191 @@ function getSelectedPolicyCheck(){
   return select && select.value ? parseInt(select.value) : null;
 }
 
+function setTriSelect(id, value) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  if (value === true) el.value = 'true';
+  else if (value === false) el.value = 'false';
+  else el.value = '';
+}
+
+function getTriSelect(id) {
+  const el = document.getElementById(id);
+  if (!el) return null;
+  if (el.value === 'true') return true;
+  if (el.value === 'false') return false;
+  return null;
+}
+
+function valOrNull(id) {
+  const el = document.getElementById(id);
+  if (!el) return null;
+  const v = (el.value || '').trim();
+  return v ? v : null;
+}
+
+function numOrNull(id) {
+  const el = document.getElementById(id);
+  if (!el) return null;
+  const raw = (el.value || '').trim();
+  if (raw === '') return null;
+  const n = parseInt(raw, 10);
+  return isNaN(n) ? null : n;
+}
+
+function numOrDefault(id, defaultValue) {
+  const el = document.getElementById(id);
+  if (!el) return defaultValue;
+  const raw = (el.value || '').trim();
+  if (raw === '') return defaultValue;
+  const n = parseInt(raw, 10);
+  return isNaN(n) ? defaultValue : n;
+}
+
+function _getCheckById(checkId) {
+  if (!checkId) return null;
+  const id = parseInt(checkId, 10);
+  if (!id) return null;
+  return (oncallChecks || []).find(c => c && c.id === id) || null;
+}
+
+function _setRoutingDisabled(disabled) {
+  const ids = [
+    'routingOncallEnabled',
+    'routingOncallEmail',
+    'routingSmsEnabled',
+    'routingSmsTo',
+    'routingSlackEnabled',
+    'routingSlackWebhook',
+    'routingDiscordEnabled',
+    'routingDiscordWebhook',
+    'routingPagerdutyEnabled',
+    'routingPagerdutyKey',
+    'routingWebhookEnabled',
+    'routingGenericWebhook',
+    'routingEscAfter',
+    'routingEscCooldown',
+  ];
+  for (const id of ids) {
+    const el = document.getElementById(id);
+    if (el) el.disabled = !!disabled;
+  }
+  const saveBtn = document.getElementById('routingSaveBtn');
+  if (saveBtn) saveBtn.disabled = !!disabled;
+  const resetBtn = document.getElementById('routingResetBtn');
+  if (resetBtn) resetBtn.disabled = !!disabled;
+}
+
+function renderRoutingOverrides() {
+  const scope = document.getElementById('routingScope');
+  if (!scope) return;
+
+  const checkId = getSelectedPolicyCheck();
+  if (!checkId) {
+    scope.textContent = 'No check selected (routing overrides are check-scoped).';
+    _setRoutingDisabled(true);
+    return;
+  }
+  const chk = _getCheckById(checkId);
+  if (!chk) {
+    scope.textContent = `Selected check #${checkId} (loading details...)`;
+    _setRoutingDisabled(true);
+    return;
+  }
+
+  scope.textContent = `Editing: ${chk.name || 'check'} (#${chk.id})`;
+  _setRoutingDisabled(false);
+
+  setTriSelect('routingOncallEnabled', chk.alert_oncall_enabled);
+  setTriSelect('routingSmsEnabled', chk.alert_sms_enabled);
+  setTriSelect('routingSlackEnabled', chk.alert_slack_enabled);
+  setTriSelect('routingDiscordEnabled', chk.alert_discord_enabled);
+  setTriSelect('routingPagerdutyEnabled', chk.alert_pagerduty_enabled);
+  setTriSelect('routingWebhookEnabled', chk.alert_webhook_enabled);
+
+  const oncallEmail = document.getElementById('routingOncallEmail');
+  if (oncallEmail) oncallEmail.value = chk.alert_oncall_email || '';
+  const smsTo = document.getElementById('routingSmsTo');
+  if (smsTo) smsTo.value = chk.alert_sms_to || '';
+  const slack = document.getElementById('routingSlackWebhook');
+  if (slack) slack.value = chk.alert_slack_webhook_url || '';
+  const discord = document.getElementById('routingDiscordWebhook');
+  if (discord) discord.value = chk.alert_discord_webhook_url || '';
+  const pdKey = document.getElementById('routingPagerdutyKey');
+  if (pdKey) pdKey.value = chk.alert_pagerduty_integration_key || '';
+  const gen = document.getElementById('routingGenericWebhook');
+  if (gen) gen.value = chk.alert_generic_webhook_url || '';
+
+  const escAfter = document.getElementById('routingEscAfter');
+  if (escAfter) escAfter.value = chk.escalation_after_minutes || '';
+  const escCooldown = document.getElementById('routingEscCooldown');
+  if (escCooldown) {
+    const cd = (chk.escalation_cooldown_seconds === null || chk.escalation_cooldown_seconds === undefined) ? 3600 : chk.escalation_cooldown_seconds;
+    escCooldown.value = String(cd);
+  }
+}
+
+function resetRoutingOverrides() {
+  const checkId = getSelectedPolicyCheck();
+  if (!checkId) return;
+  setTriSelect('routingOncallEnabled', null);
+  setTriSelect('routingSmsEnabled', null);
+  setTriSelect('routingSlackEnabled', null);
+  setTriSelect('routingDiscordEnabled', null);
+  setTriSelect('routingPagerdutyEnabled', null);
+  setTriSelect('routingWebhookEnabled', null);
+
+  const ids = [
+    'routingOncallEmail',
+    'routingSmsTo',
+    'routingSlackWebhook',
+    'routingDiscordWebhook',
+    'routingPagerdutyKey',
+    'routingGenericWebhook',
+    'routingEscAfter',
+  ];
+  for (const id of ids) {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  }
+  const escCooldown = document.getElementById('routingEscCooldown');
+  if (escCooldown) escCooldown.value = '3600';
+}
+
+async function saveRoutingOverrides() {
+  const pid = getProjectId();
+  const checkId = getSelectedPolicyCheck();
+  if (!checkId) {
+    alert('Select a check in Policy Builder first.');
+    return;
+  }
+  const payload = {
+    alert_oncall_enabled: getTriSelect('routingOncallEnabled'),
+    alert_sms_enabled: getTriSelect('routingSmsEnabled'),
+    alert_slack_enabled: getTriSelect('routingSlackEnabled'),
+    alert_discord_enabled: getTriSelect('routingDiscordEnabled'),
+    alert_pagerduty_enabled: getTriSelect('routingPagerdutyEnabled'),
+    alert_webhook_enabled: getTriSelect('routingWebhookEnabled'),
+    alert_oncall_email: valOrNull('routingOncallEmail'),
+    alert_sms_to: valOrNull('routingSmsTo'),
+    alert_slack_webhook_url: valOrNull('routingSlackWebhook'),
+    alert_discord_webhook_url: valOrNull('routingDiscordWebhook'),
+    alert_pagerduty_integration_key: valOrNull('routingPagerdutyKey'),
+    alert_generic_webhook_url: valOrNull('routingGenericWebhook'),
+    escalation_after_minutes: numOrNull('routingEscAfter'),
+    escalation_cooldown_seconds: numOrDefault('routingEscCooldown', 3600),
+  };
+  const res = await fetch(`/projects/${pid}/oncall/checks/${checkId}/routing`, {method:'PATCH', headers: headersOncall(), body: JSON.stringify(payload)});
+  if (!res.ok) {
+    const msg = await res.text();
+    alert(`Save failed: ${msg}`);
+    return;
+  }
+  await loadChecksForEscalations();
+  renderRoutingOverrides();
+  alert('Saved overrides');
+}
+
 function getPolicyChain(checkId){
   if(checkId){
     return oncallEscalations.filter(e => e.check_id === checkId);
@@ -92,7 +277,7 @@ async function loadChecksForEscalations(){
   select.innerHTML = '<option value="">(project-wide)</option>';
   filterSelect.innerHTML = '<option value="">(all checks)</option>';
   if(policySelect) policySelect.innerHTML = '<option value="">(project-wide)</option>';
-  if(!h.Authorization) return;
+  if(!h.Authorization) { renderRoutingOverrides(); return; }
   try{
     const res = await fetch(`/projects/${pid}/checks`, {headers: h});
     if(!res.ok) return;
@@ -105,11 +290,12 @@ async function loadChecksForEscalations(){
       select.appendChild(opt);
       const opt2 = opt.cloneNode(true);
       filterSelect.appendChild(opt2);
-      if(policySelect){
-        const opt3 = opt.cloneNode(true);
-        policySelect.appendChild(opt3);
+        if(policySelect){
+          const opt3 = opt.cloneNode(true);
+          policySelect.appendChild(opt3);
+        }
       }
-    }
+    renderRoutingOverrides();
   }catch(e){ }
 }
 
@@ -445,8 +631,13 @@ document.addEventListener('DOMContentLoaded', ()=>{
     policySelect.addEventListener('change', ()=>{
       renderPolicyChain();
       renderPolicyPreview();
+      renderRoutingOverrides();
     });
   }
+  const routingSave = document.getElementById('routingSaveBtn');
+  if(routingSave) routingSave.addEventListener('click', saveRoutingOverrides);
+  const routingReset = document.getElementById('routingResetBtn');
+  if(routingReset) routingReset.addEventListener('click', resetRoutingOverrides);
   const apiKey = document.getElementById('apiKey');
   if(apiKey){
     apiKey.addEventListener('change', loadChecksForEscalations);
@@ -457,4 +648,5 @@ document.addEventListener('DOMContentLoaded', ()=>{
   }
   loadChecksForEscalations();
   refreshOncall();
+  renderRoutingOverrides();
 });

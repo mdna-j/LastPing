@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Optional, List, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Header, Request, status, Path, Query, Body
-from pydantic import BaseModel, EmailStr, conint, constr, root_validator, validator
+from pydantic import BaseModel, EmailStr, AnyHttpUrl, conint, constr, root_validator, validator
 from sqlmodel import Session, select
 
 from ..db import get_session
@@ -110,6 +110,32 @@ class SmsSettingsOut(BaseModel):
 
     class Config:
         orm_mode = True
+
+
+class CheckRoutingPatch(StrictBaseModel):
+    """Per-check routing + channel enablement overrides.
+
+    - `None` means "inherit project/default".
+    - We use `__fields_set__` in the handler to distinguish omitted fields
+      (no change) from explicit null (clear override / inherit).
+    """
+
+    alert_sms_enabled: Optional[bool] = None
+    alert_oncall_enabled: Optional[bool] = None
+    alert_slack_enabled: Optional[bool] = None
+    alert_discord_enabled: Optional[bool] = None
+    alert_pagerduty_enabled: Optional[bool] = None
+    alert_webhook_enabled: Optional[bool] = None
+
+    alert_sms_to: Optional[constr(regex=r"^\\+?[0-9]{7,20}$")] = None
+    alert_oncall_email: Optional[EmailStr] = None
+    alert_slack_webhook_url: Optional[AnyHttpUrl] = None
+    alert_discord_webhook_url: Optional[AnyHttpUrl] = None
+    alert_pagerduty_integration_key: Optional[constr(max_length=128)] = None
+    alert_generic_webhook_url: Optional[AnyHttpUrl] = None
+
+    escalation_after_minutes: Optional[conint(ge=1, le=10080)] = None
+    escalation_cooldown_seconds: Optional[conint(ge=0, le=86400)] = None
 
 
 @router.get("/rotations")
@@ -510,6 +536,71 @@ def set_sms_settings(project_id: int = Path(..., ge=1), payload: SmsSettingsIn =
         sms_auth_token_set=bool(project.sms_auth_token),
         sms_from=project.sms_from,
     )
+
+
+@router.patch("/checks/{check_id}/routing")
+def patch_check_routing(
+    project_id: int = Path(..., ge=1),
+    check_id: int = Path(..., ge=1),
+    payload: CheckRoutingPatch = Body(...),
+    request: Request = None,
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    _rl=Depends(limit_by_api_key),
+    session: Session = Depends(get_session),
+):
+    """Update per-check routing/channel overrides (UI support)."""
+    require_admin_or_owner(project_id, x_admin_token=x_admin_token, authorization=authorization, session=session)
+    check = session.get(Check, check_id)
+    if not check or check.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Check not found")
+
+    allowed = [
+        "alert_sms_enabled",
+        "alert_oncall_enabled",
+        "alert_slack_enabled",
+        "alert_discord_enabled",
+        "alert_pagerduty_enabled",
+        "alert_webhook_enabled",
+        "alert_sms_to",
+        "alert_oncall_email",
+        "alert_slack_webhook_url",
+        "alert_discord_webhook_url",
+        "alert_pagerduty_integration_key",
+        "alert_generic_webhook_url",
+        "escalation_after_minutes",
+        "escalation_cooldown_seconds",
+    ]
+
+    before = {k: getattr(check, k, None) for k in allowed}
+    fields = getattr(payload, "__fields_set__", set()) or set()
+    for k in allowed:
+        if k in fields:
+            setattr(check, k, getattr(payload, k))
+
+    session.add(check)
+    session.commit()
+    session.refresh(check)
+
+    try:
+        actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
+        changed = sorted([k for k in allowed if before.get(k) != getattr(check, k, None)])
+        details = {"check_id": check_id, "changed_fields": changed}
+        al = AuditLog(
+            actor=actor,
+            action="update_check_routing",
+            target_type="check",
+            target_id=check_id,
+            details=details,
+            actor_ip=actor_ip,
+            user_agent=user_agent,
+        )
+        session.add(al)
+        session.commit()
+    except Exception:
+        pass
+
+    return {"status": "updated", "check_id": check_id}
 
 
 @router.post("/alerts/{alert_id}/close")
