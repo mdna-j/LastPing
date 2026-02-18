@@ -146,6 +146,7 @@ class Check(SQLModel, table=True):
     project: Optional[Project] = Relationship(back_populates="checks")
     heartbeats: List["Heartbeat"] = Relationship(back_populates="check")
     events: List["Event"] = Relationship(back_populates="check")
+    check_results: List["CheckResult"] = Relationship(back_populates="check")
 
 
 class ApiKey(SQLModel, table=True):
@@ -289,6 +290,20 @@ class Event(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
     check: Optional[Check] = Relationship(back_populates="events")
+
+
+class CheckResult(SQLModel, table=True):
+    __tablename__ = "check_result"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    check_id: int = Field(foreign_key="check.id", index=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    incident_id: Optional[int] = Field(default=None, foreign_key="incident.id", index=True)
+    status: str = Field(description="observed check status during this execution")
+    latency_ms: Optional[float] = None
+    error_message: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+
+    check: Optional[Check] = Relationship(back_populates="check_results")
 
 
 class Incident(SQLModel, table=True):

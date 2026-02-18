@@ -25,7 +25,7 @@ from typing import Tuple, Optional
 from sqlmodel import Session, select
 
 from .db import engine
-from .models import Check, CheckType, CheckStatus, Event, EventType, Project, Incident
+from .models import Check, CheckType, CheckStatus, Event, EventType, Project, Incident, CheckResult
 from .alerts import notify_down, notify_recovery, notify_degraded, send_email, send_sms
 from .models import UptimeSnapshot, AvailabilityRollup, CheckLease, RemediationHook, RemediationLog, RemediationApproval, OnCallAlert, OnCallEscalation, OnCallRotation, OnCallMember, AuditLog
 from .analytics_ml import find_similar_incidents
@@ -43,6 +43,34 @@ _LAST_QUARTERLY_RUN: Optional[datetime] = None
 def _now() -> datetime:
     """Return current UTC datetime (extracted to ease testing)."""
     return datetime.utcnow()
+
+
+def _record_check_result(
+    session: Session,
+    check: Check,
+    *,
+    status: str,
+    latency_ms: Optional[float],
+    error_message: Optional[str],
+    incident_id: Optional[int],
+    created_at: datetime,
+) -> None:
+    """Persist canonical execution evidence for a check run."""
+    try:
+        row = CheckResult(
+            check_id=check.id,
+            project_id=check.project_id,
+            incident_id=incident_id,
+            status=status,
+            latency_ms=latency_ms,
+            error_message=error_message,
+            created_at=created_at,
+        )
+        session.add(row)
+        session.commit()
+    except Exception:
+        session.rollback()
+        logger.exception("Error recording check evidence for check %s", getattr(check, "id", None))
 
 
 def _in_maintenance(check: Check, project: Project, now: datetime) -> bool:
@@ -1516,6 +1544,15 @@ def scan_checks_once(session: Session):
                         event_message = f"{reason} (suppressed due to maintenance)"
                     event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.DOWN, message=event_message, incident_id=open_inc.id)
                     session.add(event)
+                    _record_check_result(
+                        session,
+                        check,
+                        status=CheckStatus.DOWN,
+                        latency_ms=None,
+                        error_message=reason,
+                        incident_id=open_inc.id,
+                        created_at=now,
+                    )
                     if not maintenance:
                         _trigger_remediation(session, project, check, EventType.DOWN, reason, now)
                         _ensure_oncall_alert(session, project, check, EventType.DOWN, reason, now)
@@ -1555,10 +1592,21 @@ def scan_checks_once(session: Session):
                         session.commit()
                 else:
                     check.consecutive_failures = (check.consecutive_failures or 0) + 1
+                    open_inc = session.exec(
+                        select(Incident).where(Incident.check_id == check.id, Incident.resolved_at == None)
+                    ).first()
+                    _record_check_result(
+                        session,
+                        check,
+                        status=CheckStatus.DOWN,
+                        latency_ms=None,
+                        error_message="missed heartbeat",
+                        incident_id=(open_inc.id if open_inc else None),
+                        created_at=now,
+                    )
                     # still down: allow re-alerts after cooldown if threshold met
                     should_alert = check.alert_enabled and (check.consecutive_failures >= (check.alert_after or 1))
                     if should_alert:
-                        open_inc = session.exec(select(Incident).where(Incident.check_id == check.id, Incident.resolved_at == None)).first()
                         if maintenance:
                             session.add(check)
                             session.commit()
@@ -1602,6 +1650,15 @@ def scan_checks_once(session: Session):
                         session.commit()
                     event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.UP, message="recovered", incident_id=(open_inc.id if open_inc else None))
                     session.add(event)
+                    _record_check_result(
+                        session,
+                        check,
+                        status=CheckStatus.UP,
+                        latency_ms=None,
+                        error_message=None,
+                        incident_id=(open_inc.id if open_inc else None),
+                        created_at=now,
+                    )
                     _close_oncall_alerts(session, check.id)
                     # recovery alert: respect cooldown and enabled
                     if check.alert_enabled and not maintenance:
@@ -1624,6 +1681,16 @@ def scan_checks_once(session: Session):
                     else:
                         session.add(check)
                         session.commit()
+                else:
+                    _record_check_result(
+                        session,
+                        check,
+                        status=check.status,
+                        latency_ms=None,
+                        error_message=None,
+                        incident_id=None,
+                        created_at=now,
+                    )
 
         # HTTP/TCP/DNS/SCRIPT checks are actively polled according to `interval` and `next_run`.
         elif check.type in (CheckType.HTTP, CheckType.TCP, CheckType.DNS, CheckType.SCRIPT):
@@ -1636,6 +1703,9 @@ def scan_checks_once(session: Session):
             ok = False
             reason = "unknown"
             latency_ms = None
+            evidence_status = CheckStatus.UP
+            evidence_error: Optional[str] = None
+            evidence_incident_id: Optional[int] = None
             if check.type == CheckType.HTTP:
                 if not check.url:
                     continue
@@ -1656,6 +1726,12 @@ def scan_checks_once(session: Session):
                 check.last_latency_ms = latency_ms
                 is_degraded = _is_degraded(check, latency_ms)
                 if is_degraded:
+                    evidence_status = CheckStatus.DEGRADED
+                    evidence_error = (
+                        f"latency threshold exceeded ({latency_ms:.1f}ms)"
+                        if latency_ms is not None
+                        else "latency threshold exceeded"
+                    )
                     # degrade state
                     if check.status != CheckStatus.DEGRADED:
                         # close open incident if exists
@@ -1706,10 +1782,13 @@ def scan_checks_once(session: Session):
                                 except Exception:
                                     logger.exception("Error sending repeated DEGRADED alert")
                 else:
+                    evidence_status = CheckStatus.UP
+                    evidence_error = None
                     if check.status in (CheckStatus.DOWN, CheckStatus.DEGRADED):
                         check.status = CheckStatus.UP
                         check.consecutive_failures = 0
                         open_inc = session.exec(select(Incident).where(Incident.check_id == check.id, Incident.resolved_at == None)).first()
+                        evidence_incident_id = open_inc.id if open_inc else None
                         if open_inc:
                             open_inc.resolved_at = now
                             open_inc.status = "resolved"
@@ -1738,10 +1817,15 @@ def scan_checks_once(session: Session):
                         session.commit()
             else:
                 # failure
+                evidence_status = CheckStatus.DOWN
+                evidence_error = reason
                 check.consecutive_failures = (check.consecutive_failures or 0) + 1
+                open_inc = session.exec(
+                    select(Incident).where(Incident.check_id == check.id, Incident.resolved_at == None)
+                ).first()
+                evidence_incident_id = open_inc.id if open_inc else None
                 if check.status != CheckStatus.DOWN:
                     check.status = CheckStatus.DOWN
-                    open_inc = session.exec(select(Incident).where(Incident.check_id == check.id, Incident.resolved_at == None)).first()
                     created_incident = False
                     if not open_inc:
                         signature = _normalize_reason(reason)
@@ -1751,6 +1835,7 @@ def scan_checks_once(session: Session):
                         session.commit()
                         session.refresh(open_inc)
                         created_incident = True
+                        evidence_incident_id = open_inc.id
                     if created_incident:
                         _log_similar_incidents(session, project, open_inc.id, reason)
                     event_type = EventType.HTTP_FAILURE if check.type == CheckType.HTTP else EventType.DOWN
@@ -1795,7 +1880,6 @@ def scan_checks_once(session: Session):
                 else:
                     should_alert = check.alert_enabled and (check.consecutive_failures >= (check.alert_after or 1))
                     if should_alert:
-                        open_inc = session.exec(select(Incident).where(Incident.check_id == check.id, Incident.resolved_at == None)).first()
                         if maintenance:
                             session.add(check)
                             session.commit()
@@ -1823,6 +1907,15 @@ def scan_checks_once(session: Session):
                     else:
                         session.add(check)
                         session.commit()
+            _record_check_result(
+                session,
+                check,
+                status=evidence_status,
+                latency_ms=latency_ms,
+                error_message=evidence_error,
+                incident_id=evidence_incident_id,
+                created_at=now,
+            )
             try:
                 check.next_run = now + timedelta(seconds=interval)
                 session.add(check)

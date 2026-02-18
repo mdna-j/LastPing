@@ -110,6 +110,69 @@ def test_worker_http_check_failure(tmp_path, monkeypatch):
         assert 'conn refused' in called['down']
 
 
+def test_check_result_stores_canonical_evidence_fields(tmp_path, monkeypatch):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_evidence.sqlite'}"
+
+    from sqlmodel import Session, select
+    from src import db as dbmod
+    from src.models import Project, Check, CheckType, CheckStatus, CheckResult
+    from src import worker
+
+    dbmod.create_db_and_tables()
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="proj_evidence")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        check = Check(
+            project_id=project.id,
+            name="http_evidence",
+            type=CheckType.HTTP,
+            url="http://example.invalid/health",
+            timeout=1,
+            retries=1,
+            status=CheckStatus.UP,
+        )
+        session.add(check)
+        session.commit()
+        session.refresh(check)
+
+        monkeypatch.setattr(worker, "_http_check", lambda url, timeout, retries: (False, "timeout", None))
+        monkeypatch.setattr(worker, "notify_down", lambda chk, proj, reason=None: None)
+
+        worker.scan_checks_once(session)
+
+        first = session.exec(
+            select(CheckResult).where(CheckResult.check_id == check.id).order_by(CheckResult.id.desc())
+        ).first()
+        assert first is not None
+        assert first.created_at is not None
+        assert first.check_id == check.id
+        assert first.project_id == project.id
+        assert first.status == CheckStatus.DOWN
+        assert first.latency_ms is None
+        assert "timeout" in (first.error_message or "")
+        assert first.incident_id is not None
+
+        check.next_run = datetime.utcnow() - timedelta(seconds=1)
+        session.add(check)
+        session.commit()
+
+        monkeypatch.setattr(worker, "_http_check", lambda url, timeout, retries: (True, "status=200", 12.5))
+
+        worker.scan_checks_once(session)
+
+        second = session.exec(
+            select(CheckResult).where(CheckResult.check_id == check.id).order_by(CheckResult.id.desc())
+        ).first()
+        assert second is not None
+        assert second.status == CheckStatus.UP
+        assert second.latency_ms == pytest.approx(12.5)
+        assert second.error_message is None
+
+
 def test_worker_recovery_transitions(tmp_path, monkeypatch):
     os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db3.sqlite'}"
 
