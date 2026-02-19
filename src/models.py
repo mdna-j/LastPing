@@ -212,6 +212,19 @@ class UptimeSnapshot(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+class Anomaly(SQLModel, table=True):
+    __tablename__ = "anomaly"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    check_id: int = Field(foreign_key="check.id", index=True)
+    incident_id: Optional[int] = Field(default=None, foreign_key="incident.id", index=True)
+    type: str = Field(index=True, description="latency_spike, flapping, missed_heartbeat, etc")
+    severity: float
+    window_start: datetime
+    window_end: datetime
+    evidence_json: str = Field(default="{}", description="JSON-encoded evidence payload")
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+
+
 class AvailabilityRollup(SQLModel, table=True):
     __tablename__ = "availability_rollup"
     id: Optional[int] = Field(default=None, primary_key=True)

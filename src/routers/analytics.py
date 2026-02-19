@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List
+import json
 import re
 import math
 
@@ -8,7 +9,7 @@ from pydantic import BaseModel, conint
 from sqlmodel import Session, select
 
 from ..db import get_session
-from ..models import Event, Check, Project, Incident, PredictiveModel
+from ..models import Event, Check, Project, Incident, PredictiveModel, Anomaly
 from ..analytics_ml import find_similar_incidents, cluster_incidents
 from ..predictive_models import (
     MODEL_TYPE_SEASONAL,
@@ -586,6 +587,59 @@ def anomaly_predictions(
         "z_threshold": z_threshold,
         "warnings": warnings,
     }
+
+
+@router.get("/analytics/anomaly-events")
+def list_persisted_anomalies(
+    project_id: int = Path(..., ge=1),
+    check_id: Optional[int] = Query(None, ge=1),
+    incident_id: Optional[int] = Query(None, ge=1),
+    limit: int = Query(100, ge=1, le=500),
+    session: Session = Depends(get_session),
+    _proj: Project = Depends(require_project_api_key),
+):
+    """List persisted anomaly rows for debugging by check and/or incident."""
+    project_check_ids = session.exec(select(Check.id).where(Check.project_id == project_id)).all()
+    if not project_check_ids:
+        return {"project_id": project_id, "count": 0, "anomalies": []}
+
+    if check_id is not None and check_id not in project_check_ids:
+        raise HTTPException(status_code=404, detail="Check not found")
+    if incident_id is not None:
+        inc = session.get(Incident, incident_id)
+        if not inc or inc.project_id != project_id:
+            raise HTTPException(status_code=404, detail="Incident not found")
+
+    stmt = select(Anomaly).where(Anomaly.check_id.in_(project_check_ids))
+    if check_id is not None:
+        stmt = stmt.where(Anomaly.check_id == check_id)
+    if incident_id is not None:
+        stmt = stmt.where(Anomaly.incident_id == incident_id)
+
+    rows = session.exec(stmt.order_by(Anomaly.created_at.desc()).limit(limit)).all()
+    out = []
+    for row in rows:
+        evidence = {}
+        if row.evidence_json:
+            try:
+                evidence = json.loads(row.evidence_json)
+            except Exception:
+                evidence = {"raw": row.evidence_json}
+        out.append(
+            {
+                "id": row.id,
+                "check_id": row.check_id,
+                "incident_id": row.incident_id,
+                "type": row.type,
+                "severity": row.severity,
+                "window_start": row.window_start.isoformat(),
+                "window_end": row.window_end.isoformat(),
+                "evidence": evidence,
+                "created_at": row.created_at.isoformat(),
+            }
+        )
+
+    return {"project_id": project_id, "count": len(out), "anomalies": out}
 
 
 @router.get("/analytics/incident-clusters")
