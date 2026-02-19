@@ -1,9 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException, Path
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from fastapi.responses import HTMLResponse
 from sqlmodel import Session, select
 
 from ..db import get_session
-from ..models import Project, Check, Event, Incident
+from ..models import Project, Check, Event, Incident, CheckLease
 from ..deps import limit_public_requests
 
 router = APIRouter(prefix="/ui", tags=["ui"], dependencies=[Depends(limit_public_requests)])
@@ -407,6 +409,25 @@ def dashboard_page():
           </div>
         </header>
 
+        <section class="card health-strip">
+          <div class="health-item">
+            <span class="health-label">Last refresh</span>
+            <span class="health-value" id="healthLastRefresh">-</span>
+          </div>
+          <div class="health-item">
+            <span class="health-label">Active incidents</span>
+            <span class="health-value" id="healthActiveIncidents">-</span>
+          </div>
+          <div class="health-item">
+            <span class="health-label">Workers online</span>
+            <span class="health-value" id="healthWorkersOnline">-</span>
+          </div>
+          <div class="health-item health-item-wide">
+            <span class="health-label">Region health</span>
+            <span class="health-value" id="healthRegionHealth">-</span>
+          </div>
+        </section>
+
         <section class="card controls-card">
           <div class="row dashboard-controls-row">
             <div class="dashboard-inputs">
@@ -480,6 +501,76 @@ def dashboard_page():
     </body>
     </html>
     """
+
+
+@router.get("/dashboard/health")
+def dashboard_health(project_id: int = Query(1, ge=1), session: Session = Depends(get_session)):
+    project = session.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    now = datetime.now(timezone.utc)
+    checks = session.exec(select(Check).where(Check.project_id == project_id)).all()
+
+    open_incident_ids = session.exec(
+        select(Incident.id).where(Incident.project_id == project_id, Incident.resolved_at == None)
+    ).all()
+
+    active_worker_rows = session.exec(
+        select(CheckLease.lease_owner)
+        .join(Check, Check.id == CheckLease.check_id)
+        .where(
+            Check.project_id == project_id,
+            CheckLease.lease_owner != None,
+            CheckLease.lease_expires_at != None,
+            CheckLease.lease_expires_at > now,
+        )
+    ).all()
+    worker_ids = sorted({w for w in active_worker_rows if w})
+
+    region_stats = {}
+    for check in checks:
+        raw_region = (check.region or "").strip()
+        if not raw_region:
+            region = "global"
+        elif raw_region.lower() in ("*", "all", "any"):
+            region = "any"
+        elif "," in raw_region or " " in raw_region:
+            region = "multi"
+        else:
+            region = raw_region
+
+        bucket = region_stats.setdefault(region, {"up": 0, "down": 0, "degraded": 0, "total": 0})
+        bucket["total"] += 1
+        st = (check.status or "").lower()
+        if st == "up":
+            bucket["up"] += 1
+        elif st == "down":
+            bucket["down"] += 1
+        elif st == "degraded":
+            bucket["degraded"] += 1
+
+    region_items = []
+    summary_parts = []
+    for name in sorted(region_stats.keys()):
+        vals = region_stats[name]
+        region_items.append({"name": name, **vals})
+        if vals["down"] > 0:
+            summary_parts.append(f"{name}: {vals['down']} down")
+        elif vals["degraded"] > 0:
+            summary_parts.append(f"{name}: {vals['degraded']} degraded")
+        else:
+            summary_parts.append(f"{name}: healthy")
+
+    return {
+        "project_id": project_id,
+        "last_refresh": now.isoformat(),
+        "active_incidents": len(open_incident_ids),
+        "workers_online": len(worker_ids),
+        "worker_ids": worker_ids,
+        "region_health_summary": " | ".join(summary_parts) if summary_parts else "No checks",
+        "regions": region_items,
+    }
 
 
 @router.get("/reports", response_class=HTMLResponse)
@@ -1030,3 +1121,4 @@ def public_status_data(project_id: int = Path(..., ge=1), session: Session = Dep
         "checks": out_checks,
         "open_incidents": incidents_out,
     }
+
