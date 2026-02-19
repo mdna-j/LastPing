@@ -572,30 +572,66 @@ def project_settings_page(project_id: int = Path(..., ge=1)):
       <meta name="viewport" content="width=device-width,initial-scale=1" />
       <link rel="stylesheet" href="/static/css/ui.css" />
     </head>
-    <body>
-    <h1>Project Settings</h1>
-    <div class="row">
-      <label>Project: <input id="projectId" value="{project_id}" style="width:80px"/></label>
-      <label>API Key: <input id="apiKey" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></label>
-      <label>Admin token: <input id="adminToken" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></label>
-      <button id="loadBtn" class="btn">Load</button>
-      <button id="saveBtn" class="btn">Save</button>
-      <a class="btn" href="/ui/projects/{project_id}/oncall">On-call</a>
-      <a class="btn" href="/ui/projects/{project_id}/remediation">Remediation</a>
+    <body class="page-settings">
+    <div class="app-shell">
+      <aside class="nav-rail">
+        <div class="rail-brand">LP</div>
+        <nav class="rail-links">
+          <a class="rail-link" href="/ui/dashboard">Dashboard</a>
+          <a class="rail-link" href="/ui/snapshots">Snapshots</a>
+          <a class="rail-link" href="/ui/reports">Reports</a>
+          <a class="rail-link" href="/ui/incidents">Incidents</a>
+          <a class="rail-link active" href="/ui/projects/{project_id}/settings">Settings</a>
+          <a class="rail-link" href="/ui/projects/{project_id}/oncall">On-call</a>
+        </nav>
+      </aside>
+
+      <main class="main-stage">
+        <header class="topbar">
+          <div>
+            <h1>Project Settings</h1>
+            <div class="muted">Manage SLO/SLA targets and project-level alerting defaults.</div>
+          </div>
+        </header>
+
+        <section class="card controls-card">
+          <div class="row">
+            <label>Project: <input id="projectId" value="{project_id}" style="width:80px"/></label>
+            <label>API Key: <input id="apiKey" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></label>
+            <label>Admin token: <input id="adminToken" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></label>
+            <button id="loadBtn" class="btn">Load</button>
+            <button id="saveBtn" class="btn">Save</button>
+            <a class="btn btn-secondary" href="/ui/projects/{project_id}/oncall">On-call</a>
+            <a class="btn btn-secondary" href="/ui/projects/{project_id}/remediation">Remediation</a>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="section-head">
+            <h3>SLO / SLA</h3>
+            <div class="muted">Used by reporting and compliance views.</div>
+          </div>
+          <div class="row">
+            <label>SLO target (%): <input id="sloTarget" placeholder="99.9" style="width:120px"/></label>
+            <label>SLA target (%): <input id="slaTarget" placeholder="99.5" style="width:120px"/></label>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="section-head">
+            <h3>On-call / SMS Defaults</h3>
+            <div class="muted">Project-level routing fallbacks for checks using inherit.</div>
+          </div>
+          <div class="row">
+            <label><input type="checkbox" id="smsEnabled" /> SMS enabled</label>
+            <label>SMS To: <input id="smsTo" placeholder="+15551234567" style="width:180px"/></label>
+            <label><input type="checkbox" id="oncallEnabled" /> On-call email enabled</label>
+            <label>On-call Email: <input id="oncallEmail" placeholder="oncall@example.com" style="width:240px"/></label>
+          </div>
+          <div class="muted">SMS requires Twilio env vars (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM).</div>
+        </section>
+      </main>
     </div>
-    <h2>SLO / SLA</h2>
-    <div class="row">
-      <label>SLO target (%): <input id="sloTarget" placeholder="99.9" style="width:120px"/></label>
-      <label>SLA target (%): <input id="slaTarget" placeholder="99.5" style="width:120px"/></label>
-    </div>
-    <h2>On-call / SMS</h2>
-    <div class="row">
-      <label><input type="checkbox" id="smsEnabled" /> SMS enabled</label>
-      <label>SMS To: <input id="smsTo" placeholder="+15551234567" style="width:180px"/></label>
-      <label><input type="checkbox" id="oncallEnabled" /> On-call email enabled</label>
-      <label>On-call Email: <input id="oncallEmail" placeholder="oncall@example.com" style="width:240px"/></label>
-    </div>
-    <div class="muted">SMS requires Twilio env vars (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM).</div>
     <script src="/static/js/project_settings.js"></script>
     </body>
     </html>
@@ -611,202 +647,264 @@ def oncall_page(project_id: int = Path(..., ge=1)):
       <meta name="viewport" content="width=device-width,initial-scale=1" />
       <link rel="stylesheet" href="/static/css/ui.css" />
     </head>
-    <body>
-    <h1>On-call Management</h1>
-    <div class="row">
-      <label>Project: <input id="projectId" value="{project_id}" style="width:80px"/></label>
-      <label>API Key: <input id="apiKey" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></label>
-      <label>Admin token: <input id="adminToken" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></label>
-      <button id="refreshBtn" class="btn">Refresh</button>
+    <body class="page-oncall">
+    <div class="app-shell">
+      <aside class="nav-rail">
+        <div class="rail-brand">LP</div>
+        <nav class="rail-links">
+          <a class="rail-link" href="/ui/dashboard">Dashboard</a>
+          <a class="rail-link" href="/ui/snapshots">Snapshots</a>
+          <a class="rail-link" href="/ui/reports">Reports</a>
+          <a class="rail-link" href="/ui/incidents">Incidents</a>
+          <a class="rail-link" href="/ui/projects/{project_id}/settings">Settings</a>
+          <a class="rail-link active" href="/ui/projects/{project_id}/oncall">On-call</a>
+        </nav>
+      </aside>
+
+      <main class="main-stage">
+        <header class="topbar">
+          <div>
+            <h1>On-call Management</h1>
+            <div class="muted">Configure rotations, escalation policies, and per-check routing overrides.</div>
+          </div>
+        </header>
+
+        <section class="card controls-card">
+          <div class="row">
+            <label>Project: <input id="projectId" value="{project_id}" style="width:80px"/></label>
+            <label>API Key: <input id="apiKey" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></label>
+            <label>Admin token: <input id="adminToken" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></label>
+            <button id="refreshBtn" class="btn">Refresh</button>
+            <a class="btn btn-secondary" href="/ui/projects/{project_id}/settings">Settings</a>
+            <a class="btn btn-secondary" href="/ui/projects/{project_id}/remediation">Remediation</a>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="section-head">
+            <h3>Rotations</h3>
+            <div class="muted">Create schedules for who gets paged first.</div>
+          </div>
+          <div class="row">
+            <input id="rotName" placeholder="Rotation name" />
+            <input id="rotInterval" placeholder="Interval (min)" style="width:140px" />
+            <button id="addRotationBtn" class="btn">Add Rotation</button>
+          </div>
+          <div id="rotations"></div>
+        </section>
+
+        <section class="card">
+          <div class="section-head">
+            <h3>Members</h3>
+            <div class="muted">Assign people to rotations and order.</div>
+          </div>
+          <div class="row">
+            <input id="memberRotationId" placeholder="Rotation ID" style="width:140px" />
+            <input id="memberName" placeholder="Name" />
+            <input id="memberEmail" placeholder="Email" style="width:200px" />
+            <input id="memberPhone" placeholder="Phone" style="width:160px" />
+            <input id="memberOrder" placeholder="Order" style="width:80px" />
+            <button id="addMemberBtn" class="btn">Add Member</button>
+          </div>
+          <div id="members"></div>
+        </section>
+
+        <section class="card">
+          <div class="section-head">
+            <h3>Escalations</h3>
+            <div class="muted">Define channel and timing at project or check level.</div>
+          </div>
+          <div class="row">
+            <label>Check:
+              <select id="escCheckSelect" style="width:200px">
+                <option value="">(project-wide)</option>
+              </select>
+            </label>
+            <input id="escCheckId" placeholder="Check ID (optional)" style="width:140px" />
+            <input id="escLevel" placeholder="Level" style="width:80px" />
+            <input id="escDelay" placeholder="Delay (min)" style="width:120px" />
+            <select id="escType">
+              <option value="rotation">rotation</option>
+              <option value="email">email</option>
+              <option value="sms">sms</option>
+            </select>
+            <input id="escRotationId" placeholder="Rotation ID" style="width:140px" />
+            <input id="escTarget" placeholder="Target (email/phone)" style="width:220px" />
+            <button id="addEscBtn" class="btn">Add Escalation</button>
+          </div>
+          <div class="muted">Tip: pick a check from the dropdown to create per-check escalation rules.</div>
+          <div class="row">
+            <label>Filter:
+              <select id="escFilterCheckSelect" style="width:200px">
+                <option value="">(all checks)</option>
+              </select>
+            </label>
+            <input id="escFilterCheckId" placeholder="Filter by Check ID" style="width:160px" />
+            <button id="escFilterBtn" class="btn btn-secondary">Filter</button>
+            <button id="escClearFilterBtn" class="btn btn-secondary">Clear</button>
+          </div>
+          <div id="escalations"></div>
+        </section>
+
+        <section class="card">
+          <div class="section-head">
+            <h3>Policy Builder</h3>
+            <div class="muted">Build effective escalation chains with event filters.</div>
+          </div>
+          <div class="row">
+            <label>Check:
+              <select id="policyCheckSelect" style="width:220px">
+                <option value="">(project-wide)</option>
+              </select>
+            </label>
+            <label>Preview event:
+              <select id="policyPreviewEvent" style="width:140px">
+                <option value="">any</option>
+                <option value="down">down</option>
+                <option value="degraded">degraded</option>
+              </select>
+            </label>
+            <button id="policyRefreshBtn" class="btn btn-secondary">Refresh Chain</button>
+            <button id="policyPreviewBtn" class="btn btn-secondary">Preview</button>
+            <button id="policyApplyTemplateBtn" class="btn btn-secondary">Apply Project Template</button>
+            <button id="policySaveTemplateBtn" class="btn btn-secondary">Save as Project Template</button>
+          </div>
+          <div class="muted">Drag steps to reorder. Add multiple channels per step (rotation + email + SMS). Use event filters to target down vs degraded alerts.</div>
+          <div id="policyChain" class="muted">Select a check to view the escalation chain.</div>
+          <div id="policyPreview" class="card">Preview will show the effective chain used for the selected event.</div>
+          <h3>Add Step</h3>
+          <div class="row">
+            <label>Event filter:
+              <select id="policyEventTypes" style="width:160px">
+                <option value="">any</option>
+                <option value="down">down only</option>
+                <option value="degraded">degraded only</option>
+                <option value="down,degraded">down+degraded</option>
+              </select>
+            </label>
+            <input id="policyDelay" placeholder="Delay (min)" style="width:120px" />
+            <select id="policyType">
+              <option value="rotation">rotation</option>
+              <option value="email">email</option>
+              <option value="sms">sms</option>
+            </select>
+            <input id="policyRotationId" placeholder="Rotation ID" style="width:140px" />
+            <input id="policyTarget" placeholder="Target (email/phone)" style="width:220px" />
+            <label><input type="checkbox" id="policyEnabled" checked /> Enabled</label>
+            <button id="policyAddBtn" class="btn">Add Step</button>
+          </div>
+          <div class="muted">Use Add Step to append a new escalation level for the selected scope.</div>
+        </section>
+
+        <section class="card">
+          <div class="section-head">
+            <h3>Per-check Routing &amp; Channel Overrides</h3>
+            <div class="muted">Edit channel enablement and destinations for the selected check.</div>
+          </div>
+          <div class="muted">
+            Select a check in <strong>Policy Builder</strong> above to edit overrides.
+            Use <em>inherit</em> (blank) to fall back to project defaults. Blank destination fields clear overrides.
+            Saving requires an admin token (or an owner user token).
+          </div>
+          <div class="row">
+            <button id="routingSaveBtn" class="btn">Save Overrides</button>
+            <button id="routingResetBtn" class="btn btn-secondary">Reset (inherit)</button>
+            <div id="routingScope" class="muted"></div>
+          </div>
+          <div class="card">
+            <div class="row">
+              <label>On-call:
+                <select id="routingOncallEnabled" style="width:160px">
+                  <option value="">inherit</option>
+                  <option value="true">enabled</option>
+                  <option value="false">disabled</option>
+                </select>
+              </label>
+              <label>On-call Email:
+                <input id="routingOncallEmail" placeholder="oncall@example.com" style="width:260px"/>
+              </label>
+              <label>SMS:
+                <select id="routingSmsEnabled" style="width:160px">
+                  <option value="">inherit</option>
+                  <option value="true">enabled</option>
+                  <option value="false">disabled</option>
+                </select>
+              </label>
+              <label>SMS To:
+                <input id="routingSmsTo" placeholder="+15551234567" style="width:180px"/>
+              </label>
+            </div>
+            <div class="row">
+              <label>Slack:
+                <select id="routingSlackEnabled" style="width:160px">
+                  <option value="">inherit</option>
+                  <option value="true">enabled</option>
+                  <option value="false">disabled</option>
+                </select>
+              </label>
+              <label>Slack Webhook:
+                <input id="routingSlackWebhook" type="url" placeholder="https://hooks.slack.com/..." style="width:360px"/>
+              </label>
+            </div>
+            <div class="row">
+              <label>Discord:
+                <select id="routingDiscordEnabled" style="width:160px">
+                  <option value="">inherit</option>
+                  <option value="true">enabled</option>
+                  <option value="false">disabled</option>
+                </select>
+              </label>
+              <label>Discord Webhook:
+                <input id="routingDiscordWebhook" type="url" placeholder="https://discord.com/api/webhooks/..." style="width:360px"/>
+              </label>
+            </div>
+            <div class="row">
+              <label>PagerDuty:
+                <select id="routingPagerdutyEnabled" style="width:160px">
+                  <option value="">inherit</option>
+                  <option value="true">enabled</option>
+                  <option value="false">disabled</option>
+                </select>
+              </label>
+              <label>Integration Key:
+                <input id="routingPagerdutyKey" placeholder="(optional)" style="width:260px"/>
+              </label>
+            </div>
+            <div class="row">
+              <label>Generic Webhook:
+                <select id="routingWebhookEnabled" style="width:160px">
+                  <option value="">inherit</option>
+                  <option value="true">enabled</option>
+                  <option value="false">disabled</option>
+                </select>
+              </label>
+              <label>Webhook URL:
+                <input id="routingGenericWebhook" type="url" placeholder="https://example.com/webhook" style="width:360px"/>
+              </label>
+            </div>
+            <div class="row">
+              <label>Escalate after (min):
+                <input id="routingEscAfter" placeholder="(disabled)" style="width:160px"/>
+              </label>
+              <label>Escalation cooldown (s):
+                <input id="routingEscCooldown" placeholder="3600" style="width:160px"/>
+              </label>
+            </div>
+            <div class="muted">
+              Validation hints: SMS To should look like <code>+15551234567</code>. Webhook URLs must be <code>http(s)://</code>.
+            </div>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="section-head">
+            <h3>Open Alerts</h3>
+            <div class="muted">Active alerts currently awaiting acknowledgment/resolution.</div>
+          </div>
+          <div id="alerts"></div>
+        </section>
+      </main>
     </div>
-    <h2>Rotations</h2>
-    <div class="row">
-      <input id="rotName" placeholder="Rotation name" />
-      <input id="rotInterval" placeholder="Interval (min)" style="width:140px" />
-      <button id="addRotationBtn" class="btn">Add Rotation</button>
-    </div>
-    <div id="rotations"></div>
-    <h2>Members</h2>
-    <div class="row">
-      <input id="memberRotationId" placeholder="Rotation ID" style="width:140px" />
-      <input id="memberName" placeholder="Name" />
-      <input id="memberEmail" placeholder="Email" style="width:200px" />
-      <input id="memberPhone" placeholder="Phone" style="width:160px" />
-      <input id="memberOrder" placeholder="Order" style="width:80px" />
-      <button id="addMemberBtn" class="btn">Add Member</button>
-    </div>
-    <div id="members"></div>
-    <h2>Escalations</h2>
-    <div class="row">
-      <label>Check:
-        <select id="escCheckSelect" style="width:200px">
-          <option value="">(project-wide)</option>
-        </select>
-      </label>
-      <input id="escCheckId" placeholder="Check ID (optional)" style="width:140px" />
-      <input id="escLevel" placeholder="Level" style="width:80px" />
-      <input id="escDelay" placeholder="Delay (min)" style="width:120px" />
-      <select id="escType">
-        <option value="rotation">rotation</option>
-        <option value="email">email</option>
-        <option value="sms">sms</option>
-      </select>
-      <input id="escRotationId" placeholder="Rotation ID" style="width:140px" />
-      <input id="escTarget" placeholder="Target (email/phone)" style="width:220px" />
-      <button id="addEscBtn" class="btn">Add Escalation</button>
-    </div>
-    <div class="muted">Tip: pick a check from the dropdown to create per-check escalation rules.</div>
-    <div class="row">
-      <label>Filter:
-        <select id="escFilterCheckSelect" style="width:200px">
-          <option value="">(all checks)</option>
-        </select>
-      </label>
-      <input id="escFilterCheckId" placeholder="Filter by Check ID" style="width:160px" />
-      <button id="escFilterBtn" class="btn btn-secondary">Filter</button>
-      <button id="escClearFilterBtn" class="btn btn-secondary">Clear</button>
-    </div>
-    <div id="escalations"></div>
-    <h2>Policy Builder</h2>
-    <div class="row">
-      <label>Check:
-        <select id="policyCheckSelect" style="width:220px">
-          <option value="">(project-wide)</option>
-        </select>
-      </label>
-      <label>Preview event:
-        <select id="policyPreviewEvent" style="width:140px">
-          <option value="">any</option>
-          <option value="down">down</option>
-          <option value="degraded">degraded</option>
-        </select>
-      </label>
-      <button id="policyRefreshBtn" class="btn btn-secondary">Refresh Chain</button>
-      <button id="policyPreviewBtn" class="btn btn-secondary">Preview</button>
-      <button id="policyApplyTemplateBtn" class="btn btn-secondary">Apply Project Template</button>
-      <button id="policySaveTemplateBtn" class="btn btn-secondary">Save as Project Template</button>
-    </div>
-    <div class="muted">Drag steps to reorder. Add multiple channels per step (rotation + email + SMS). Use event filters to target down vs degraded alerts.</div>
-    <div id="policyChain" class="muted">Select a check to view the escalation chain.</div>
-    <div id="policyPreview" class="card">Preview will show the effective chain used for the selected event.</div>
-    <h3>Add Step</h3>
-    <div class="row">
-      <label>Event filter:
-        <select id="policyEventTypes" style="width:160px">
-          <option value="">any</option>
-          <option value="down">down only</option>
-          <option value="degraded">degraded only</option>
-          <option value="down,degraded">down+degraded</option>
-        </select>
-      </label>
-      <input id="policyDelay" placeholder="Delay (min)" style="width:120px" />
-      <select id="policyType">
-        <option value="rotation">rotation</option>
-        <option value="email">email</option>
-        <option value="sms">sms</option>
-      </select>
-      <input id="policyRotationId" placeholder="Rotation ID" style="width:140px" />
-      <input id="policyTarget" placeholder="Target (email/phone)" style="width:220px" />
-      <label><input type="checkbox" id="policyEnabled" checked /> Enabled</label>
-      <button id="policyAddBtn" class="btn">Add Step</button>
-    </div>
-    <div class="muted">Use Add Step to append a new escalation level for the selected scope.</div>
-    <h2>Per-check Routing &amp; Channel Overrides</h2>
-    <div class="muted">
-      Select a check in <strong>Policy Builder</strong> above to edit overrides.
-      Use <em>inherit</em> (blank) to fall back to project defaults. Blank destination fields clear overrides.
-      Saving requires an admin token (or an owner user token).
-    </div>
-    <div class="row">
-      <button id="routingSaveBtn" class="btn">Save Overrides</button>
-      <button id="routingResetBtn" class="btn btn-secondary">Reset (inherit)</button>
-      <div id="routingScope" class="muted"></div>
-    </div>
-    <div class="card">
-      <div class="row">
-        <label>On-call:
-          <select id="routingOncallEnabled" style="width:160px">
-            <option value="">inherit</option>
-            <option value="true">enabled</option>
-            <option value="false">disabled</option>
-          </select>
-        </label>
-        <label>On-call Email:
-          <input id="routingOncallEmail" placeholder="oncall@example.com" style="width:260px"/>
-        </label>
-        <label>SMS:
-          <select id="routingSmsEnabled" style="width:160px">
-            <option value="">inherit</option>
-            <option value="true">enabled</option>
-            <option value="false">disabled</option>
-          </select>
-        </label>
-        <label>SMS To:
-          <input id="routingSmsTo" placeholder="+15551234567" style="width:180px"/>
-        </label>
-      </div>
-      <div class="row">
-        <label>Slack:
-          <select id="routingSlackEnabled" style="width:160px">
-            <option value="">inherit</option>
-            <option value="true">enabled</option>
-            <option value="false">disabled</option>
-          </select>
-        </label>
-        <label>Slack Webhook:
-          <input id="routingSlackWebhook" type="url" placeholder="https://hooks.slack.com/..." style="width:360px"/>
-        </label>
-      </div>
-      <div class="row">
-        <label>Discord:
-          <select id="routingDiscordEnabled" style="width:160px">
-            <option value="">inherit</option>
-            <option value="true">enabled</option>
-            <option value="false">disabled</option>
-          </select>
-        </label>
-        <label>Discord Webhook:
-          <input id="routingDiscordWebhook" type="url" placeholder="https://discord.com/api/webhooks/..." style="width:360px"/>
-        </label>
-      </div>
-      <div class="row">
-        <label>PagerDuty:
-          <select id="routingPagerdutyEnabled" style="width:160px">
-            <option value="">inherit</option>
-            <option value="true">enabled</option>
-            <option value="false">disabled</option>
-          </select>
-        </label>
-        <label>Integration Key:
-          <input id="routingPagerdutyKey" placeholder="(optional)" style="width:260px"/>
-        </label>
-      </div>
-      <div class="row">
-        <label>Generic Webhook:
-          <select id="routingWebhookEnabled" style="width:160px">
-            <option value="">inherit</option>
-            <option value="true">enabled</option>
-            <option value="false">disabled</option>
-          </select>
-        </label>
-        <label>Webhook URL:
-          <input id="routingGenericWebhook" type="url" placeholder="https://example.com/webhook" style="width:360px"/>
-        </label>
-      </div>
-      <div class="row">
-        <label>Escalate after (min):
-          <input id="routingEscAfter" placeholder="(disabled)" style="width:160px"/>
-        </label>
-        <label>Escalation cooldown (s):
-          <input id="routingEscCooldown" placeholder="3600" style="width:160px"/>
-        </label>
-      </div>
-      <div class="muted">
-        Validation hints: SMS To should look like <code>+15551234567</code>. Webhook URLs must be <code>http(s)://</code>.
-      </div>
-    </div>
-    <h2>Open Alerts</h2>
-    <div id="alerts"></div>
     <script src="/static/js/oncall.js"></script>
     </body>
     </html>
