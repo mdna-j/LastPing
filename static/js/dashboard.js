@@ -32,7 +32,7 @@ function statusBadge(status){
   const up = status.toLowerCase() === 'up';
   const down = status.toLowerCase() === 'down';
   const degraded = status.toLowerCase() === 'degraded';
-  const cls = up ? 'status-up' : (down || degraded ? 'status-down' : '');
+  const cls = up ? 'status-up' : (down ? 'status-down' : (degraded ? 'status-degraded' : ''));
   return `<span class="badge ${cls}">${status}</span>`;
 }
 
@@ -119,7 +119,7 @@ async function loadDashboard(){
       if(incCountEl) incCountEl.innerText = String(incs.length);
       if(!incs.length){ incidentsEl.innerHTML = '<div class="muted">No open incidents.</div>'; }
       else{
-        const rows = incs.slice(0, 6).map(i => `<div class="card"><div><strong>#${i.id}</strong> check ${i.check_id} — ${i.status}</div><div class="muted">Started: ${i.started_at}</div></div>`).join('');
+        const rows = incs.slice(0, 6).map(i => `<div class="insight-item"><div><strong>#${i.id}</strong> check ${i.check_id} - ${i.status}</div><div class="muted">Started: ${i.started_at}</div></div>`).join('');
         incidentsEl.innerHTML = rows;
       }
     }else{
@@ -146,7 +146,7 @@ async function loadDashboard(){
           const ratio = (w.ratio !== null && w.ratio !== undefined) ? Number(w.ratio).toFixed(2) : null;
           const z = (w.zscore !== null && w.zscore !== undefined) ? Number(w.zscore).toFixed(2) : null;
           const detail = z ? `z ${z} · slope ${slope}` : `ratio ${ratio || 'n/a'} · slope ${slope}`;
-          return `<div class="card" style="background:#fff"><div><strong>Check ${w.check_id}</strong> · forecast ${next} events</div><div class="muted">${detail}</div></div>`;
+          return `<div class="insight-item"><div><strong>Check ${w.check_id}</strong> · forecast ${next} events</div><div class="muted">${detail}</div></div>`;
         }).join('');
       }
     }else{
@@ -165,7 +165,7 @@ async function loadDashboard(){
         anomEl.innerHTML = anomalies.warnings.map(w => {
           const score = (w.anomaly_score !== null && w.anomaly_score !== undefined) ? Number(w.anomaly_score).toFixed(2) : 'n/a';
           const next = (w.predicted_next_hour !== null && w.predicted_next_hour !== undefined) ? Number(w.predicted_next_hour).toFixed(2) : 'n/a';
-          return `<div class="card" style="background:#fff"><div><strong>Check ${w.check_id}</strong> · anomaly ${score}</div><div class="muted">predicted ${next} · slope ${w.trend_slope_per_hour}</div></div>`;
+          return `<div class="insight-item"><div><strong>Check ${w.check_id}</strong> · anomaly ${score}</div><div class="muted">predicted ${next} · slope ${w.trend_slope_per_hour}</div></div>`;
         }).join('');
       }
     }else{
@@ -178,11 +178,11 @@ async function loadDashboard(){
   const uptimePct = uptime && uptime.uptime !== undefined ? uptime.uptime : (uptime && uptime.project_uptime_percent !== undefined ? uptime.project_uptime_percent : null);
   const mttrVal = mttr && mttr.mttr_seconds !== undefined ? mttr.mttr_seconds : null;
   let html = '';
-  html += `<div class="card" style="min-width:180px"><div class="muted">Checks</div><div><strong>${total}</strong> total</div><div class="muted">${upCount} up · ${downCount} down · ${degradedCount} degraded</div></div>`;
-  html += `<div class="card" style="min-width:180px"><div class="muted">Uptime</div><div><strong>${uptimePct !== null ? uptimePct.toFixed(2) + '%' : 'n/a'}</strong></div><div class="muted">range</div></div>`;
-  html += `<div class="card" style="min-width:180px"><div class="muted">MTTR</div><div><strong>${mttrVal !== null ? mttrVal.toFixed(1) + 's' : 'n/a'}</strong></div><div class="muted">range</div></div>`;
-  html += `<div class="card" style="min-width:180px"><div class="muted">Open incidents</div><div><strong id="openIncidentsCount">${headers.Authorization ? '…' : 'locked'}</strong></div><div class="muted">API key required</div></div>`;
-  html += `<div class="card" style="min-width:180px"><div class="muted">Availability CSV</div><div><button id="exportAvailabilityCsvBtn" class="btn btn-secondary">Export</button></div><div class="muted">Uses range</div></div>`;
+  html += `<article class="card kpi-card"><div class="metric-label">Checks</div><div class="metric-value">${total}</div><div class="metric-sub">${upCount} up · ${downCount} down · ${degradedCount} degraded</div></article>`;
+  html += `<article class="card kpi-card"><div class="metric-label">Uptime</div><div class="metric-value">${uptimePct !== null ? uptimePct.toFixed(2) + '%' : 'n/a'}</div><div class="metric-sub">Selected range</div></article>`;
+  html += `<article class="card kpi-card"><div class="metric-label">MTTR</div><div class="metric-value">${mttrVal !== null ? mttrVal.toFixed(1) + 's' : 'n/a'}</div><div class="metric-sub">Selected range</div></article>`;
+  html += `<article class="card kpi-card"><div class="metric-label">Open incidents</div><div class="metric-value" id="openIncidentsCount">${headers.Authorization ? '...' : 'locked'}</div><div class="metric-sub">API key required</div></article>`;
+  html += `<article class="card kpi-card"><div class="metric-label">Availability CSV</div><div><button id="exportAvailabilityCsvBtn" class="btn btn-secondary">Export</button></div><div class="metric-sub">Uses selected range</div></article>`;
   cards.innerHTML = html;
   const exportBtn = document.getElementById('exportAvailabilityCsvBtn');
   if(exportBtn) exportBtn.onclick = exportAvailabilityCsv;

@@ -319,55 +319,89 @@ def dashboard_page():
       <meta name="viewport" content="width=device-width,initial-scale=1" />
       <link rel="stylesheet" href="/static/css/ui.css" />
     </head>
-    <body>
-    <h1>Project Dashboard</h1>
-    <div class="row">
-      <label>Project: <input id="projectId" value="1" style="width:80px"/></label>
-      <label>API Key: <input id="apiKey" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></label>
-      <label>Start: <input id="start" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
-      <label>End: <input id="end" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
-      <button id="loadDashboardBtn" class="btn">Load</button>
-      <a class="btn" href="/ui/snapshots">Snapshots</a>
-      <a class="btn" href="/ui/reports">Reports</a>
-      <a class="btn" href="/ui/incidents">Incidents</a>
-    </div>
+    <body class="page-dashboard">
+    <div class="app-shell">
+      <aside class="nav-rail">
+        <div class="rail-brand">LP</div>
+        <nav class="rail-links">
+          <a class="rail-link active" href="/ui/dashboard">Dashboard</a>
+          <a class="rail-link" href="/ui/snapshots">Snapshots</a>
+          <a class="rail-link" href="/ui/reports">Reports</a>
+          <a class="rail-link" href="/ui/incidents">Incidents</a>
+          <a class="rail-link" href="/ui/projects/1/settings">Settings</a>
+        </nav>
+      </aside>
 
-    <div id="cards" class="row"></div>
+      <main class="main-stage">
+        <header class="topbar">
+          <div>
+            <h1>Project Dashboard</h1>
+            <div class="muted">Live health, latency, incidents, and forward-looking risk signals.</div>
+          </div>
+        </header>
 
-    <div class="row">
-      <div class="card" style="flex:1;min-width:320px">
-        <h3>Uptime (recent)</h3>
-        <canvas id="uptimeChart" height="140"></canvas>
-      </div>
-      <div class="card" style="flex:1;min-width:320px">
-        <h3>Failure Trends</h3>
-        <canvas id="trendChart" height="140"></canvas>
-      </div>
-    </div>
+        <section class="card controls-card">
+          <div class="row">
+            <label>Project: <input id="projectId" value="1" style="width:80px"/></label>
+            <label>API Key: <input id="apiKey" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></label>
+            <label>Start: <input id="start" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
+            <label>End: <input id="end" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
+            <button id="loadDashboardBtn" class="btn">Load</button>
+            <a class="btn btn-secondary" href="/ui/snapshots">Snapshots</a>
+            <a class="btn btn-secondary" href="/ui/reports">Reports</a>
+            <a class="btn btn-secondary" href="/ui/incidents">Incidents</a>
+          </div>
+        </section>
 
-    <div class="card">
-      <h3>Checks</h3>
-      <table id="checksTable">
-        <thead><tr><th>Name</th><th>Type</th><th>Status</th><th>Last Ping</th><th>Latency</th><th>Region</th></tr></thead>
-        <tbody></tbody>
-      </table>
-    </div>
+        <section id="cards" class="kpi-grid"></section>
 
-    <div class="card">
-      <h3>Latest Incidents</h3>
-      <div id="incidentsList" class="muted">Provide API key to load incidents.</div>
-    </div>
+        <section class="chart-grid">
+          <article class="card chart-card">
+            <div class="section-head">
+              <h3>Uptime (recent)</h3>
+              <div class="muted">Last snapshots</div>
+            </div>
+            <canvas id="uptimeChart" height="140"></canvas>
+          </article>
+          <article class="card chart-card">
+            <div class="section-head">
+              <h3>Failure Trends</h3>
+              <div class="muted">Daily down events</div>
+            </div>
+            <canvas id="trendChart" height="140"></canvas>
+          </article>
+        </section>
 
-    <div class="card">
-      <h3>Predictive Alerts</h3>
-      <div class="muted">Forward-looking signals based on recent failure trends.</div>
-      <div id="predictiveList" class="muted">Provide API key to load predictive alerts.</div>
-    </div>
+        <section class="card table-card">
+          <div class="section-head">
+            <h3>Checks</h3>
+            <div class="muted">Current monitor state</div>
+          </div>
+          <table id="checksTable">
+            <thead><tr><th>Name</th><th>Type</th><th>Status</th><th>Last Ping</th><th>Latency</th><th>Region</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </section>
 
-    <div class="card">
-      <h3>Anomaly Warnings</h3>
-      <div class="muted">Unexpected spikes versus recent baseline.</div>
-      <div id="anomalyList" class="muted">Provide API key to load anomaly warnings.</div>
+        <section class="insight-grid">
+          <article class="card">
+            <h3>Latest Incidents</h3>
+            <div id="incidentsList" class="muted">Provide API key to load incidents.</div>
+          </article>
+
+          <article class="card">
+            <h3>Predictive Alerts</h3>
+            <div class="muted">Forward-looking signals based on recent failure trends.</div>
+            <div id="predictiveList" class="muted">Provide API key to load predictive alerts.</div>
+          </article>
+
+          <article class="card">
+            <h3>Anomaly Warnings</h3>
+            <div class="muted">Unexpected spikes versus recent baseline.</div>
+            <div id="anomalyList" class="muted">Provide API key to load anomaly warnings.</div>
+          </article>
+        </section>
+      </main>
     </div>
 
     <script src="/static/js/vendor/chart.min.js"></script>
