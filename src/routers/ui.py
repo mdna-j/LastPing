@@ -408,15 +408,19 @@ def dashboard_page():
         </header>
 
         <section class="card controls-card">
-          <div class="row">
-            <label>Project: <input id="projectId" value="1" style="width:80px"/></label>
-            <label>API Key: <input id="apiKey" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></label>
-            <label>Start: <input id="start" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
-            <label>End: <input id="end" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
-            <button id="loadDashboardBtn" class="btn">Load</button>
-            <a class="btn btn-secondary" href="/ui/snapshots">Snapshots</a>
-            <a class="btn btn-secondary" href="/ui/reports">Reports</a>
-            <a class="btn btn-secondary" href="/ui/incidents">Incidents</a>
+          <div class="row dashboard-controls-row">
+            <div class="dashboard-inputs">
+              <label>Project: <input id="projectId" value="1" style="width:64px"/></label>
+              <label>API Key: <input id="apiKey" type="password" autocomplete="off" placeholder="optional" style="width:210px"/></label>
+              <label>Start: <input id="start" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:180px"/></label>
+              <label>End: <input id="end" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:180px"/></label>
+            </div>
+            <div class="dashboard-actions">
+              <button id="loadDashboardBtn" class="btn">Load</button>
+              <a class="btn btn-secondary" href="/ui/snapshots">Snapshots</a>
+              <a class="btn btn-secondary" href="/ui/reports">Reports</a>
+              <a class="btn btn-secondary" href="/ui/incidents">Incidents</a>
+            </div>
           </div>
         </section>
 

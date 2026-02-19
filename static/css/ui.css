@@ -314,6 +314,32 @@ tbody tr:hover {
   margin-bottom: 14px;
 }
 
+.dashboard-controls-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 0;
+}
+
+.dashboard-inputs {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  flex: 1 1 560px;
+  min-width: 0;
+}
+
+.dashboard-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  margin-left: auto;
+}
+
 .kpi-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(195px, 1fr));
@@ -416,6 +442,16 @@ tbody tr:hover {
   .chart-grid {
     grid-template-columns: 1fr;
   }
+
+  .dashboard-controls-row {
+    align-items: stretch;
+  }
+
+  .dashboard-actions {
+    width: 100%;
+    justify-content: flex-start;
+    margin-left: 0;
+  }
 }
 
 @media (max-width: 640px) {
@@ -436,5 +472,10 @@ tbody tr:hover {
 
   .row {
     align-items: stretch;
+  }
+
+  .dashboard-inputs,
+  .dashboard-actions {
+    width: 100%;
   }
 }
