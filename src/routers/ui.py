@@ -18,15 +18,46 @@ def incidents_page():
       <meta name="viewport" content="width=device-width,initial-scale=1" />
       <link rel="stylesheet" href="/static/css/ui.css" />
     </head>
-    <body>
-    <h1>Incidents</h1>
-      <div class="row">
-      <label>Project: <input id="projectId" value="1" style="width:80px"/></label>
-      <button id="loadIncidentsBtn" class="btn">Load</button>
-      <a href="/ui/dashboard" style="margin-left:12px">Dashboard</a>
-      <a href="/ui/snapshots" style="margin-left:12px">Snapshots</a>
+    <body class="page-incidents">
+    <div class="app-shell">
+      <aside class="nav-rail">
+        <div class="rail-brand">LP</div>
+        <nav class="rail-links">
+          <a class="rail-link" href="/ui/dashboard">Dashboard</a>
+          <a class="rail-link" href="/ui/snapshots">Snapshots</a>
+          <a class="rail-link" href="/ui/reports">Reports</a>
+          <a class="rail-link active" href="/ui/incidents">Incidents</a>
+          <a class="rail-link" href="/ui/projects/1/settings">Settings</a>
+        </nav>
+      </aside>
+
+      <main class="main-stage">
+        <header class="topbar">
+          <div>
+            <h1>Incidents</h1>
+            <div class="muted">Review open incidents and merge related failures into a single thread.</div>
+          </div>
+        </header>
+
+        <section class="card controls-card">
+          <div class="row">
+            <label>Project: <input id="projectId" value="1" style="width:80px"/></label>
+            <button id="loadIncidentsBtn" class="btn">Load</button>
+            <a class="btn btn-secondary" href="/ui/dashboard">Dashboard</a>
+            <a class="btn btn-secondary" href="/ui/snapshots">Snapshots</a>
+            <a class="btn btn-secondary" href="/ui/reports">Reports</a>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="section-head">
+            <h3>Incident Feed</h3>
+            <div class="muted">Merged incidents appear nested under their primary incident.</div>
+          </div>
+          <div id="list">Loading...</div>
+        </section>
+      </main>
     </div>
-    <div id="list">Loading...</div>
     <script src="/static/js/incidents.js"></script>
     </body>
     </html>
@@ -283,26 +314,62 @@ def snapshots_page():
       <meta name="viewport" content="width=device-width,initial-scale=1" />
       <link rel="stylesheet" href="/static/css/ui.css" />
     </head>
-    <body>
-    <h1>Snapshots (last 24h)</h1>
-    <div class="row">
-      <label>Project: <input id="projectId" value="1" style="width:80px"/></label>
-      <label>API Key: <input id="apiKey" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></label>
-      <a id="settingsLink" class="btn" href="/ui/projects/1/settings">Settings</a>
-      <a class="btn" href="/ui/dashboard">Dashboard</a>
-      <a class="btn" href="/ui/reports">Reports</a>
-      <label>Check: <select id="checkId" style="width:120px"><option value="">(all)</option></select></label>
-      <label>Start: <input id="start" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
-      <label>End: <input id="end" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
-      <button id="loadSnapshotsBtn" class="btn">Load</button>
-      <button id="availabilityBtn" class="btn">Availability</button>
-      <button id="savePrefsBtn" class="btn">Save Prefs</button>
-      <button id="exportCsvBtn" class="btn">Export CSV</button>
+    <body class="page-snapshots">
+    <div class="app-shell">
+      <aside class="nav-rail">
+        <div class="rail-brand">LP</div>
+        <nav class="rail-links">
+          <a class="rail-link" href="/ui/dashboard">Dashboard</a>
+          <a class="rail-link active" href="/ui/snapshots">Snapshots</a>
+          <a class="rail-link" href="/ui/reports">Reports</a>
+          <a class="rail-link" href="/ui/incidents">Incidents</a>
+          <a class="rail-link" id="settingsLink" href="/ui/projects/1/settings">Settings</a>
+        </nav>
+      </aside>
+
+      <main class="main-stage">
+        <header class="topbar">
+          <div>
+            <h1>Snapshots</h1>
+            <div class="muted">Time-windowed uptime and MTTR evidence for each check.</div>
+          </div>
+        </header>
+
+        <section class="card controls-card">
+          <div class="row">
+            <label>Project: <input id="projectId" value="1" style="width:80px"/></label>
+            <label>API Key: <input id="apiKey" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></label>
+            <label>Check: <select id="checkId" style="width:140px"><option value="">(all)</option></select></label>
+            <label>Start: <input id="start" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
+            <label>End: <input id="end" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
+            <button id="loadSnapshotsBtn" class="btn">Load</button>
+            <button id="availabilityBtn" class="btn btn-secondary">Availability</button>
+            <button id="savePrefsBtn" class="btn btn-secondary">Save Prefs</button>
+            <button id="exportCsvBtn" class="btn btn-secondary">Export CSV</button>
+            <a class="btn btn-secondary" href="/ui/dashboard">Dashboard</a>
+            <a class="btn btn-secondary" href="/ui/reports">Reports</a>
+            <a class="btn btn-secondary" href="/ui/incidents">Incidents</a>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="section-head">
+            <h3>Snapshot Rows</h3>
+            <div class="muted">Includes recent uptime snapshots and summary metrics.</div>
+          </div>
+          <div id="list">Loading...</div>
+        </section>
+
+        <section class="card">
+          <div class="section-head">
+            <h3>Availability Report</h3>
+            <div class="muted">Aggregated SLO/SLA status for the selected range.</div>
+          </div>
+          <div id="availability" class="card">Run Availability to view report.</div>
+          <div style="margin-top:12px"><canvas id="uptimeChart" width="800" height="240"></canvas></div>
+        </section>
+      </main>
     </div>
-    <div id="list">Loading...</div>
-    <h2>Availability Report</h2>
-    <div id="availability" class="card">Run Availability to view report.</div>
-    <div style="margin-top:12px"><canvas id="uptimeChart" width="800" height="240"></canvas></div>
     <script src="/static/js/vendor/chart.min.js"></script>
     <script src="/static/js/snapshots.js"></script>
     </body>
@@ -420,41 +487,74 @@ def reports_page():
       <meta name="viewport" content="width=device-width,initial-scale=1" />
       <link rel="stylesheet" href="/static/css/ui.css" />
     </head>
-    <body>
-    <h1>Availability Reports</h1>
-    <div class="row">
-      <label>Project: <input id="projectId" value="1" style="width:80px"/></label>
-      <label>API Key: <input id="apiKey" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></label>
-      <label>Granularity:
-        <select id="rollup" style="width:140px">
-          <option value="day">daily</option>
-          <option value="month">monthly</option>
-          <option value="quarter">quarterly</option>
-        </select>
-      </label>
-      <label>Check: <select id="checkId" style="width:140px"><option value="">(all)</option></select></label>
-      <label>Start: <input id="start" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
-      <label>End: <input id="end" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
-      <button id="loadBtn" class="btn">Load</button>
-      <button id="exportBtn" class="btn">Export CSV</button>
-      <a class="btn" href="/ui/dashboard">Dashboard</a>
-    </div>
-    <div class="row">
-      <button class="btn btn-secondary" id="p7d">Last 7d</button>
-      <button class="btn btn-secondary" id="p30d">Last 30d</button>
-      <button class="btn btn-secondary" id="p90d">Last 90d</button>
-      <button class="btn btn-secondary" id="p180d">Last 180d</button>
-    </div>
-    <div class="card">
-      <h3>Project Availability (Daily)</h3>
-      <canvas id="reportChart" height="140"></canvas>
-    </div>
-    <div class="card">
-      <h3>Daily Summary</h3>
-      <table id="reportTable">
-        <thead><tr><th>Date</th><th>Uptime %</th><th>SLO</th><th>SLA</th></tr></thead>
-        <tbody></tbody>
-      </table>
+    <body class="page-reports">
+    <div class="app-shell">
+      <aside class="nav-rail">
+        <div class="rail-brand">LP</div>
+        <nav class="rail-links">
+          <a class="rail-link" href="/ui/dashboard">Dashboard</a>
+          <a class="rail-link" href="/ui/snapshots">Snapshots</a>
+          <a class="rail-link active" href="/ui/reports">Reports</a>
+          <a class="rail-link" href="/ui/incidents">Incidents</a>
+          <a class="rail-link" href="/ui/projects/1/settings">Settings</a>
+        </nav>
+      </aside>
+
+      <main class="main-stage">
+        <header class="topbar">
+          <div>
+            <h1>Availability Reports</h1>
+            <div class="muted">Daily, monthly, and quarterly uptime rollups with SLO/SLA outcomes.</div>
+          </div>
+        </header>
+
+        <section class="card controls-card">
+          <div class="row">
+            <label>Project: <input id="projectId" value="1" style="width:80px"/></label>
+            <label>API Key: <input id="apiKey" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></label>
+            <label>Granularity:
+              <select id="rollup" style="width:140px">
+                <option value="day">daily</option>
+                <option value="month">monthly</option>
+                <option value="quarter">quarterly</option>
+              </select>
+            </label>
+            <label>Check: <select id="checkId" style="width:140px"><option value="">(all)</option></select></label>
+            <label>Start: <input id="start" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
+            <label>End: <input id="end" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
+            <button id="loadBtn" class="btn">Load</button>
+            <button id="exportBtn" class="btn btn-secondary">Export CSV</button>
+            <a class="btn btn-secondary" href="/ui/dashboard">Dashboard</a>
+            <a class="btn btn-secondary" href="/ui/snapshots">Snapshots</a>
+            <a class="btn btn-secondary" href="/ui/incidents">Incidents</a>
+          </div>
+          <div class="row">
+            <button class="btn btn-secondary" id="p7d">Last 7d</button>
+            <button class="btn btn-secondary" id="p30d">Last 30d</button>
+            <button class="btn btn-secondary" id="p90d">Last 90d</button>
+            <button class="btn btn-secondary" id="p180d">Last 180d</button>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="section-head">
+            <h3>Project Availability</h3>
+            <div class="muted">Trend view for the selected period granularity.</div>
+          </div>
+          <canvas id="reportChart" height="140"></canvas>
+        </section>
+
+        <section class="card">
+          <div class="section-head">
+            <h3>Summary Table</h3>
+            <div class="muted">Per-period uptime and SLO/SLA compliance.</div>
+          </div>
+          <table id="reportTable">
+            <thead><tr><th>Date</th><th>Uptime %</th><th>SLO</th><th>SLA</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </section>
+      </main>
     </div>
     <script src="/static/js/vendor/chart.min.js"></script>
     <script src="/static/js/report.js"></script>
