@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from fastapi.responses import HTMLResponse
@@ -409,6 +409,14 @@ def dashboard_page():
           </div>
         </header>
 
+        <section id="incidentHeroBanner" class="card hero-banner hero-banner-hidden" role="status" aria-live="polite">
+          <div class="hero-banner-icon">!</div>
+          <div class="hero-banner-content">
+            <div class="hero-banner-title" id="incidentHeroTitle">No active outages</div>
+            <div class="hero-banner-sub" id="incidentHeroSub">All checks currently healthy.</div>
+          </div>
+        </section>
+
         <section class="card health-strip">
           <div class="health-item">
             <span class="health-label">Last refresh</span>
@@ -447,20 +455,48 @@ def dashboard_page():
 
         <section id="cards" class="kpi-grid"></section>
 
+        <section class="intelligence-grid">
+          <article class="card intelligence-card intelligence-summary-card">
+            <div class="section-head">
+              <h3>Intelligence</h3>
+              <div class="muted" id="intelligenceMeta">Recent signal digest</div>
+            </div>
+            <div id="intelligenceSummary" class="muted">Loading intelligence signals...</div>
+          </article>
+
+          <article class="card intelligence-card">
+            <h3>Predictive Alerts</h3>
+            <div class="muted">Forward-looking signals based on recent failure trends.</div>
+            <div id="predictiveList" class="muted">Provide API key to load predictive alerts.</div>
+          </article>
+
+          <article class="card intelligence-card">
+            <h3>Anomaly Warnings</h3>
+            <div class="muted">Unexpected spikes versus recent baseline.</div>
+            <div id="anomalyList" class="muted">Provide API key to load anomaly warnings.</div>
+          </article>
+        </section>
+
         <section class="chart-grid">
-          <article class="card chart-card">
+          <article id="uptimeChartCard" class="card chart-card">
             <div class="section-head">
               <h3>Uptime (recent)</h3>
               <div class="muted">Last snapshots</div>
             </div>
-            <canvas id="uptimeChart" height="140"></canvas>
+            <div class="chart-frame">
+              <canvas id="uptimeChart" height="140"></canvas>
+              <div id="uptimeChartEmpty" class="chart-empty hidden">No recent data for selected range.</div>
+            </div>
           </article>
-          <article class="card chart-card">
+          <article id="trendChartCard" class="card chart-card">
             <div class="section-head">
               <h3>Failure Trends</h3>
               <div class="muted">Daily down events</div>
             </div>
-            <canvas id="trendChart" height="140"></canvas>
+            <div class="chart-frame">
+              <canvas id="trendChart" height="140"></canvas>
+              <div id="trendChartEmpty" class="chart-empty hidden">No recent data for selected range.</div>
+            </div>
           </article>
         </section>
 
@@ -475,22 +511,10 @@ def dashboard_page():
           </table>
         </section>
 
-        <section class="insight-grid">
-          <article class="card">
+        <section class="incident-grid">
+          <article class="card incident-card">
             <h3>Latest Incidents</h3>
             <div id="incidentsList" class="muted">Provide API key to load incidents.</div>
-          </article>
-
-          <article class="card">
-            <h3>Predictive Alerts</h3>
-            <div class="muted">Forward-looking signals based on recent failure trends.</div>
-            <div id="predictiveList" class="muted">Provide API key to load predictive alerts.</div>
-          </article>
-
-          <article class="card">
-            <h3>Anomaly Warnings</h3>
-            <div class="muted">Unexpected spikes versus recent baseline.</div>
-            <div id="anomalyList" class="muted">Provide API key to load anomaly warnings.</div>
           </article>
         </section>
       </main>
@@ -509,12 +533,18 @@ def dashboard_health(project_id: int = Query(1, ge=1), session: Session = Depend
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    now = datetime.now(timezone.utc)
+    now = datetime.utcnow()
     checks = session.exec(select(Check).where(Check.project_id == project_id)).all()
 
-    open_incident_ids = session.exec(
-        select(Incident.id).where(Incident.project_id == project_id, Incident.resolved_at == None)
+    open_incidents = session.exec(
+        select(Incident).where(Incident.project_id == project_id, Incident.resolved_at == None)
     ).all()
+
+    earliest_open_by_check = {}
+    for inc in open_incidents:
+        cur = earliest_open_by_check.get(inc.check_id)
+        if cur is None or (inc.started_at and inc.started_at < cur.started_at):
+            earliest_open_by_check[inc.check_id] = inc
 
     active_worker_rows = session.exec(
         select(CheckLease.lease_owner)
@@ -562,12 +592,50 @@ def dashboard_health(project_id: int = Query(1, ge=1), session: Session = Depend
         else:
             summary_parts.append(f"{name}: healthy")
 
+    down_checks = []
+    for check in checks:
+        if (check.status or "").lower() != "down":
+            continue
+        started_at = None
+        inc = earliest_open_by_check.get(check.id)
+        if inc and inc.started_at:
+            started_at = inc.started_at
+        elif check.last_ping:
+            started_at = check.last_ping
+        elif check.created_at:
+            started_at = check.created_at
+
+        down_seconds = None
+        if started_at:
+            try:
+                down_seconds = max(int((now - started_at).total_seconds()), 0)
+            except Exception:
+                down_seconds = None
+
+        down_checks.append(
+            {
+                "id": check.id,
+                "name": check.name,
+                "started_at": started_at.isoformat() if started_at else None,
+                "down_seconds": down_seconds,
+            }
+        )
+
+    down_checks.sort(
+        key=lambda c: c["down_seconds"] if c["down_seconds"] is not None else -1,
+        reverse=True,
+    )
+    primary_down = down_checks[0] if down_checks else None
+
     return {
         "project_id": project_id,
         "last_refresh": now.isoformat(),
-        "active_incidents": len(open_incident_ids),
+        "active_incidents": len(open_incidents),
         "workers_online": len(worker_ids),
         "worker_ids": worker_ids,
+        "down_checks_count": len(down_checks),
+        "primary_down_check": primary_down,
+        "down_checks": down_checks[:5],
         "region_health_summary": " | ".join(summary_parts) if summary_parts else "No checks",
         "regions": region_items,
     }
