@@ -41,15 +41,50 @@ def incidents_page():
           </div>
         </header>
 
-        <section class="card controls-card">
-          <div class="row">
-            <label>Project: <input id="projectId" value="1" style="width:80px"/></label>
-            <button id="loadIncidentsBtn" class="btn">Load</button>
-            <a class="btn btn-secondary" href="/ui/dashboard">Dashboard</a>
-            <a class="btn btn-secondary" href="/ui/snapshots">Snapshots</a>
-            <a class="btn btn-secondary" href="/ui/reports">Reports</a>
+        <section id="incidentHeroBanner" class="card hero-banner hero-banner-hidden" role="status" aria-live="polite">
+          <div class="hero-banner-icon">!</div>
+          <div class="hero-banner-content">
+            <div class="hero-banner-title" id="incidentHeroTitle">No active outages</div>
+            <div class="hero-banner-sub" id="incidentHeroSub">All checks currently healthy.</div>
           </div>
         </section>
+
+        <section class="card health-strip">
+          <div class="health-item">
+            <span class="health-label">Last refresh</span>
+            <span class="health-value" id="healthLastRefresh">-</span>
+          </div>
+          <div class="health-item">
+            <span class="health-label">Active incidents</span>
+            <span class="health-value" id="healthActiveIncidents">-</span>
+          </div>
+          <div class="health-item">
+            <span class="health-label">Workers online</span>
+            <span class="health-value" id="healthWorkersOnline">-</span>
+          </div>
+          <div class="health-item health-item-wide">
+            <span class="health-label">Region health</span>
+            <span class="health-value" id="healthRegionHealth">-</span>
+          </div>
+        </section>
+
+        <section class="card controls-card">
+          <div class="row dashboard-controls-row">
+            <div class="dashboard-inputs">
+              <label>Project: <input id="projectId" value="1" style="width:80px"/></label>
+              <label>User token: <input id="userToken" type="password" autocomplete="off" placeholder="optional" style="width:220px"/></label>
+              <label>Admin token: <input id="adminToken" type="password" autocomplete="off" placeholder="optional" style="width:220px"/></label>
+            </div>
+            <div class="dashboard-actions">
+              <button id="loadIncidentsBtn" class="btn">Load</button>
+              <a class="btn btn-secondary" href="/ui/dashboard">Dashboard</a>
+              <a class="btn btn-secondary" href="/ui/snapshots">Snapshots</a>
+              <a class="btn btn-secondary" href="/ui/reports">Reports</a>
+            </div>
+          </div>
+        </section>
+
+        <section id="incidentCards" class="kpi-grid"></section>
 
         <section class="card">
           <div class="section-head">
@@ -60,6 +95,7 @@ def incidents_page():
         </section>
       </main>
     </div>
+    <script src="/static/js/ui_shell.js"></script>
     <script src="/static/js/incidents.js"></script>
     </body>
     </html>
@@ -337,24 +373,63 @@ def snapshots_page():
           </div>
         </header>
 
-        <section class="card controls-card">
-          <div class="row">
-            <label>Project: <input id="projectId" value="1" style="width:80px"/></label>
-            <label>API Key: <input id="apiKey" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></label>
-            <label>Check: <select id="checkId" style="width:140px"><option value="">(all)</option></select></label>
-            <label>Start: <input id="start" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
-            <label>End: <input id="end" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
-            <button id="loadSnapshotsBtn" class="btn">Load</button>
-            <button id="availabilityBtn" class="btn btn-secondary">Availability</button>
-            <button id="savePrefsBtn" class="btn btn-secondary">Save Prefs</button>
-            <button id="exportCsvBtn" class="btn btn-secondary">Export CSV</button>
-            <a class="btn btn-secondary" href="/ui/dashboard">Dashboard</a>
-            <a class="btn btn-secondary" href="/ui/reports">Reports</a>
-            <a class="btn btn-secondary" href="/ui/incidents">Incidents</a>
+        <section id="incidentHeroBanner" class="card hero-banner hero-banner-hidden" role="status" aria-live="polite">
+          <div class="hero-banner-icon">!</div>
+          <div class="hero-banner-content">
+            <div class="hero-banner-title" id="incidentHeroTitle">No active outages</div>
+            <div class="hero-banner-sub" id="incidentHeroSub">All checks currently healthy.</div>
           </div>
         </section>
 
-        <section class="card">
+        <section class="card health-strip">
+          <div class="health-item">
+            <span class="health-label">Last refresh</span>
+            <span class="health-value" id="healthLastRefresh">-</span>
+          </div>
+          <div class="health-item">
+            <span class="health-label">Active incidents</span>
+            <span class="health-value" id="healthActiveIncidents">-</span>
+          </div>
+          <div class="health-item">
+            <span class="health-label">Workers online</span>
+            <span class="health-value" id="healthWorkersOnline">-</span>
+          </div>
+          <div class="health-item health-item-wide">
+            <span class="health-label">Region health</span>
+            <span class="health-value" id="healthRegionHealth">-</span>
+          </div>
+        </section>
+
+        <section class="card controls-card">
+          <div class="row dashboard-controls-row">
+            <div class="dashboard-inputs">
+              <label>Project: <input id="projectId" value="1" style="width:80px"/></label>
+              <label>API Key: <input id="apiKey" type="password" autocomplete="off" placeholder="optional" style="width:220px"/></label>
+              <label>Check: <select id="checkId" style="width:160px"><option value="">(all)</option></select></label>
+              <label>Start: <input id="start" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:190px"/></label>
+              <label>End: <input id="end" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:190px"/></label>
+            </div>
+            <div class="dashboard-actions">
+              <button id="loadSnapshotsBtn" class="btn">Load</button>
+              <button id="availabilityBtn" class="btn btn-secondary">Availability</button>
+              <button id="savePrefsBtn" class="btn btn-secondary">Save Prefs</button>
+              <button id="exportCsvBtn" class="btn btn-secondary">Export CSV</button>
+              <a class="btn btn-secondary" href="/ui/dashboard">Dashboard</a>
+              <a class="btn btn-secondary" href="/ui/reports">Reports</a>
+              <a class="btn btn-secondary" href="/ui/incidents">Incidents</a>
+            </div>
+          </div>
+          <div id="snapshotPresetRow" class="row">
+            <button class="btn btn-secondary" id="p1h">Last 1h</button>
+            <button class="btn btn-secondary" id="p6h">Last 6h</button>
+            <button class="btn btn-secondary" id="p24h">Last 24h</button>
+            <button class="btn btn-secondary" id="p7d">Last 7d</button>
+          </div>
+        </section>
+
+        <section id="snapshotCards" class="kpi-grid"></section>
+
+        <section class="card table-card">
           <div class="section-head">
             <h3>Snapshot Rows</h3>
             <div class="muted">Includes recent uptime snapshots and summary metrics.</div>
@@ -362,17 +437,21 @@ def snapshots_page():
           <div id="list">Loading...</div>
         </section>
 
-        <section class="card">
+        <section id="snapshotUptimeChartCard" class="card chart-card">
           <div class="section-head">
             <h3>Availability Report</h3>
             <div class="muted">Aggregated SLO/SLA status for the selected range.</div>
           </div>
           <div id="availability" class="card">Run Availability to view report.</div>
-          <div style="margin-top:12px"><canvas id="uptimeChart" width="800" height="240"></canvas></div>
+          <div class="chart-frame" style="margin-top:12px">
+            <canvas id="snapshotUptimeChart" height="140"></canvas>
+            <div id="snapshotChartEmpty" class="chart-empty hidden">No recent data for selected range.</div>
+          </div>
         </section>
       </main>
     </div>
     <script src="/static/js/vendor/chart.min.js"></script>
+    <script src="/static/js/ui_shell.js"></script>
     <script src="/static/js/snapshots.js"></script>
     </body>
     </html>
@@ -671,25 +750,56 @@ def reports_page():
           </div>
         </header>
 
+        <section id="incidentHeroBanner" class="card hero-banner hero-banner-hidden" role="status" aria-live="polite">
+          <div class="hero-banner-icon">!</div>
+          <div class="hero-banner-content">
+            <div class="hero-banner-title" id="incidentHeroTitle">No active outages</div>
+            <div class="hero-banner-sub" id="incidentHeroSub">All checks currently healthy.</div>
+          </div>
+        </section>
+
+        <section class="card health-strip">
+          <div class="health-item">
+            <span class="health-label">Last refresh</span>
+            <span class="health-value" id="healthLastRefresh">-</span>
+          </div>
+          <div class="health-item">
+            <span class="health-label">Active incidents</span>
+            <span class="health-value" id="healthActiveIncidents">-</span>
+          </div>
+          <div class="health-item">
+            <span class="health-label">Workers online</span>
+            <span class="health-value" id="healthWorkersOnline">-</span>
+          </div>
+          <div class="health-item health-item-wide">
+            <span class="health-label">Region health</span>
+            <span class="health-value" id="healthRegionHealth">-</span>
+          </div>
+        </section>
+
         <section class="card controls-card">
-          <div class="row">
-            <label>Project: <input id="projectId" value="1" style="width:80px"/></label>
-            <label>API Key: <input id="apiKey" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></label>
-            <label>Granularity:
-              <select id="rollup" style="width:140px">
-                <option value="day">daily</option>
-                <option value="month">monthly</option>
-                <option value="quarter">quarterly</option>
-              </select>
-            </label>
-            <label>Check: <select id="checkId" style="width:140px"><option value="">(all)</option></select></label>
-            <label>Start: <input id="start" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
-            <label>End: <input id="end" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:200px"/></label>
-            <button id="loadBtn" class="btn">Load</button>
-            <button id="exportBtn" class="btn btn-secondary">Export CSV</button>
-            <a class="btn btn-secondary" href="/ui/dashboard">Dashboard</a>
-            <a class="btn btn-secondary" href="/ui/snapshots">Snapshots</a>
-            <a class="btn btn-secondary" href="/ui/incidents">Incidents</a>
+          <div class="row dashboard-controls-row">
+            <div class="dashboard-inputs">
+              <label>Project: <input id="projectId" value="1" style="width:80px"/></label>
+              <label>API Key: <input id="apiKey" type="password" autocomplete="off" placeholder="optional" style="width:220px"/></label>
+              <label>Granularity:
+                <select id="rollup" style="width:140px">
+                  <option value="day">daily</option>
+                  <option value="month">monthly</option>
+                  <option value="quarter">quarterly</option>
+                </select>
+              </label>
+              <label>Check: <select id="checkId" style="width:140px"><option value="">(all)</option></select></label>
+              <label>Start: <input id="start" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:190px"/></label>
+              <label>End: <input id="end" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:190px"/></label>
+            </div>
+            <div class="dashboard-actions">
+              <button id="loadBtn" class="btn">Load</button>
+              <button id="exportBtn" class="btn btn-secondary">Export CSV</button>
+              <a class="btn btn-secondary" href="/ui/dashboard">Dashboard</a>
+              <a class="btn btn-secondary" href="/ui/snapshots">Snapshots</a>
+              <a class="btn btn-secondary" href="/ui/incidents">Incidents</a>
+            </div>
           </div>
           <div class="row">
             <button class="btn btn-secondary" id="p7d">Last 7d</button>
@@ -699,15 +809,20 @@ def reports_page():
           </div>
         </section>
 
-        <section class="card">
+        <section id="reportCards" class="kpi-grid"></section>
+
+        <section id="reportChartCard" class="card chart-card">
           <div class="section-head">
             <h3>Project Availability</h3>
             <div class="muted">Trend view for the selected period granularity.</div>
           </div>
-          <canvas id="reportChart" height="140"></canvas>
+          <div class="chart-frame">
+            <canvas id="reportChart" height="140"></canvas>
+            <div id="reportChartEmpty" class="chart-empty hidden">No recent data for selected range.</div>
+          </div>
         </section>
 
-        <section class="card">
+        <section class="card table-card">
           <div class="section-head">
             <h3>Summary Table</h3>
             <div class="muted">Per-period uptime and SLO/SLA compliance.</div>
@@ -720,6 +835,7 @@ def reports_page():
       </main>
     </div>
     <script src="/static/js/vendor/chart.min.js"></script>
+    <script src="/static/js/ui_shell.js"></script>
     <script src="/static/js/report.js"></script>
     </body>
     </html>
@@ -757,17 +873,50 @@ def project_settings_page(project_id: int = Path(..., ge=1)):
           </div>
         </header>
 
-        <section class="card controls-card">
-          <div class="row">
-            <label>Project: <input id="projectId" value="{project_id}" style="width:80px"/></label>
-            <label>API Key: <input id="apiKey" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></label>
-            <label>Admin token: <input id="adminToken" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></label>
-            <button id="loadBtn" class="btn">Load</button>
-            <button id="saveBtn" class="btn">Save</button>
-            <a class="btn btn-secondary" href="/ui/projects/{project_id}/oncall">On-call</a>
-            <a class="btn btn-secondary" href="/ui/projects/{project_id}/remediation">Remediation</a>
+        <section id="incidentHeroBanner" class="card hero-banner hero-banner-hidden" role="status" aria-live="polite">
+          <div class="hero-banner-icon">!</div>
+          <div class="hero-banner-content">
+            <div class="hero-banner-title" id="incidentHeroTitle">No active outages</div>
+            <div class="hero-banner-sub" id="incidentHeroSub">All checks currently healthy.</div>
           </div>
         </section>
+
+        <section class="card health-strip">
+          <div class="health-item">
+            <span class="health-label">Last refresh</span>
+            <span class="health-value" id="healthLastRefresh">-</span>
+          </div>
+          <div class="health-item">
+            <span class="health-label">Active incidents</span>
+            <span class="health-value" id="healthActiveIncidents">-</span>
+          </div>
+          <div class="health-item">
+            <span class="health-label">Workers online</span>
+            <span class="health-value" id="healthWorkersOnline">-</span>
+          </div>
+          <div class="health-item health-item-wide">
+            <span class="health-label">Region health</span>
+            <span class="health-value" id="healthRegionHealth">-</span>
+          </div>
+        </section>
+
+        <section class="card controls-card">
+          <div class="row dashboard-controls-row">
+            <div class="dashboard-inputs">
+              <label>Project: <input id="projectId" value="{project_id}" style="width:80px"/></label>
+              <label>API Key: <input id="apiKey" type="password" autocomplete="off" placeholder="optional" style="width:220px"/></label>
+              <label>Admin token: <input id="adminToken" type="password" autocomplete="off" placeholder="optional" style="width:220px"/></label>
+            </div>
+            <div class="dashboard-actions">
+              <button id="loadBtn" class="btn">Load</button>
+              <button id="saveBtn" class="btn">Save</button>
+              <a class="btn btn-secondary" href="/ui/projects/{project_id}/oncall">On-call</a>
+              <a class="btn btn-secondary" href="/ui/projects/{project_id}/remediation">Remediation</a>
+            </div>
+          </div>
+        </section>
+
+        <section id="settingsCards" class="kpi-grid"></section>
 
         <section class="card">
           <div class="section-head">
@@ -795,6 +944,7 @@ def project_settings_page(project_id: int = Path(..., ge=1)):
         </section>
       </main>
     </div>
+    <script src="/static/js/ui_shell.js"></script>
     <script src="/static/js/project_settings.js"></script>
     </body>
     </html>
@@ -832,16 +982,49 @@ def oncall_page(project_id: int = Path(..., ge=1)):
           </div>
         </header>
 
-        <section class="card controls-card">
-          <div class="row">
-            <label>Project: <input id="projectId" value="{project_id}" style="width:80px"/></label>
-            <label>API Key: <input id="apiKey" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></label>
-            <label>Admin token: <input id="adminToken" type="password" autocomplete="off" placeholder="optional" style="width:240px"/></label>
-            <button id="refreshBtn" class="btn">Refresh</button>
-            <a class="btn btn-secondary" href="/ui/projects/{project_id}/settings">Settings</a>
-            <a class="btn btn-secondary" href="/ui/projects/{project_id}/remediation">Remediation</a>
+        <section id="incidentHeroBanner" class="card hero-banner hero-banner-hidden" role="status" aria-live="polite">
+          <div class="hero-banner-icon">!</div>
+          <div class="hero-banner-content">
+            <div class="hero-banner-title" id="incidentHeroTitle">No active outages</div>
+            <div class="hero-banner-sub" id="incidentHeroSub">All checks currently healthy.</div>
           </div>
         </section>
+
+        <section class="card health-strip">
+          <div class="health-item">
+            <span class="health-label">Last refresh</span>
+            <span class="health-value" id="healthLastRefresh">-</span>
+          </div>
+          <div class="health-item">
+            <span class="health-label">Active incidents</span>
+            <span class="health-value" id="healthActiveIncidents">-</span>
+          </div>
+          <div class="health-item">
+            <span class="health-label">Workers online</span>
+            <span class="health-value" id="healthWorkersOnline">-</span>
+          </div>
+          <div class="health-item health-item-wide">
+            <span class="health-label">Region health</span>
+            <span class="health-value" id="healthRegionHealth">-</span>
+          </div>
+        </section>
+
+        <section class="card controls-card">
+          <div class="row dashboard-controls-row">
+            <div class="dashboard-inputs">
+              <label>Project: <input id="projectId" value="{project_id}" style="width:80px"/></label>
+              <label>API Key: <input id="apiKey" type="password" autocomplete="off" placeholder="optional" style="width:220px"/></label>
+              <label>Admin token: <input id="adminToken" type="password" autocomplete="off" placeholder="optional" style="width:220px"/></label>
+            </div>
+            <div class="dashboard-actions">
+              <button id="refreshBtn" class="btn">Refresh</button>
+              <a class="btn btn-secondary" href="/ui/projects/{project_id}/settings">Settings</a>
+              <a class="btn btn-secondary" href="/ui/projects/{project_id}/remediation">Remediation</a>
+            </div>
+          </div>
+        </section>
+
+        <section id="oncallCards" class="kpi-grid"></section>
 
         <section class="card">
           <div class="section-head">
@@ -1068,6 +1251,7 @@ def oncall_page(project_id: int = Path(..., ge=1)):
         </section>
       </main>
     </div>
+    <script src="/static/js/ui_shell.js"></script>
     <script src="/static/js/oncall.js"></script>
     </body>
     </html>

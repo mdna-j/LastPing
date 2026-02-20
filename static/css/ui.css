@@ -692,19 +692,39 @@ tbody tr:hover {
   gap: 14px;
 }
 
-.page-dashboard .card {
+.page-dashboard .card,
+.page-snapshots .card,
+.page-reports .card,
+.page-incidents .card,
+.page-settings .card,
+.page-oncall .card {
   transition: transform 0.16s ease, box-shadow 0.2s ease, border-color 0.2s ease;
 }
 
-.page-dashboard .card:hover {
+.page-dashboard .card:hover,
+.page-snapshots .card:hover,
+.page-reports .card:hover,
+.page-incidents .card:hover,
+.page-settings .card:hover,
+.page-oncall .card:hover {
   transform: translateY(-2px);
 }
 
-.page-dashboard .hero-banner:hover {
+.page-dashboard .hero-banner:hover,
+.page-snapshots .hero-banner:hover,
+.page-reports .hero-banner:hover,
+.page-incidents .hero-banner:hover,
+.page-settings .hero-banner:hover,
+.page-oncall .hero-banner:hover {
   transform: translateY(-1px);
 }
 
-.page-dashboard .kpi-grid {
+.page-dashboard .kpi-grid,
+.page-snapshots .kpi-grid,
+.page-reports .kpi-grid,
+.page-incidents .kpi-grid,
+.page-settings .kpi-grid,
+.page-oncall .kpi-grid {
   margin-bottom: 10px;
 }
 
@@ -723,6 +743,46 @@ tbody tr:hover {
 .page-dashboard .incident-grid {
   margin-top: 10px;
   gap: 12px;
+}
+
+.page-snapshots .controls-card,
+.page-reports .controls-card,
+.page-incidents .controls-card,
+.page-settings .controls-card,
+.page-oncall .controls-card {
+  margin-bottom: 10px;
+}
+
+.page-snapshots .table-card,
+.page-reports .table-card,
+.page-incidents .table-card,
+.page-settings .table-card,
+.page-oncall .table-card {
+  margin-top: 10px;
+}
+
+.page-snapshots .dashboard-controls-row,
+.page-reports .dashboard-controls-row,
+.page-incidents .dashboard-controls-row,
+.page-settings .dashboard-controls-row,
+.page-oncall .dashboard-controls-row {
+  margin-bottom: 0;
+}
+
+.page-incidents #list .card,
+.page-oncall #rotations .card,
+.page-oncall #members .card,
+.page-oncall #escalations .card,
+.page-oncall #alerts .card {
+  border-color: #2a3f5d;
+}
+
+.page-incidents #list .card {
+  margin-bottom: 10px;
+}
+
+.page-snapshots #availability.card {
+  margin-bottom: 0;
 }
 
 .insight-item {

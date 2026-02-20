@@ -3,6 +3,32 @@ let oncallEscalations = [];
 let oncallRotations = [];
 let policyDragLevel = null;
 
+function renderOncallCards(checks, health, alerts){
+  const root = document.getElementById("oncallCards");
+  if(!root) return;
+
+  const counts = window.LastPingShell
+    ? window.LastPingShell.checkCounts(checks || [])
+    : {total: 0, up: 0, down: 0, degraded: 0, flapping: 0};
+  const openIncidents = health && health.active_incidents !== undefined && health.active_incidents !== null
+    ? Number(health.active_incidents)
+    : 0;
+  const openAlerts = Array.isArray(alerts) ? alerts.length : 0;
+  const stepCount = (oncallEscalations || []).length;
+
+  const checksState = counts.down > 0 ? "kpi-critical" : (counts.degraded > 0 ? "kpi-warning" : "kpi-healthy");
+  const incidentState = openIncidents > 0 ? "kpi-critical" : "kpi-healthy";
+  const alertState = openAlerts > 0 ? "kpi-warning" : "kpi-healthy";
+  const escalationState = stepCount > 0 ? "kpi-healthy" : "kpi-warning";
+
+  root.innerHTML = [
+    `<article class="card kpi-card ${checksState}"><div class="metric-label">Checks</div><div class="metric-value">${counts.total}</div><div class="metric-sub">${counts.up} up | ${counts.down} down | ${counts.degraded} degraded</div></article>`,
+    `<article class="card kpi-card ${incidentState}"><div class="metric-label">Open incidents</div><div class="metric-value">${openIncidents}</div><div class="metric-sub">Current unresolved threads</div></article>`,
+    `<article class="card kpi-card ${alertState}"><div class="metric-label">Open alerts</div><div class="metric-value">${openAlerts}</div><div class="metric-sub">Awaiting close/ack</div></article>`,
+    `<article class="card kpi-card ${escalationState}"><div class="metric-label">Escalation steps</div><div class="metric-value">${stepCount}</div><div class="metric-sub">${oncallRotations.length} rotations configured</div></article>`,
+  ].join("");
+}
+
 function headersOncall(){
   const apiKey = document.getElementById('apiKey').value;
   const admin = document.getElementById('adminToken').value;
@@ -233,7 +259,14 @@ async function refreshOncall(){
     fetch(escUrl, {headers: h}),
     fetch(`/projects/${pid}/oncall/alerts?status_filter=open`, {headers: h}),
   ]);
-  if(!rots.ok || !escs.ok || !alerts.ok){ alert('Failed to load on-call data'); return; }
+  if(!rots.ok || !escs.ok || !alerts.ok){
+    const shellData = window.LastPingShell
+      ? await window.LastPingShell.hydratePageShell(pid, oncallChecks && oncallChecks.length ? oncallChecks : null)
+      : {checks: oncallChecks || [], health: null};
+    renderOncallCards(shellData.checks, shellData.health, []);
+    alert('Failed to load on-call data');
+    return;
+  }
   const rotJson = await rots.json();
   const escJson = await escs.json();
   const alertJson = await alerts.json();
@@ -262,6 +295,11 @@ async function refreshOncall(){
 
   const alertDiv = document.getElementById('alerts');
   alertDiv.innerHTML = alertJson.map(a => `<div class="card"><div>Alert ${a.id} check:${a.check_id} event:${a.event_type} level:${a.escalation_level}</div><div class="muted">${a.message||''}</div><button class="btn" onclick="closeAlert(${pid}, ${a.id})">Close</button></div>`).join('');
+
+  const shellData = window.LastPingShell
+    ? await window.LastPingShell.hydratePageShell(pid, oncallChecks && oncallChecks.length ? oncallChecks : null)
+    : {checks: oncallChecks || [], health: null};
+  renderOncallCards(shellData.checks, shellData.health, alertJson);
 
   renderPolicyChain();
   renderPolicyPreview();
