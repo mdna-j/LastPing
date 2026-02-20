@@ -151,6 +151,34 @@ function setChartEmpty(id, shouldShow, message){
   emptyEl.classList.toggle("hidden", !shouldShow);
 }
 
+function goToCheckIncidents(pid, checkId){
+  if(!checkId) return;
+  const url = new URL("/ui/incidents", window.location.origin);
+  url.searchParams.set("project", pid);
+  url.searchParams.set("check_id", checkId);
+  window.location.href = `${url.pathname}${url.search}`;
+}
+
+function wireChecksTableAffordance(pid){
+  const rows = document.querySelectorAll("#checksTable tbody tr[data-check-id]");
+  rows.forEach((row)=>{
+    const checkId = row.getAttribute("data-check-id");
+    if(!checkId) return;
+    row.setAttribute("role", "link");
+    row.setAttribute("tabindex", "0");
+    row.setAttribute("title", "Open incidents for this check");
+    row.addEventListener("click", ()=>{
+      goToCheckIncidents(pid, checkId);
+    });
+    row.addEventListener("keydown", (e)=>{
+      if(e.key === "Enter" || e.key === " "){
+        e.preventDefault();
+        goToCheckIncidents(pid, checkId);
+      }
+    });
+  });
+}
+
 function renderIntelligenceSummary({hasApiKey, predictive, anomalies, checks}){
   const summaryEl = document.getElementById("intelligenceSummary");
   const metaEl = document.getElementById("intelligenceMeta");
@@ -430,8 +458,9 @@ async function loadDashboard(){
   }else{
     tbody.innerHTML = checks.map((c)=> {
       const lat = (c.last_latency_ms !== null && c.last_latency_ms !== undefined) ? `${Number(c.last_latency_ms).toFixed(1)}ms` : "n/a";
-      return `<tr><td>${c.name}</td><td>${c.type}</td><td>${statusBadge(c.status)}</td><td>${c.last_ping || "n/a"}</td><td>${lat}</td><td>${c.region || ""}</td></tr>`;
+      return `<tr class="checks-row-clickable" data-check-id="${c.id}"><td>${c.name}</td><td>${c.type}</td><td>${statusBadge(c.status)}</td><td>${c.last_ping || "n/a"}</td><td>${lat}</td><td>${c.region || ""}</td></tr>`;
     }).join("");
+    wireChecksTableAffordance(pid);
   }
 
   // charts

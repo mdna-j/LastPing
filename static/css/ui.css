@@ -185,6 +185,22 @@ tbody tr:hover {
   background: rgba(79, 140, 255, 0.09);
 }
 
+.checks-row-clickable {
+  cursor: pointer;
+  transition: background-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.checks-row-clickable:hover {
+  background: rgba(92, 153, 255, 0.14);
+  box-shadow: inset 0 0 0 1px rgba(123, 169, 245, 0.2);
+}
+
+.checks-row-clickable:focus-visible {
+  outline: 2px solid rgba(108, 162, 255, 0.65);
+  outline-offset: -2px;
+  background: rgba(92, 153, 255, 0.18);
+}
+
 .hidden {
   display: none;
 }
@@ -209,12 +225,38 @@ tbody tr:hover {
   background: rgba(255, 93, 125, 0.17);
   color: #ffc0cf;
   border: 1px solid rgba(255, 93, 125, 0.34);
+  animation: statusPulseCritical 1.55s ease-in-out infinite;
 }
 
 .status-degraded {
   background: rgba(255, 180, 84, 0.17);
   color: #ffd7a5;
   border: 1px solid rgba(255, 180, 84, 0.32);
+  animation: statusPulseWarning 2.1s ease-in-out infinite;
+}
+
+@keyframes statusPulseCritical {
+  0% {
+    box-shadow: 0 0 0 0 rgba(255, 93, 125, 0.0);
+  }
+  55% {
+    box-shadow: 0 0 0 5px rgba(255, 93, 125, 0.18);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(255, 93, 125, 0.0);
+  }
+}
+
+@keyframes statusPulseWarning {
+  0% {
+    box-shadow: 0 0 0 0 rgba(255, 180, 84, 0.0);
+  }
+  55% {
+    box-shadow: 0 0 0 4px rgba(255, 180, 84, 0.16);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(255, 180, 84, 0.0);
+  }
 }
 
 .policy-step {
@@ -648,6 +690,39 @@ tbody tr:hover {
   display: grid;
   grid-template-columns: 1fr;
   gap: 14px;
+}
+
+.page-dashboard .card {
+  transition: transform 0.16s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+}
+
+.page-dashboard .card:hover {
+  transform: translateY(-2px);
+}
+
+.page-dashboard .hero-banner:hover {
+  transform: translateY(-1px);
+}
+
+.page-dashboard .kpi-grid {
+  margin-bottom: 10px;
+}
+
+.page-dashboard .intelligence-grid {
+  margin-bottom: 10px;
+}
+
+.page-dashboard .chart-grid {
+  gap: 12px;
+}
+
+.page-dashboard .table-card {
+  margin-top: 10px;
+}
+
+.page-dashboard .incident-grid {
+  margin-top: 10px;
+  gap: 12px;
 }
 
 .insight-item {
