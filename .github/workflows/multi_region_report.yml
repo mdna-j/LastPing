@@ -1,6 +1,8 @@
 name: Multi-Region Report
 
 on:
+  schedule:
+    - cron: "25 4 * * *"
   workflow_dispatch:
     inputs:
       recent_hours:
@@ -11,6 +13,10 @@ on:
         description: "Down-event threshold to flag checks"
         required: false
         default: "3"
+      max_expired_leases:
+        description: "Allowed expired lease count before FAIL"
+        required: false
+        default: "0"
 
 jobs:
   multi_region_report:
@@ -31,9 +37,33 @@ jobs:
           DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
           RECENT_HOURS: ${{ inputs.recent_hours }}
           DOWN_THRESHOLD: ${{ inputs.down_threshold }}
+          MAX_EXPIRED_LEASES: ${{ inputs.max_expired_leases }}
         run: |
+          mkdir -p artifacts
           if [ -z "$DATABASE_URL" ]; then
             echo "STAGING_DATABASE_URL not set; skipping report."
+            printf '%s\n' '# Multi-Region Staging Signoff' '' '- Status: `SKIPPED`' '- Reason: `STAGING_DATABASE_URL not configured`' > artifacts/multi_region_signoff.md
+            printf '%s\n' '{"status":"skipped","reason":"STAGING_DATABASE_URL not configured"}' > artifacts/multi_region_report.json
             exit 0
           fi
-          python scripts/multi_region_report.py --recent-hours "${RECENT_HOURS:-2}" --down-threshold "${DOWN_THRESHOLD:-3}"
+          python scripts/multi_region_report.py \
+            --recent-hours "${RECENT_HOURS:-2}" \
+            --down-threshold "${DOWN_THRESHOLD:-3}" \
+            --max-expired-leases "${MAX_EXPIRED_LEASES:-0}" \
+            --environment "staging" \
+            --json-out artifacts/multi_region_report.json \
+            --markdown-out artifacts/multi_region_signoff.md
+
+      - name: Publish signoff summary
+        if: always()
+        run: |
+          if [ -f artifacts/multi_region_signoff.md ]; then
+            cat artifacts/multi_region_signoff.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload report artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: multi-region-signoff-${{ github.run_id }}
+          path: artifacts/

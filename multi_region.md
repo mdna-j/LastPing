@@ -132,6 +132,9 @@ Notes:
 See `docs/multi_region_validation.md` for a staging checklist and acceptance criteria,
 plus the `scripts/multi_region_report.py` helper.
 
+For tracked staging signoff, run `.github/workflows/multi_region_report.yml`
+and commit the generated signoff markdown into `docs/signoffs/multi_region/`.
+
 ## GitHub Actions validation (optional)
 
 There is also a lightweight CI check that runs the docker-compose multi-region profile,
