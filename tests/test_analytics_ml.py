@@ -158,3 +158,73 @@ def test_predictive_model_training_and_ml_endpoint(tmp_path):
     data = resp.json()
     assert data.get("model_used") is True
     assert any(w["check_id"] == cid for w in data.get("warnings", []))
+
+
+def test_predictive_quality_monitoring_endpoints(tmp_path):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'ml_quality.db'}"
+
+    from sqlmodel import Session
+    from src import db as dbmod
+    from src.models import Project, Check, CheckType, CheckStatus, Event
+    from src.security import hash_api_key
+    from src.main import app
+
+    dbmod.create_db_and_tables()
+
+    now = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
+    start = now - timedelta(hours=48)
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="qproj", api_key_hash=hash_api_key("qkey"))
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+        check = Check(project_id=project.id, name="q1", type=CheckType.HTTP, status=CheckStatus.DOWN)
+        session.add(check)
+        session.commit()
+        session.refresh(check)
+
+        # steady baseline with slight hour-to-hour variance
+        for i in range(48):
+            count = 1 + (i % 3)
+            for j in range(count):
+                ev = Event(
+                    check_id=check.id,
+                    project_id=project.id,
+                    event_type="down",
+                    created_at=start + timedelta(hours=i, minutes=j),
+                )
+                session.add(ev)
+        session.commit()
+        pid = project.id
+        cid = check.id
+
+    client = TestClient(app)
+    headers = {"Authorization": "Bearer qkey"}
+
+    train = client.post(
+        f"/projects/{pid}/analytics/predictive/train",
+        json={"days": 2, "min_events": 1},
+        headers=headers,
+    )
+    assert train.status_code == 200
+    assert train.json().get("trained", 0) >= 1
+
+    run = client.post(
+        f"/projects/{pid}/analytics/predictive/quality/run",
+        json={"hours": 24, "min_samples": 1, "drift_ratio_threshold": 100.0, "mae_threshold": 100.0},
+        headers=headers,
+    )
+    assert run.status_code == 200
+    run_data = run.json()
+    assert run_data.get("evaluated", 0) >= 1
+    assert any(row["check_id"] == cid for row in run_data.get("rows", []))
+
+    listed = client.get(
+        f"/projects/{pid}/analytics/predictive/quality?limit=20",
+        headers=headers,
+    )
+    assert listed.status_code == 200
+    listed_data = listed.json()
+    assert listed_data.get("count", 0) >= 1
+    assert any(row["check_id"] == cid for row in listed_data.get("rows", []))

@@ -9,10 +9,11 @@ from pydantic import BaseModel, conint
 from sqlmodel import Session, select
 
 from ..db import get_session
-from ..models import Event, Check, Project, Incident, PredictiveModel, Anomaly
+from ..models import Event, Check, Project, Incident, PredictiveModel, PredictiveModelQuality, Anomaly
 from ..analytics_ml import find_similar_incidents, cluster_incidents
 from ..predictive_models import (
     MODEL_TYPE_SEASONAL,
+    evaluate_predictive_model_quality,
     list_active_models,
     predictive_warnings_from_models,
     train_seasonal_hourly_models,
@@ -70,6 +71,14 @@ class PredictiveTrainIn(BaseModel):
     check_id: Optional[int] = None
     days: conint(ge=1, le=365) = 30
     min_events: conint(ge=1, le=10000) = 10
+    model_type: str = MODEL_TYPE_SEASONAL
+
+
+class PredictiveQualityRunIn(BaseModel):
+    hours: conint(ge=6, le=720) = 48
+    min_samples: conint(ge=1, le=720) = 24
+    drift_ratio_threshold: float = 2.0
+    mae_threshold: float = 1.0
     model_type: str = MODEL_TYPE_SEASONAL
 
 
@@ -522,6 +531,95 @@ def list_predictive_models(
                 "metrics_json": m.metrics_json,
             }
             for m in models
+        ],
+    }
+
+
+@router.post("/analytics/predictive/quality/run")
+def run_predictive_quality_monitoring(
+    project_id: int = Path(..., ge=1),
+    payload: PredictiveQualityRunIn = Body(...),
+    session: Session = Depends(get_session),
+    _proj: Project = Depends(require_project_api_key),
+):
+    if payload.model_type != MODEL_TYPE_SEASONAL:
+        raise HTTPException(status_code=400, detail="unsupported model_type")
+    rows = evaluate_predictive_model_quality(
+        session=session,
+        project_id=project_id,
+        hours=payload.hours,
+        min_samples=payload.min_samples,
+        drift_ratio_threshold=payload.drift_ratio_threshold,
+        mae_threshold=payload.mae_threshold,
+        model_type=payload.model_type,
+    )
+    drifted = [r for r in rows if r.status == "drift"]
+    insufficient = [r for r in rows if r.status == "insufficient_data"]
+    return {
+        "project_id": project_id,
+        "evaluated": len(rows),
+        "drifted": len(drifted),
+        "insufficient_data": len(insufficient),
+        "ok": len(rows) - len(drifted) - len(insufficient),
+        "rows": [
+            {
+                "id": r.id,
+                "predictive_model_id": r.predictive_model_id,
+                "check_id": r.check_id,
+                "status": r.status,
+                "sample_count": r.sample_count,
+                "mae": r.mae,
+                "rmse": r.rmse,
+                "mape": r.mape,
+                "drift_ratio": r.drift_ratio,
+                "window_start": r.window_start.isoformat(),
+                "window_end": r.window_end.isoformat(),
+                "created_at": r.created_at.isoformat(),
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.get("/analytics/predictive/quality")
+def list_predictive_quality(
+    project_id: int = Path(..., ge=1),
+    check_id: Optional[int] = Query(None, ge=1),
+    status: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    session: Session = Depends(get_session),
+    _proj: Project = Depends(require_project_api_key),
+):
+    stmt = select(PredictiveModelQuality).where(
+        PredictiveModelQuality.project_id == project_id
+    )
+    if check_id is not None:
+        stmt = stmt.where(PredictiveModelQuality.check_id == check_id)
+    if status:
+        stmt = stmt.where(PredictiveModelQuality.status == status)
+    rows = session.exec(
+        stmt.order_by(PredictiveModelQuality.created_at.desc()).limit(limit)
+    ).all()
+    return {
+        "project_id": project_id,
+        "count": len(rows),
+        "rows": [
+            {
+                "id": r.id,
+                "predictive_model_id": r.predictive_model_id,
+                "check_id": r.check_id,
+                "status": r.status,
+                "sample_count": r.sample_count,
+                "mae": r.mae,
+                "rmse": r.rmse,
+                "mape": r.mape,
+                "drift_ratio": r.drift_ratio,
+                "metrics_json": r.metrics_json,
+                "window_start": r.window_start.isoformat(),
+                "window_end": r.window_end.isoformat(),
+                "created_at": r.created_at.isoformat(),
+            }
+            for r in rows
         ],
     }
 

@@ -5,7 +5,7 @@ from typing import Dict, List, Optional
 
 from sqlmodel import Session, select
 
-from .models import Event, PredictiveModel
+from .models import Event, PredictiveModel, PredictiveModelQuality
 
 MODEL_TYPE_SEASONAL = "seasonal_hourly_v1"
 
@@ -251,3 +251,147 @@ def predictive_warnings_from_models(
 
     warnings.sort(key=lambda r: (r["zscore"], r["predicted_next_hour"]), reverse=True)
     return warnings
+
+
+def _expected_hourly_value(params: dict, hour_of_day: int) -> float:
+    means = params.get("hourly_mean")
+    if isinstance(means, list) and len(means) == 24:
+        try:
+            return float(means[hour_of_day])
+        except Exception:
+            pass
+    try:
+        return float(params.get("global_mean", 0.0) or 0.0)
+    except Exception:
+        return 0.0
+
+
+def evaluate_predictive_model_quality(
+    session: Session,
+    project_id: int,
+    now: Optional[datetime] = None,
+    hours: int = 48,
+    min_samples: int = 24,
+    drift_ratio_threshold: float = 2.0,
+    mae_threshold: float = 1.0,
+    model_type: str = MODEL_TYPE_SEASONAL,
+) -> List[PredictiveModelQuality]:
+    """Evaluate active predictive models against recent observed event rates.
+
+    Persists one `PredictiveModelQuality` row per active model and returns the rows.
+    """
+    now = now or datetime.utcnow()
+    hours = max(1, int(hours))
+    min_samples = max(1, int(min_samples))
+    drift_ratio_threshold = max(1.01, float(drift_ratio_threshold))
+    mae_threshold = max(0.0, float(mae_threshold))
+
+    models = list_active_models(session, project_id, model_type=model_type)
+    if not models:
+        return []
+
+    start = now - timedelta(hours=hours)
+    check_ids = [m.check_id for m in models if m.check_id is not None]
+    if not check_ids:
+        return []
+
+    stmt = select(Event).where(
+        Event.project_id == project_id,
+        Event.created_at >= start,
+        Event.created_at <= now,
+        Event.check_id.in_(check_ids),
+    )
+    events = session.exec(stmt).all()
+    buckets: Dict[int, Dict[str, float]] = {}
+    for ev in events:
+        weight = _event_weight(ev.event_type)
+        if weight <= 0:
+            continue
+        hour = _bucket_hour(ev.created_at).isoformat()
+        check_bucket = buckets.setdefault(ev.check_id, {})
+        check_bucket[hour] = check_bucket.get(hour, 0.0) + weight
+
+    rows: List[PredictiveModelQuality] = []
+    drift_ratio_floor = 1.0 / drift_ratio_threshold
+    for model in models:
+        cid = model.check_id
+        if cid is None:
+            continue
+        try:
+            params = json.loads(model.params_json or "{}")
+        except Exception:
+            params = {}
+
+        actual_series: List[float] = []
+        expected_series: List[float] = []
+        for i in range(hours):
+            dt = (start + timedelta(hours=i)).replace(minute=0, second=0, microsecond=0)
+            key = dt.isoformat()
+            actual = float(buckets.get(cid, {}).get(key, 0.0))
+            expected = _expected_hourly_value(params, dt.hour)
+            actual_series.append(actual)
+            expected_series.append(expected)
+
+        sample_count = len(actual_series)
+        abs_sum = 0.0
+        sq_sum = 0.0
+        pct_sum = 0.0
+        pct_n = 0
+        for actual, expected in zip(actual_series, expected_series):
+            err = actual - expected
+            abs_err = abs(err)
+            abs_sum += abs_err
+            sq_sum += err * err
+            if expected > 0:
+                pct_sum += abs_err / expected
+                pct_n += 1
+
+        mae = (abs_sum / sample_count) if sample_count > 0 else None
+        rmse = (math.sqrt(sq_sum / sample_count) if sample_count > 0 else None)
+        mape = ((pct_sum / pct_n) * 100.0) if pct_n > 0 else None
+
+        mean_actual = (sum(actual_series) / sample_count) if sample_count > 0 else 0.0
+        mean_expected = (sum(expected_series) / sample_count) if sample_count > 0 else 0.0
+        drift_ratio = (mean_actual / mean_expected) if mean_expected > 0 else None
+
+        status = "ok"
+        if sample_count < min_samples:
+            status = "insufficient_data"
+        else:
+            drift_flag = (
+                drift_ratio is not None
+                and (drift_ratio >= drift_ratio_threshold or drift_ratio <= drift_ratio_floor)
+            )
+            mae_flag = mae is not None and mae >= mae_threshold
+            if drift_flag or mae_flag:
+                status = "drift"
+
+        metrics = {
+            "mean_actual": round(mean_actual, 6),
+            "mean_expected": round(mean_expected, 6),
+            "drift_ratio_threshold": drift_ratio_threshold,
+            "mae_threshold": mae_threshold,
+            "model_type": model_type,
+            "window_hours": hours,
+        }
+        row = PredictiveModelQuality(
+            predictive_model_id=model.id,
+            project_id=project_id,
+            check_id=cid,
+            window_start=start,
+            window_end=now,
+            sample_count=sample_count,
+            mae=mae,
+            rmse=rmse,
+            mape=mape,
+            drift_ratio=drift_ratio,
+            status=status,
+            metrics_json=json.dumps(metrics),
+        )
+        session.add(row)
+        rows.append(row)
+
+    session.commit()
+    for row in rows:
+        session.refresh(row)
+    return rows

@@ -255,6 +255,24 @@ class PredictiveModel(SQLModel, table=True):
     active: bool = Field(default=True, index=True)
 
 
+class PredictiveModelQuality(SQLModel, table=True):
+    __tablename__ = "predictive_model_quality"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    predictive_model_id: int = Field(foreign_key="predictive_model.id", index=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    check_id: int = Field(foreign_key="check.id", index=True)
+    window_start: datetime
+    window_end: datetime
+    sample_count: int = Field(default=0)
+    mae: Optional[float] = None
+    rmse: Optional[float] = None
+    mape: Optional[float] = None
+    drift_ratio: Optional[float] = None
+    status: str = Field(default="ok", index=True, description="ok, drift, insufficient_data")
+    metrics_json: Optional[str] = Field(default=None, description="JSON-encoded monitoring details")
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+
+
 class ApiKeyUsage(SQLModel, table=True):
     __tablename__ = "api_key_usage"
     """Simple per-minute counter for API key usage enforcement."""

@@ -1,0 +1,130 @@
+name: Predictive Model Ops
+
+on:
+  schedule:
+    - cron: "10 5 * * *"
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Training window in days"
+        required: false
+        default: "30"
+      min_events:
+        description: "Minimum weighted events required to train a model"
+        required: false
+        default: "10"
+      eval_hours:
+        description: "Quality evaluation window in hours"
+        required: false
+        default: "48"
+      min_samples:
+        description: "Minimum samples needed for quality status != insufficient_data"
+        required: false
+        default: "24"
+      drift_ratio_threshold:
+        description: "Drift ratio threshold (actual/expected)"
+        required: false
+        default: "2.0"
+      mae_threshold:
+        description: "MAE threshold for drift flagging"
+        required: false
+        default: "1.0"
+      strict:
+        description: "Fail workflow when drift is detected"
+        required: false
+        default: "false"
+      disable_drifted:
+        description: "Deactivate drifted models automatically"
+        required: false
+        default: "false"
+
+jobs:
+  predictive_model_ops:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: ${{ secrets.ANALYTICS_DATABASE_URL }}
+      DAYS: ${{ inputs.days }}
+      MIN_EVENTS: ${{ inputs.min_events }}
+      EVAL_HOURS: ${{ inputs.eval_hours }}
+      MIN_SAMPLES: ${{ inputs.min_samples }}
+      DRIFT_RATIO_THRESHOLD: ${{ inputs.drift_ratio_threshold }}
+      MAE_THRESHOLD: ${{ inputs.mae_threshold }}
+      STRICT_MODE: ${{ inputs.strict }}
+      DISABLE_DRIFTED: ${{ inputs.disable_drifted }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m pip install -e .
+
+      - name: Run predictive model ops
+        run: |
+          mkdir -p artifacts
+          if [ -z "$DATABASE_URL" ]; then
+            echo "ANALYTICS_DATABASE_URL not set; skipping predictive model ops."
+            printf '%s\n' '{"status":"skipped","reason":"ANALYTICS_DATABASE_URL not configured"}' > artifacts/predictive_model_ops.json
+            exit 0
+          fi
+
+          cmd=(python scripts/predictive_model_ops.py
+            --days "${DAYS:-30}"
+            --min-events "${MIN_EVENTS:-10}"
+            --eval-hours "${EVAL_HOURS:-48}"
+            --min-samples "${MIN_SAMPLES:-24}"
+            --drift-ratio-threshold "${DRIFT_RATIO_THRESHOLD:-2.0}"
+            --mae-threshold "${MAE_THRESHOLD:-1.0}"
+            --json-out artifacts/predictive_model_ops.json
+          )
+          if [ "${DISABLE_DRIFTED}" = "true" ]; then
+            cmd+=(--disable-drifted)
+          fi
+          if [ "${STRICT_MODE}" = "true" ]; then
+            cmd+=(--strict)
+          fi
+          "${cmd[@]}"
+
+      - name: Publish summary
+        if: always()
+        run: |
+          if [ -f artifacts/predictive_model_ops.json ]; then
+            python - <<'PY'
+            import json
+            from pathlib import Path
+            p = Path("artifacts/predictive_model_ops.json")
+            data = json.loads(p.read_text(encoding="utf-8"))
+            lines = []
+            lines.append("## Predictive Model Ops")
+            if data.get("status") == "skipped":
+              lines.append("")
+              lines.append(f"- Status: `SKIPPED`")
+              lines.append(f"- Reason: `{data.get('reason', 'unknown')}`")
+            else:
+              t = data.get("totals", {})
+              lines.append("")
+              lines.append(f"- Projects: `{t.get('projects', 0)}`")
+              lines.append(f"- Trained models: `{t.get('trained', 0)}`")
+              lines.append(f"- Evaluated models: `{t.get('evaluated', 0)}`")
+              lines.append(f"- Drifted: `{t.get('drifted', 0)}`")
+              lines.append(f"- OK: `{t.get('ok', 0)}`")
+              lines.append(f"- Insufficient data: `{t.get('insufficient_data', 0)}`")
+              lines.append(f"- Retired superseded: `{t.get('retired_superseded', 0)}`")
+              lines.append(f"- Disabled drifted: `{t.get('disabled_drifted', 0)}`")
+            Path("artifacts/predictive_model_ops_summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+            PY
+            cat artifacts/predictive_model_ops_summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: predictive-model-ops-${{ github.run_id }}
+          path: artifacts/
