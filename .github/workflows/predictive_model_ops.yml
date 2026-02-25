@@ -95,30 +95,7 @@ jobs:
         if: always()
         run: |
           if [ -f artifacts/predictive_model_ops.json ]; then
-            python - <<'PY'
-            import json
-            from pathlib import Path
-            p = Path("artifacts/predictive_model_ops.json")
-            data = json.loads(p.read_text(encoding="utf-8"))
-            lines = []
-            lines.append("## Predictive Model Ops")
-            if data.get("status") == "skipped":
-              lines.append("")
-              lines.append(f"- Status: `SKIPPED`")
-              lines.append(f"- Reason: `{data.get('reason', 'unknown')}`")
-            else:
-              t = data.get("totals", {})
-              lines.append("")
-              lines.append(f"- Projects: `{t.get('projects', 0)}`")
-              lines.append(f"- Trained models: `{t.get('trained', 0)}`")
-              lines.append(f"- Evaluated models: `{t.get('evaluated', 0)}`")
-              lines.append(f"- Drifted: `{t.get('drifted', 0)}`")
-              lines.append(f"- OK: `{t.get('ok', 0)}`")
-              lines.append(f"- Insufficient data: `{t.get('insufficient_data', 0)}`")
-              lines.append(f"- Retired superseded: `{t.get('retired_superseded', 0)}`")
-              lines.append(f"- Disabled drifted: `{t.get('disabled_drifted', 0)}`")
-            Path("artifacts/predictive_model_ops_summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-            PY
+            python -c "import json; from pathlib import Path; p=Path('artifacts/predictive_model_ops.json'); data=json.loads(p.read_text(encoding='utf-8')); lines=['## Predictive Model Ops']; t=data.get('totals', {}); lines += ['','- Status: SKIPPED','- Reason: %s' % data.get('reason','unknown')] if data.get('status') == 'skipped' else ['','- Projects: %s' % t.get('projects',0),'- Trained models: %s' % t.get('trained',0),'- Evaluated models: %s' % t.get('evaluated',0),'- Drifted: %s' % t.get('drifted',0),'- OK: %s' % t.get('ok',0),'- Insufficient data: %s' % t.get('insufficient_data',0),'- Retired superseded: %s' % t.get('retired_superseded',0),'- Disabled drifted: %s' % t.get('disabled_drifted',0)]; Path('artifacts/predictive_model_ops_summary.md').write_text('\n'.join(lines)+'\n', encoding='utf-8')"
             cat artifacts/predictive_model_ops_summary.md >> "$GITHUB_STEP_SUMMARY"
           fi
 
