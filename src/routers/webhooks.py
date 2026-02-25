@@ -1,4 +1,5 @@
-from datetime import datetime
+import os
+from datetime import datetime, timedelta
 from typing import Any, Dict, Optional, Literal
 
 from fastapi import APIRouter, Depends, Body, HTTPException, Header, Path
@@ -102,16 +103,28 @@ def receive_webhook(project_id: int = Path(..., ge=1), payload: Optional[Webhook
 
     # map heartbeat to update last_ping
     if ev_type == EventType.HEARTBEAT:
-        chk.last_ping = ts or datetime.utcnow()
-        chk.consecutive_failures = 0
-        chk.status = "UP"
-        session.add(chk)
+        incoming_ts = ts or datetime.utcnow()
+        stale_tolerance = max(0, int(os.environ.get("HEARTBEAT_STALE_TOLERANCE_SECONDS", "30")))
+        is_stale = bool(
+            chk.last_ping
+            and incoming_ts < (chk.last_ping - timedelta(seconds=stale_tolerance))
+        )
+        if not is_stale:
+            chk.last_ping = incoming_ts
+            chk.consecutive_failures = 0
+            chk.status = "UP"
+            session.add(chk)
         # add heartbeat event
-        e = EventModel(check_id=chk.id, project_id=project_id, event_type=EventType.HEARTBEAT, message=msg)
+        e = EventModel(
+            check_id=chk.id,
+            project_id=project_id,
+            event_type=EventType.HEARTBEAT,
+            message=(msg or ("stale heartbeat ignored" if is_stale else None)),
+        )
         session.add(e)
         session.commit()
-        logger.info("heartbeat recorded for check_id=%s last_ping=%s", chk.id, chk.last_ping)
-        return {"accepted": True, "status": chk.status}
+        logger.info("heartbeat recorded for check_id=%s last_ping=%s stale=%s", chk.id, chk.last_ping, is_stale)
+        return {"accepted": True, "status": chk.status, "stale_ignored": is_stale}
 
     # create event for UP/DOWN/HTTP failure
     if ev_type == EventType.DOWN:

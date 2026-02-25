@@ -329,6 +329,7 @@ class CheckResult(SQLModel, table=True):
     check_id: int = Field(foreign_key="check.id", index=True)
     project_id: int = Field(foreign_key="project.id", index=True)
     incident_id: Optional[int] = Field(default=None, foreign_key="incident.id", index=True)
+    run_key: Optional[str] = Field(default=None, index=True, description="idempotency key for a single check execution run")
     status: str = Field(description="observed check status during this execution")
     latency_ms: Optional[float] = None
     error_message: Optional[str] = None
@@ -386,6 +387,7 @@ class CheckLease(SQLModel, table=True):
     check_id: int = Field(primary_key=True, foreign_key="check.id")
     lease_owner: Optional[str] = Field(default=None, index=True)
     lease_expires_at: Optional[datetime] = Field(default=None)
+    lease_fence: int = Field(default=0, description="monotonic fencing token incremented on each successful lease acquisition")
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 

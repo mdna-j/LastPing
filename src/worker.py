@@ -23,11 +23,13 @@ import socket
 from typing import Tuple, Optional
 
 from sqlmodel import Session, select
+from sqlalchemy import update, or_, func
+from sqlalchemy.exc import IntegrityError
 
 from .db import engine
 from .models import Check, CheckType, CheckStatus, Event, EventType, Project, Incident, CheckResult
 from .alerts import notify_down, notify_recovery, notify_degraded, send_email, send_sms
-from .models import UptimeSnapshot, AvailabilityRollup, CheckLease, RemediationHook, RemediationLog, RemediationApproval, OnCallAlert, OnCallEscalation, OnCallRotation, OnCallMember, AuditLog
+from .models import UptimeSnapshot, AvailabilityRollup, CheckLease, RemediationHook, RemediationLog, RemediationApproval, OnCallAlert, OnCallEscalation, OnCallRotation, OnCallMember, AuditLog, Anomaly
 from .analytics_ml import find_similar_incidents
 
 logger = logging.getLogger("lastping.worker")
@@ -45,10 +47,45 @@ def _now() -> datetime:
     return datetime.utcnow()
 
 
+def _db_now(session: Session) -> datetime:
+    """Return database-server UTC time when available (fallback to app clock)."""
+    try:
+        value = session.exec(select(func.now())).first()
+        if isinstance(value, datetime):
+            return value
+    except Exception:
+        logger.exception("Failed to read DB server time; falling back to app clock")
+    return _now()
+
+
+def _check_run_key(check: Check, now: datetime) -> str:
+    """Build a deterministic idempotency key for a single check execution slot."""
+    epoch = datetime(1970, 1, 1)
+    if check.type == CheckType.HEARTBEAT:
+        expected = int(check.expected_interval or 600)
+        grace = int(check.grace_period or 600)
+        slot_seconds = max(1, expected + grace)
+        slot = int((now - epoch).total_seconds() // slot_seconds)
+        last_ping = getattr(check, "last_ping", None)
+        last_ping_key = last_ping.isoformat() if isinstance(last_ping, datetime) else "none"
+        return f"hb:{check.id}:{last_ping_key}:{slot}"
+
+    interval = int(getattr(check, "interval", None) or 60)
+    slot_seconds = max(1, interval)
+    scheduled = getattr(check, "next_run", None)
+    if isinstance(scheduled, datetime):
+        anchor = f"next:{scheduled.isoformat()}"
+    else:
+        slot = int((now - epoch).total_seconds() // slot_seconds)
+        anchor = f"slot:{slot}"
+    return f"poll:{check.id}:{check.type}:{anchor}"
+
+
 def _record_check_result(
     session: Session,
     check: Check,
     *,
+    run_key: Optional[str],
     status: str,
     latency_ms: Optional[float],
     error_message: Optional[str],
@@ -57,10 +94,21 @@ def _record_check_result(
 ) -> None:
     """Persist canonical execution evidence for a check run."""
     try:
+        if run_key:
+            with session.no_autoflush:
+                exists = session.exec(
+                    select(CheckResult.id).where(
+                        CheckResult.check_id == check.id,
+                        CheckResult.run_key == run_key,
+                    )
+                ).first()
+            if exists is not None:
+                return
         row = CheckResult(
             check_id=check.id,
             project_id=check.project_id,
             incident_id=incident_id,
+            run_key=run_key,
             status=status,
             latency_ms=latency_ms,
             error_message=error_message,
@@ -68,9 +116,174 @@ def _record_check_result(
         )
         session.add(row)
         session.commit()
+    except IntegrityError:
+        # Unique (check_id, run_key) collisions are expected on retries.
+        session.rollback()
     except Exception:
         session.rollback()
         logger.exception("Error recording check evidence for check %s", getattr(check, "id", None))
+
+
+def _event_state(event_type: Optional[str]) -> Optional[str]:
+    if event_type in (EventType.DOWN, EventType.HTTP_FAILURE):
+        return CheckStatus.DOWN
+    if event_type == EventType.UP:
+        return CheckStatus.UP
+    if event_type == EventType.DEGRADED:
+        return CheckStatus.DEGRADED
+    return None
+
+
+def _flapping_transition_count(
+    session: Session,
+    check_id: int,
+    now: datetime,
+    incoming_event_type: Optional[str] = None,
+) -> tuple[int, list[str], int]:
+    window_seconds = max(60, int(os.environ.get("FLAP_WINDOW_SECONDS", "900")))
+    cutoff = now - timedelta(seconds=window_seconds)
+    with session.no_autoflush:
+        rows = session.exec(
+            select(Event)
+            .where(
+                Event.check_id == check_id,
+                Event.created_at >= cutoff,
+                Event.event_type.in_([EventType.DOWN, EventType.HTTP_FAILURE, EventType.UP, EventType.DEGRADED]),
+            )
+            .order_by(Event.created_at)
+        ).all()
+
+    states: list[str] = []
+    for row in rows:
+        state = _event_state(getattr(row, "event_type", None))
+        if state:
+            states.append(state)
+    incoming_state = _event_state(incoming_event_type)
+    if incoming_state:
+        states.append(incoming_state)
+
+    collapsed: list[str] = []
+    for state in states:
+        if not collapsed or collapsed[-1] != state:
+            collapsed.append(state)
+    transitions = max(0, len(collapsed) - 1)
+    return transitions, collapsed, window_seconds
+
+
+def _log_flapping_suppression(
+    session: Session,
+    project: Project,
+    check: Check,
+    now: datetime,
+    *,
+    event_type: str,
+    reason: Optional[str],
+    transitions: int,
+    states: list[str],
+    window_seconds: int,
+) -> None:
+    cutoff = now - timedelta(seconds=window_seconds)
+    with session.no_autoflush:
+        existing = session.exec(
+            select(AuditLog).where(
+                AuditLog.action == "flapping_alert_suppressed",
+                AuditLog.target_type == "check",
+                AuditLog.target_id == check.id,
+                AuditLog.created_at >= cutoff,
+            )
+        ).first()
+    if not existing:
+        details = json.dumps(
+            {
+                "project_id": project.id,
+                "check_id": check.id,
+                "event_type": event_type,
+                "reason": (reason or "")[:200],
+                "transitions": transitions,
+                "states": states[-10:],
+                "window_seconds": window_seconds,
+            }
+        )
+        session.add(
+            AuditLog(
+                actor="worker",
+                action="flapping_alert_suppressed",
+                target_type="check",
+                target_id=check.id,
+                details=details,
+                actor_ip=None,
+                user_agent=None,
+            )
+        )
+
+    with session.no_autoflush:
+        existing_anomaly = session.exec(
+            select(Anomaly).where(
+                Anomaly.check_id == check.id,
+                Anomaly.type == "flapping",
+                Anomaly.created_at >= cutoff,
+            )
+        ).first()
+    if not existing_anomaly:
+        session.add(
+            Anomaly(
+                check_id=check.id,
+                incident_id=None,
+                type="flapping",
+                severity=float(transitions),
+                window_start=cutoff,
+                window_end=now,
+                evidence_json=json.dumps(
+                    {
+                        "event_type": event_type,
+                        "reason": (reason or "")[:200],
+                        "transitions": transitions,
+                        "states": states[-10:],
+                        "window_seconds": window_seconds,
+                    }
+                ),
+                created_at=now,
+            )
+        )
+    session.flush()
+
+
+def _should_suppress_alert_due_to_flapping(
+    session: Session,
+    project: Project,
+    check: Check,
+    now: datetime,
+    event_type: str,
+    reason: Optional[str] = None,
+) -> bool:
+    if os.environ.get("FLAP_SUPPRESSION_ENABLED", "1") != "1":
+        return False
+    if event_type not in (EventType.DOWN, EventType.HTTP_FAILURE, EventType.UP, EventType.DEGRADED):
+        return False
+    transition_threshold = max(1, int(os.environ.get("FLAP_TRANSITIONS_THRESHOLD", "4")))
+    transitions, states, window_seconds = _flapping_transition_count(
+        session,
+        check.id,
+        now,
+        incoming_event_type=event_type,
+    )
+    if transitions < transition_threshold:
+        return False
+    try:
+        _log_flapping_suppression(
+            session,
+            project,
+            check,
+            now,
+            event_type=event_type,
+            reason=reason,
+            transitions=transitions,
+            states=states,
+            window_seconds=window_seconds,
+        )
+    except Exception:
+        logger.exception("Failed to record flapping suppression for check %s", check.id)
+    return True
 
 
 def _in_maintenance(check: Check, project: Project, now: datetime) -> bool:
@@ -1082,36 +1295,96 @@ def _allow_region_or_failover(session: Session, worker_region: Optional[str], ch
     if os.environ.get("WORKER_REGION_FAILOVER", "0") != "1":
         return False
     grace = int(os.environ.get("WORKER_FAILOVER_AFTER_SECONDS", "300"))
+    skew_tolerance = max(0, int(os.environ.get("WORKER_CLOCK_SKEW_TOLERANCE_SECONDS", "5")))
+    db_now = _db_now(session)
     lease = session.get(CheckLease, check.id)
     if lease is None or lease.lease_expires_at is None:
         # Do not allow non-matching regions to claim a check before its
         # owning region has acquired at least one lease.
         return False
-    return lease.lease_expires_at <= (now - timedelta(seconds=grace))
+    return lease.lease_expires_at <= (db_now - timedelta(seconds=(grace + skew_tolerance)))
 
 
 def _acquire_lease(session: Session, check: Check, now: datetime) -> bool:
     if os.environ.get("WORKER_LEASES", "1") == "0":
         return True
     lease_seconds = int(os.environ.get("WORKER_LEASE_SECONDS", "120"))
+    skew_tolerance = max(0, int(os.environ.get("WORKER_CLOCK_SKEW_TOLERANCE_SECONDS", "5")))
+    db_now = _db_now(session)
     owner = _worker_id()
-    expires_at = now + timedelta(seconds=lease_seconds)
+    expires_at = db_now + timedelta(seconds=lease_seconds)
+    expiration_cutoff = db_now - timedelta(seconds=skew_tolerance)
     try:
-        lease = session.get(CheckLease, check.id)
-        if lease is None:
-            lease = CheckLease(check_id=check.id, lease_owner=owner, lease_expires_at=expires_at, updated_at=now)
-            session.add(lease)
+        # Atomic lease update: only succeeds if lease is expired or already owned by this worker.
+        update_stmt = (
+            update(CheckLease)
+            .where(
+                CheckLease.check_id == check.id,
+                or_(
+                    CheckLease.lease_expires_at.is_(None),
+                    CheckLease.lease_expires_at <= expiration_cutoff,
+                    CheckLease.lease_owner == owner,
+                ),
+            )
+            .values(
+                lease_owner=owner,
+                lease_expires_at=expires_at,
+                updated_at=now,
+                lease_fence=CheckLease.lease_fence + 1,
+            )
+        )
+        result = session.exec(update_stmt)
+        if (result.rowcount or 0) > 0:
             session.commit()
             return True
-        if lease.lease_expires_at is None or lease.lease_expires_at <= now or lease.lease_owner == owner:
-            lease.lease_owner = owner
-            lease.lease_expires_at = expires_at
-            lease.updated_at = now
-            session.add(lease)
+
+        # No updatable row found. Try initial insert for first-time acquisition.
+        existing = session.get(CheckLease, check.id)
+        if existing is None:
+            session.add(
+                CheckLease(
+                    check_id=check.id,
+                    lease_owner=owner,
+                    lease_expires_at=expires_at,
+                    lease_fence=1,
+                    updated_at=now,
+                )
+            )
             session.commit()
             return True
         return False
+    except IntegrityError:
+        # Another worker inserted concurrently. Retry the atomic update once.
+        session.rollback()
+        try:
+            retry_stmt = (
+                update(CheckLease)
+                .where(
+                    CheckLease.check_id == check.id,
+                    or_(
+                        CheckLease.lease_expires_at.is_(None),
+                        CheckLease.lease_expires_at <= expiration_cutoff,
+                        CheckLease.lease_owner == owner,
+                    ),
+                )
+                .values(
+                    lease_owner=owner,
+                    lease_expires_at=expires_at,
+                    updated_at=now,
+                    lease_fence=CheckLease.lease_fence + 1,
+                )
+            )
+            retry_result = session.exec(retry_stmt)
+            if (retry_result.rowcount or 0) > 0:
+                session.commit()
+                return True
+            return False
+        except Exception:
+            session.rollback()
+            logger.exception("Failed to acquire lease for check %s after retry", getattr(check, "id", None))
+            return False
     except Exception:
+        session.rollback()
         logger.exception("Failed to acquire lease for check %s", getattr(check, "id", None))
         return False
 
@@ -1409,6 +1682,8 @@ def _send_oncall_target(session: Session, project: Project, check: Check, alert:
 def _ensure_oncall_alert(session: Session, project: Project, check: Check, event_type: str, message: Optional[str], now: datetime):
     if not _oncall_enabled_for_check(project, check):
         return
+    if _should_suppress_alert_due_to_flapping(session, project, check, now, event_type, reason=message):
+        return
     escs = _load_oncall_escalations(session, project, check, event_type)
     if not escs:
         return
@@ -1508,6 +1783,7 @@ def scan_checks_once(session: Session):
         if not _acquire_lease(session, check, now):
             continue
         maintenance = _in_maintenance(check, project, now)
+        run_key = _check_run_key(check, now)
 
         # HEARTBEAT checks are driven by client pings; worker only
         # marks them DOWN when the expected interval + grace window
@@ -1547,6 +1823,7 @@ def scan_checks_once(session: Session):
                     _record_check_result(
                         session,
                         check,
+                        run_key=run_key,
                         status=CheckStatus.DOWN,
                         latency_ms=None,
                         error_message=reason,
@@ -1558,8 +1835,18 @@ def scan_checks_once(session: Session):
                         _ensure_oncall_alert(session, project, check, EventType.DOWN, reason, now)
                     # alerting: only send if enabled and threshold reached and cooldown passed
                     should_alert = check.alert_enabled and (check.consecutive_failures >= (check.alert_after or 1))
+                    flapping_suppressed = False
+                    if should_alert and not maintenance:
+                        flapping_suppressed = _should_suppress_alert_due_to_flapping(
+                            session,
+                            project,
+                            check,
+                            now,
+                            EventType.DOWN,
+                            reason=reason,
+                        )
                     if should_alert:
-                        if maintenance:
+                        if maintenance or flapping_suppressed:
                             session.add(check)
                             session.commit()
                             continue
@@ -1598,6 +1885,7 @@ def scan_checks_once(session: Session):
                     _record_check_result(
                         session,
                         check,
+                        run_key=run_key,
                         status=CheckStatus.DOWN,
                         latency_ms=None,
                         error_message="missed heartbeat",
@@ -1606,8 +1894,18 @@ def scan_checks_once(session: Session):
                     )
                     # still down: allow re-alerts after cooldown if threshold met
                     should_alert = check.alert_enabled and (check.consecutive_failures >= (check.alert_after or 1))
+                    flapping_suppressed = False
+                    if should_alert and not maintenance:
+                        flapping_suppressed = _should_suppress_alert_due_to_flapping(
+                            session,
+                            project,
+                            check,
+                            now,
+                            EventType.DOWN,
+                            reason="still down (missed heartbeat)",
+                        )
                     if should_alert:
-                        if maintenance:
+                        if maintenance or flapping_suppressed:
                             session.add(check)
                             session.commit()
                             continue
@@ -1653,6 +1951,7 @@ def scan_checks_once(session: Session):
                     _record_check_result(
                         session,
                         check,
+                        run_key=run_key,
                         status=CheckStatus.UP,
                         latency_ms=None,
                         error_message=None,
@@ -1662,9 +1961,17 @@ def scan_checks_once(session: Session):
                     _close_oncall_alerts(session, check.id)
                     # recovery alert: respect cooldown and enabled
                     if check.alert_enabled and not maintenance:
+                        flapping_suppressed = _should_suppress_alert_due_to_flapping(
+                            session,
+                            project,
+                            check,
+                            now,
+                            EventType.UP,
+                            reason="recovered",
+                        )
                         last_alert = check.last_alerted_at
                         cooldown = check.alert_cooldown or 0
-                        if (last_alert is None) or ((now - last_alert).total_seconds() > cooldown):
+                        if (not flapping_suppressed) and ((last_alert is None) or ((now - last_alert).total_seconds() > cooldown)):
                             session.add(check)
                             session.commit()
                             try:
@@ -1685,6 +1992,7 @@ def scan_checks_once(session: Session):
                     _record_check_result(
                         session,
                         check,
+                        run_key=run_key,
                         status=check.status,
                         latency_ms=None,
                         error_message=None,
@@ -1752,9 +2060,17 @@ def scan_checks_once(session: Session):
                             _trigger_remediation(session, project, check, EventType.DEGRADED, event.message, now)
                             _ensure_oncall_alert(session, project, check, EventType.DEGRADED, event.message, now)
                         if check.alert_enabled and not maintenance:
+                            flapping_suppressed = _should_suppress_alert_due_to_flapping(
+                                session,
+                                project,
+                                check,
+                                now,
+                                EventType.DEGRADED,
+                                reason=f"latency_ms={latency_ms:.1f}" if latency_ms is not None else None,
+                            )
                             last_alert = check.last_alerted_at
                             cooldown = check.alert_cooldown or 0
-                            if (last_alert is None) or ((now - last_alert).total_seconds() > cooldown):
+                            if (not flapping_suppressed) and ((last_alert is None) or ((now - last_alert).total_seconds() > cooldown)):
                                 session.add(check)
                                 session.commit()
                                 try:
@@ -1768,9 +2084,17 @@ def scan_checks_once(session: Session):
                     else:
                         # still degraded: allow re-alerts after cooldown
                         if check.alert_enabled and not maintenance:
+                            flapping_suppressed = _should_suppress_alert_due_to_flapping(
+                                session,
+                                project,
+                                check,
+                                now,
+                                EventType.DEGRADED,
+                                reason="still degraded",
+                            )
                             last_alert = check.last_alerted_at
                             cooldown = check.alert_cooldown or 0
-                            if (last_alert is None) or ((now - last_alert).total_seconds() > cooldown):
+                            if (not flapping_suppressed) and ((last_alert is None) or ((now - last_alert).total_seconds() > cooldown)):
                                 session.add(check)
                                 session.commit()
                                 try:
@@ -1798,9 +2122,17 @@ def scan_checks_once(session: Session):
                         session.add(event)
                         _close_oncall_alerts(session, check.id)
                         if check.alert_enabled and not maintenance:
+                            flapping_suppressed = _should_suppress_alert_due_to_flapping(
+                                session,
+                                project,
+                                check,
+                                now,
+                                EventType.UP,
+                                reason=f"check ok ({reason})",
+                            )
                             last_alert = check.last_alerted_at
                             cooldown = check.alert_cooldown or 0
-                            if (last_alert is None) or ((now - last_alert).total_seconds() > cooldown):
+                            if (not flapping_suppressed) and ((last_alert is None) or ((now - last_alert).total_seconds() > cooldown)):
                                 session.add(check)
                                 session.commit()
                                 try:
@@ -1824,6 +2156,7 @@ def scan_checks_once(session: Session):
                     select(Incident).where(Incident.check_id == check.id, Incident.resolved_at == None)
                 ).first()
                 evidence_incident_id = open_inc.id if open_inc else None
+                event_type = EventType.HTTP_FAILURE if check.type == CheckType.HTTP else EventType.DOWN
                 if check.status != CheckStatus.DOWN:
                     check.status = CheckStatus.DOWN
                     created_incident = False
@@ -1838,7 +2171,6 @@ def scan_checks_once(session: Session):
                         evidence_incident_id = open_inc.id
                     if created_incident:
                         _log_similar_incidents(session, project, open_inc.id, reason)
-                    event_type = EventType.HTTP_FAILURE if check.type == CheckType.HTTP else EventType.DOWN
                     event_message = f"{reason}"
                     if maintenance:
                         event_message = f"{event_message} (suppressed due to maintenance)"
@@ -1849,8 +2181,18 @@ def scan_checks_once(session: Session):
                         _trigger_remediation(session, project, check, rem_event, reason, now)
                         _ensure_oncall_alert(session, project, check, rem_event, reason, now)
                     should_alert = check.alert_enabled and (check.consecutive_failures >= (check.alert_after or 1))
+                    flapping_suppressed = False
+                    if should_alert and not maintenance:
+                        flapping_suppressed = _should_suppress_alert_due_to_flapping(
+                            session,
+                            project,
+                            check,
+                            now,
+                            event_type,
+                            reason=reason,
+                        )
                     if should_alert:
-                        if maintenance:
+                        if maintenance or flapping_suppressed:
                             session.add(check)
                             session.commit()
                         else:
@@ -1879,8 +2221,18 @@ def scan_checks_once(session: Session):
                         session.commit()
                 else:
                     should_alert = check.alert_enabled and (check.consecutive_failures >= (check.alert_after or 1))
+                    flapping_suppressed = False
+                    if should_alert and not maintenance:
+                        flapping_suppressed = _should_suppress_alert_due_to_flapping(
+                            session,
+                            project,
+                            check,
+                            now,
+                            event_type,
+                            reason="still down",
+                        )
                     if should_alert:
-                        if maintenance:
+                        if maintenance or flapping_suppressed:
                             session.add(check)
                             session.commit()
                         else:
@@ -1910,6 +2262,7 @@ def scan_checks_once(session: Session):
             _record_check_result(
                 session,
                 check,
+                run_key=run_key,
                 status=evidence_status,
                 latency_ms=latency_ms,
                 error_message=evidence_error,

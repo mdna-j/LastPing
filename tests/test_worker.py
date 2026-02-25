@@ -812,6 +812,7 @@ def test_region_failover_requires_expired_lease(tmp_path, monkeypatch):
     os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_region_failover.sqlite'}"
     monkeypatch.setenv("WORKER_REGION_FAILOVER", "1")
     monkeypatch.setenv("WORKER_FAILOVER_AFTER_SECONDS", "300")
+    monkeypatch.setenv("WORKER_CLOCK_SKEW_TOLERANCE_SECONDS", "0")
 
     from sqlmodel import Session
     from src import db as dbmod
@@ -913,3 +914,176 @@ def test_degraded_recovery(tmp_path, monkeypatch):
         evs = session.exec(select(Event).where(Event.check_id == check.id)).all()
         assert any(e.event_type == EventType.UP for e in evs)
         assert called["recovery"] >= 1
+
+
+def test_lease_fencing_token_increments_on_acquire(tmp_path, monkeypatch):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_lease_fence.sqlite'}"
+    monkeypatch.setenv("WORKER_LEASES", "1")
+    monkeypatch.setenv("WORKER_LEASE_SECONDS", "120")
+    monkeypatch.setenv("WORKER_ID", "worker-test-1")
+
+    from sqlmodel import Session
+    from src import db as dbmod
+    from src.models import Project, Check, CheckType, CheckStatus, CheckLease
+    from src import worker
+
+    dbmod.create_db_and_tables()
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="proj_lease_fence")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        check = Check(
+            project_id=project.id,
+            name="http_lease",
+            type=CheckType.HTTP,
+            url="http://example.ok/health",
+            status=CheckStatus.UP,
+        )
+        session.add(check)
+        session.commit()
+        session.refresh(check)
+
+        now = datetime.utcnow()
+        assert worker._acquire_lease(session, check, now) is True
+        lease = session.get(CheckLease, check.id)
+        assert lease is not None
+        assert lease.lease_owner == "worker-test-1"
+        assert lease.lease_fence == 1
+
+        assert worker._acquire_lease(session, check, now + timedelta(seconds=5)) is True
+        lease = session.get(CheckLease, check.id)
+        assert lease is not None
+        assert lease.lease_fence == 2
+
+        lease.lease_owner = "another-worker"
+        lease.lease_expires_at = now + timedelta(seconds=90)
+        lease.lease_fence = 7
+        session.add(lease)
+        session.commit()
+
+        assert worker._acquire_lease(session, check, now + timedelta(seconds=10)) is False
+        lease = session.get(CheckLease, check.id)
+        assert lease is not None
+        assert lease.lease_owner == "another-worker"
+        assert lease.lease_fence == 7
+
+
+def test_flapping_suppression_skips_alert_send(tmp_path, monkeypatch):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_flapping.sqlite'}"
+    monkeypatch.setenv("FLAP_SUPPRESSION_ENABLED", "1")
+    monkeypatch.setenv("FLAP_WINDOW_SECONDS", "3600")
+    monkeypatch.setenv("FLAP_TRANSITIONS_THRESHOLD", "2")
+
+    from sqlmodel import Session, select
+    from src import db as dbmod
+    from src.models import Project, Check, CheckType, CheckStatus, AuditLog
+    from src import worker
+
+    dbmod.create_db_and_tables()
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="proj_flapping")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        check = Check(
+            project_id=project.id,
+            name="hb_flap",
+            type=CheckType.HEARTBEAT,
+            expected_interval=60,
+            grace_period=10,
+            last_ping=datetime.utcnow() - timedelta(hours=2),
+            status=CheckStatus.UP,
+            alert_enabled=True,
+            alert_after=1,
+            alert_cooldown=0,
+        )
+        session.add(check)
+        session.commit()
+        session.refresh(check)
+
+        down_calls = []
+        monkeypatch.setattr(worker, "notify_down", lambda chk, proj, reason=None: down_calls.append(reason))
+        monkeypatch.setattr(worker, "notify_recovery", lambda chk, proj: None)
+
+        # 1) DOWN alert (not yet considered flapping)
+        worker.scan_checks_once(session)
+        # 2) recovery
+        check.last_ping = datetime.utcnow()
+        session.add(check)
+        session.commit()
+        worker.scan_checks_once(session)
+        # 3) DOWN again -> flapping threshold reached, alert suppressed
+        check.last_ping = datetime.utcnow() - timedelta(hours=2)
+        session.add(check)
+        session.commit()
+        worker.scan_checks_once(session)
+
+        assert len(down_calls) == 1
+        suppression_logs = session.exec(
+            select(AuditLog).where(
+                AuditLog.action == "flapping_alert_suppressed",
+                AuditLog.target_type == "check",
+                AuditLog.target_id == check.id,
+            )
+        ).all()
+        assert suppression_logs
+
+
+def test_check_result_run_key_idempotency(tmp_path):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_check_result_run_key.sqlite'}"
+
+    from sqlmodel import Session, select
+    from src import db as dbmod
+    from src.models import Project, Check, CheckType, CheckStatus, CheckResult
+    from src import worker
+
+    dbmod.create_db_and_tables()
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="proj_run_key")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        check = Check(
+            project_id=project.id,
+            name="http_idempotent",
+            type=CheckType.HTTP,
+            url="http://example.invalid/health",
+            status=CheckStatus.UP,
+        )
+        session.add(check)
+        session.commit()
+        session.refresh(check)
+
+        now = datetime.utcnow()
+        run_key = "poll:check:12345"
+        worker._record_check_result(
+            session,
+            check,
+            run_key=run_key,
+            status=CheckStatus.DOWN,
+            latency_ms=None,
+            error_message="timeout",
+            incident_id=None,
+            created_at=now,
+        )
+        worker._record_check_result(
+            session,
+            check,
+            run_key=run_key,
+            status=CheckStatus.DOWN,
+            latency_ms=None,
+            error_message="timeout",
+            incident_id=None,
+            created_at=now + timedelta(seconds=1),
+        )
+
+        rows = session.exec(select(CheckResult).where(CheckResult.check_id == check.id)).all()
+        assert len(rows) == 1
+        assert rows[0].run_key == run_key

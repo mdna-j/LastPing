@@ -1,8 +1,9 @@
 from datetime import datetime
+import re
 from typing import Optional, List, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Header, Request, status, Path, Query, Body
-from pydantic import BaseModel, EmailStr, AnyHttpUrl, conint, constr, root_validator, validator
+from pydantic import BaseModel, EmailStr, AnyHttpUrl, conint, constr, root_validator, validator, parse_obj_as
 from sqlmodel import Session, select
 
 from ..db import get_session
@@ -13,6 +14,7 @@ from ..schemas import StrictBaseModel
 router = APIRouter(prefix="/projects/{project_id}/oncall", tags=["oncall"])
 
 _ALLOWED_EVENT_TYPES = {"down", "degraded"}
+_PHONE_RE = re.compile(r"^\+?[0-9]{7,20}$")
 
 
 def _normalize_event_types(raw: Optional[str]) -> Optional[str]:
@@ -31,6 +33,162 @@ def _normalize_event_types(raw: Optional[str]) -> Optional[str]:
             seen.add(p)
             ordered.append(p)
     return ",".join(ordered) if ordered else None
+
+
+def _clean_text(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _valid_email(value: Optional[str]) -> bool:
+    if not _clean_text(value):
+        return False
+    try:
+        parse_obj_as(EmailStr, value)
+        return True
+    except Exception:
+        return False
+
+
+def _valid_phone(value: Optional[str]) -> bool:
+    text = _clean_text(value)
+    if not text:
+        return False
+    return bool(_PHONE_RE.match(text))
+
+
+def _validate_escalation_target(
+    session: Session,
+    *,
+    project_id: int,
+    target_type: str,
+    rotation_id: Optional[int],
+    target_value: Optional[str],
+) -> None:
+    if target_type == "rotation":
+        if not rotation_id:
+            raise HTTPException(status_code=400, detail="rotation_id is required when target_type=rotation")
+        rotation = session.get(OnCallRotation, rotation_id)
+        if not rotation or rotation.project_id != project_id:
+            raise HTTPException(status_code=400, detail="rotation_id must belong to this project")
+        if not rotation.enabled:
+            raise HTTPException(status_code=400, detail="rotation is disabled")
+        members = session.exec(
+            select(OnCallMember).where(
+                OnCallMember.rotation_id == rotation_id,
+                OnCallMember.active == True,
+            )
+        ).all()
+        if not members:
+            raise HTTPException(status_code=400, detail="rotation has no active members")
+        if not any(_clean_text(m.email) or _clean_text(m.phone) for m in members):
+            raise HTTPException(status_code=400, detail="rotation members need at least one email or phone destination")
+        return
+
+    if target_type == "email":
+        if not _valid_email(target_value):
+            raise HTTPException(status_code=400, detail="target_value must be a valid email when target_type=email")
+        return
+
+    if target_type == "sms":
+        if not _valid_phone(target_value):
+            raise HTTPException(status_code=400, detail="target_value must be a valid phone when target_type=sms")
+        return
+
+    raise HTTPException(status_code=400, detail=f"unsupported target_type: {target_type}")
+
+
+def _has_enabled_escalation_path(session: Session, *, project_id: int, check_id: int) -> bool:
+    check_level = session.exec(
+        select(OnCallEscalation.id).where(
+            OnCallEscalation.project_id == project_id,
+            OnCallEscalation.enabled == True,
+            OnCallEscalation.check_id == check_id,
+        )
+    ).first()
+    if check_level is not None:
+        return True
+    project_level = session.exec(
+        select(OnCallEscalation.id).where(
+            OnCallEscalation.project_id == project_id,
+            OnCallEscalation.enabled == True,
+            OnCallEscalation.check_id.is_(None),
+        )
+    ).first()
+    return project_level is not None
+
+
+def _enabled_with_fallback(override: Optional[bool], fallback: bool = True) -> bool:
+    if override is None:
+        return bool(fallback)
+    return bool(override)
+
+
+def _validate_check_routing_update(
+    session: Session,
+    *,
+    project: Project,
+    check: Check,
+    fields_set: set[str],
+) -> list[str]:
+    errors: list[str] = []
+
+    def touched(*names: str) -> bool:
+        return any(name in fields_set for name in names)
+
+    sms_enabled = bool(check.alert_sms_enabled) if check.alert_sms_enabled is not None else bool(project.sms_enabled)
+    sms_to = _clean_text(check.alert_sms_to) or _clean_text(project.sms_to)
+    if touched("alert_sms_enabled", "alert_sms_to") and sms_enabled and not sms_to:
+        errors.append("SMS alerts are enabled but no SMS destination is configured.")
+
+    oncall_enabled = bool(check.alert_oncall_enabled) if check.alert_oncall_enabled is not None else bool(project.oncall_enabled)
+    oncall_email = _clean_text(check.alert_oncall_email) or _clean_text(project.oncall_email)
+    if touched("alert_oncall_enabled", "alert_oncall_email") and oncall_enabled and not oncall_email:
+        errors.append("On-call email alerts are enabled but no on-call email destination is configured.")
+    if touched("alert_oncall_enabled") and oncall_enabled and not _has_enabled_escalation_path(
+        session,
+        project_id=project.id,
+        check_id=check.id,
+    ):
+        errors.append("On-call alerts are enabled but no enabled escalation steps exist for this check/project.")
+
+    slack_enabled = check.alert_slack_enabled is True
+    slack_url = _clean_text(check.alert_slack_webhook_url) or _clean_text(project.slack_webhook_url)
+    if touched("alert_slack_enabled", "alert_slack_webhook_url") and slack_enabled and not slack_url:
+        errors.append("Slack alerts are enabled but no Slack webhook URL is configured.")
+
+    discord_enabled = check.alert_discord_enabled is True
+    discord_url = _clean_text(check.alert_discord_webhook_url) or _clean_text(project.discord_webhook_url)
+    if touched("alert_discord_enabled", "alert_discord_webhook_url") and discord_enabled and not discord_url:
+        errors.append("Discord alerts are enabled but no Discord webhook URL is configured.")
+
+    pagerduty_enabled = check.alert_pagerduty_enabled is True
+    pagerduty_key = _clean_text(check.alert_pagerduty_integration_key) or _clean_text(project.pagerduty_integration_key)
+    if touched("alert_pagerduty_enabled", "alert_pagerduty_integration_key") and pagerduty_enabled and not pagerduty_key:
+        errors.append("PagerDuty alerts are enabled but no integration key is configured.")
+
+    webhook_enabled = check.alert_webhook_enabled is True
+    generic_webhook = _clean_text(check.alert_generic_webhook_url) or _clean_text(project.generic_webhook_url)
+    if touched("alert_webhook_enabled", "alert_generic_webhook_url") and webhook_enabled and not generic_webhook:
+        errors.append("Webhook alerts are enabled but no generic webhook URL is configured.")
+
+    if touched("escalation_after_minutes") and check.escalation_after_minutes is not None:
+        escalation_channel_ready = any(
+            [
+                (_enabled_with_fallback(check.alert_slack_enabled, True) and bool(slack_url)),
+                (_enabled_with_fallback(check.alert_discord_enabled, True) and bool(discord_url)),
+                (_enabled_with_fallback(check.alert_pagerduty_enabled, True) and bool(pagerduty_key)),
+                (_enabled_with_fallback(check.alert_webhook_enabled, True) and bool(generic_webhook)),
+                sms_enabled and bool(sms_to),
+                oncall_enabled and bool(oncall_email),
+            ]
+        )
+        if not escalation_channel_ready:
+            errors.append("Per-check escalation timer is set but no escalation-capable alert channel is configured.")
+
+    return errors
 
 
 class RotationIn(StrictBaseModel):
@@ -390,6 +548,13 @@ def create_escalation(project_id: int = Path(..., ge=1), payload: EscalationIn =
         check = session.get(Check, payload.check_id)
         if not check or check.project_id != project_id:
             raise HTTPException(status_code=404, detail="Check not found for project")
+    _validate_escalation_target(
+        session,
+        project_id=project_id,
+        target_type=payload.target_type,
+        rotation_id=payload.rotation_id,
+        target_value=payload.target_value,
+    )
     esc = OnCallEscalation(
         project_id=project_id,
         check_id=payload.check_id,
@@ -447,11 +612,13 @@ def update_escalation(
         esc.target_value = data["target_value"]
 
     # validate target based on resulting values
-    ttype = esc.target_type
-    if ttype == "rotation" and not esc.rotation_id:
-        raise HTTPException(status_code=400, detail="rotation_id is required when target_type=rotation")
-    if ttype in ("email", "sms") and not esc.target_value:
-        raise HTTPException(status_code=400, detail="target_value is required for email/sms targets")
+    _validate_escalation_target(
+        session,
+        project_id=project_id,
+        target_type=esc.target_type,
+        rotation_id=esc.rotation_id,
+        target_value=esc.target_value,
+    )
 
     session.add(esc)
     session.commit()
@@ -551,6 +718,9 @@ def patch_check_routing(
 ):
     """Update per-check routing/channel overrides (UI support)."""
     require_admin_or_owner(project_id, x_admin_token=x_admin_token, authorization=authorization, session=session)
+    project = session.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
     check = session.get(Check, check_id)
     if not check or check.project_id != project_id:
         raise HTTPException(status_code=404, detail="Check not found")
@@ -577,6 +747,21 @@ def patch_check_routing(
     for k in allowed:
         if k in fields:
             setattr(check, k, getattr(payload, k))
+
+    errors = _validate_check_routing_update(
+        session,
+        project=project,
+        check=check,
+        fields_set=fields,
+    )
+    if errors:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Invalid routing configuration",
+                "errors": errors,
+            },
+        )
 
     session.add(check)
     session.commit()

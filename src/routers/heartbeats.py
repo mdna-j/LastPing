@@ -1,5 +1,5 @@
-import json
-from datetime import datetime
+import os
+from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, Body, Path
@@ -40,13 +40,26 @@ def post_heartbeat(project_id: int = Path(..., ge=1), name: str = Path(..., min_
         session.refresh(check)
 
     # record heartbeat row (payload optional)
-    hb_payload = payload.dict(exclude_none=True) if payload is not None else None
-    hb = HeartbeatModel(check_id=check.id, payload=json.dumps(hb_payload) if hb_payload is not None else None)
+    hb_payload_json = payload.json(exclude_none=True) if payload is not None else None
+    incoming_ts = payload.timestamp if payload and payload.timestamp else datetime.utcnow()
+    hb = HeartbeatModel(
+        check_id=check.id,
+        timestamp=incoming_ts,
+        payload=hb_payload_json,
+    )
     session.add(hb)
 
-    # update check status atomically-ish
+    # Ignore stale heartbeats that are older than the current last_ping by a tolerance window.
+    stale_tolerance = max(0, int(os.environ.get("HEARTBEAT_STALE_TOLERANCE_SECONDS", "30")))
+    current_last_ping = getattr(check, "last_ping", None)
+    if current_last_ping and incoming_ts < (current_last_ping - timedelta(seconds=stale_tolerance)):
+        session.commit()
+        session.refresh(check)
+        return {"status": check.status, "last_ping": check.last_ping, "stale_ignored": True}
+
+    # update check status
     prev_status = check.status
-    check.last_ping = datetime.utcnow()
+    check.last_ping = incoming_ts
     check.consecutive_failures = 0
     check.status = "UP"
     session.add(check)

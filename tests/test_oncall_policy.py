@@ -139,7 +139,7 @@ def test_oncall_patch_check_routing_allows_null_clears(tmp_path):
     from sqlmodel import Session
     from src import db as dbmod
     from src.main import app
-    from src.models import Project, Check, CheckType, CheckStatus
+    from src.models import Project, Check, CheckType, CheckStatus, OnCallEscalation
     from src.security import hash_api_key
 
     dbmod.create_db_and_tables()
@@ -162,6 +162,17 @@ def test_oncall_patch_check_routing_allows_null_clears(tmp_path):
         session.add(check)
         session.commit()
         session.refresh(check)
+        esc = OnCallEscalation(
+            project_id=project.id,
+            check_id=None,
+            level=0,
+            delay_minutes=5,
+            target_type="email",
+            target_value="ops@example.com",
+            enabled=True,
+        )
+        session.add(esc)
+        session.commit()
         project_id = project.id
         check_id = check.id
 
@@ -206,3 +217,116 @@ def test_oncall_patch_check_routing_allows_null_clears(tmp_path):
     with Session(dbmod.engine) as session:
         chk = session.get(Check, check_id)
         assert chk.alert_slack_webhook_url is None
+
+
+def test_oncall_create_escalation_rejects_invalid_email_target(tmp_path):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'oncall_invalid_target.db'}"
+    os.environ["ADMIN_TOKEN"] = "adminkey"
+
+    from sqlmodel import Session
+    from src import db as dbmod
+    from src.main import app
+    from src.models import Project
+    from src.security import hash_api_key
+
+    dbmod.create_db_and_tables()
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="invalidtarget", api_key_hash=hash_api_key("targetkey"))
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+        project_id = project.id
+
+    client = TestClient(app)
+    admin_headers = {"X-ADMIN-TOKEN": "adminkey"}
+    resp = client.post(
+        f"/projects/{project_id}/oncall/escalations",
+        json={
+            "level": 0,
+            "delay_minutes": 5,
+            "target_type": "email",
+            "target_value": "not-an-email",
+            "enabled": True,
+        },
+        headers=admin_headers,
+    )
+    assert resp.status_code == 400
+    assert "valid email" in resp.text
+
+
+def test_oncall_patch_routing_rejects_enabled_channel_without_destination(tmp_path):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'oncall_invalid_routing.db'}"
+    os.environ["ADMIN_TOKEN"] = "adminkey"
+
+    from sqlmodel import Session
+    from src import db as dbmod
+    from src.main import app
+    from src.models import Project, Check, CheckType, CheckStatus
+    from src.security import hash_api_key
+
+    dbmod.create_db_and_tables()
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="routingproj", api_key_hash=hash_api_key("routingkey"))
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        check = Check(project_id=project.id, name="api", type=CheckType.HTTP, status=CheckStatus.UP)
+        session.add(check)
+        session.commit()
+        session.refresh(check)
+        project_id = project.id
+        check_id = check.id
+
+    client = TestClient(app)
+    admin_headers = {"X-ADMIN-TOKEN": "adminkey"}
+    resp = client.patch(
+        f"/projects/{project_id}/oncall/checks/{check_id}/routing",
+        json={"alert_slack_enabled": True},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 400
+    assert "Slack alerts are enabled" in resp.text
+
+
+def test_oncall_patch_routing_rejects_oncall_enable_without_escalation_steps(tmp_path):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'oncall_no_steps.db'}"
+    os.environ["ADMIN_TOKEN"] = "adminkey"
+
+    from sqlmodel import Session
+    from src import db as dbmod
+    from src.main import app
+    from src.models import Project, Check, CheckType, CheckStatus
+    from src.security import hash_api_key
+
+    dbmod.create_db_and_tables()
+
+    with Session(dbmod.engine) as session:
+        project = Project(
+            name="nostepsproj",
+            api_key_hash=hash_api_key("nostepskey"),
+            oncall_enabled=True,
+            oncall_email="ops@example.com",
+        )
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        check = Check(project_id=project.id, name="api", type=CheckType.HTTP, status=CheckStatus.UP)
+        session.add(check)
+        session.commit()
+        session.refresh(check)
+        project_id = project.id
+        check_id = check.id
+
+    client = TestClient(app)
+    admin_headers = {"X-ADMIN-TOKEN": "adminkey"}
+    resp = client.patch(
+        f"/projects/{project_id}/oncall/checks/{check_id}/routing",
+        json={"alert_oncall_enabled": True},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 400
+    assert "no enabled escalation steps" in resp.text
