@@ -23,13 +23,13 @@ import socket
 from typing import Tuple, Optional
 
 from sqlmodel import Session, select
-from sqlalchemy import update, or_, func
+from sqlalchemy import update, or_, func, delete
 from sqlalchemy.exc import IntegrityError
 
 from .db import engine
 from .models import Check, CheckType, CheckStatus, Event, EventType, Project, Incident, CheckResult
 from .alerts import notify_down, notify_recovery, notify_degraded, send_email, send_sms
-from .models import UptimeSnapshot, AvailabilityRollup, CheckLease, RemediationHook, RemediationLog, RemediationApproval, OnCallAlert, OnCallEscalation, OnCallRotation, OnCallMember, AuditLog, Anomaly
+from .models import UptimeSnapshot, AvailabilityRollup, CheckLease, RemediationHook, RemediationLog, RemediationApproval, OnCallAlert, OnCallEscalation, OnCallRotation, OnCallMember, AuditLog, Anomaly, Heartbeat
 from .analytics_ml import find_similar_incidents
 
 logger = logging.getLogger("lastping.worker")
@@ -40,6 +40,7 @@ _LAST_EARLY_WARNING_RUN: Optional[datetime] = None
 _LAST_PREDICTIVE_RUN: Optional[datetime] = None
 _LAST_ARCHIVE_RUN: Optional[datetime] = None
 _LAST_QUARTERLY_RUN: Optional[datetime] = None
+_LAST_RAW_RETENTION_RUN: Optional[datetime] = None
 
 
 def _now() -> datetime:
@@ -1032,6 +1033,88 @@ def _maybe_log_rollup_archive_health(session: Session, now: datetime, project_id
                         subj = f"[LastPing] Rollup archive missing: {project.name} ({quarter_period})"
                         body = f"Quarterly rollup for {project.name} is missing for period {quarter_period}."
                         send_email(subj, body, to=alert_to)
+
+
+def _retention_days(env_var: str, default_days: int) -> int:
+    raw = os.environ.get(env_var, str(default_days)).strip()
+    try:
+        days = int(raw)
+    except Exception:
+        logger.warning("Invalid %s=%r; using default=%s", env_var, raw, default_days)
+        days = default_days
+    return max(0, days)
+
+
+def _maybe_prune_raw_data(session: Session, now: datetime) -> None:
+    if os.environ.get("RAW_RETENTION_ENABLED", "1") != "1":
+        return
+
+    interval = int(os.environ.get("RAW_RETENTION_INTERVAL_SECONDS", "86400"))
+    global _LAST_RAW_RETENTION_RUN
+    if _LAST_RAW_RETENTION_RUN and (now - _LAST_RAW_RETENTION_RUN).total_seconds() < interval:
+        return
+    _LAST_RAW_RETENTION_RUN = now
+
+    prune_targets = [
+        ("events", Event, Event.created_at, _retention_days("RAW_RETENTION_EVENTS_DAYS", 90)),
+        (
+            "check_results",
+            CheckResult,
+            CheckResult.created_at,
+            _retention_days("RAW_RETENTION_CHECK_RESULTS_DAYS", 90),
+        ),
+        ("anomalies", Anomaly, Anomaly.created_at, _retention_days("RAW_RETENTION_ANOMALIES_DAYS", 180)),
+        ("heartbeats", Heartbeat, Heartbeat.timestamp, _retention_days("RAW_RETENTION_HEARTBEATS_DAYS", 30)),
+    ]
+
+    deleted_counts = {}
+    total_deleted = 0
+    for label, model, column, days in prune_targets:
+        if days <= 0:
+            continue
+        cutoff = now - timedelta(days=days)
+        try:
+            result = session.exec(delete(model).where(column < cutoff))
+            deleted = int(result.rowcount or 0)
+            if deleted > 0:
+                total_deleted += deleted
+            deleted_counts[label] = deleted
+            session.commit()
+        except Exception:
+            session.rollback()
+            logger.exception("Failed pruning %s older than %s days", label, days)
+
+    if total_deleted <= 0:
+        return
+
+    try:
+        details = json.dumps(
+            {
+                "deleted": deleted_counts,
+                "retention_days": {
+                    "events": _retention_days("RAW_RETENTION_EVENTS_DAYS", 90),
+                    "check_results": _retention_days("RAW_RETENTION_CHECK_RESULTS_DAYS", 90),
+                    "anomalies": _retention_days("RAW_RETENTION_ANOMALIES_DAYS", 180),
+                    "heartbeats": _retention_days("RAW_RETENTION_HEARTBEATS_DAYS", 30),
+                },
+                "ran_at": now.isoformat(),
+            }
+        )
+        session.add(
+            AuditLog(
+                actor="worker",
+                action="raw_retention_pruned",
+                target_type="system",
+                target_id=None,
+                details=details,
+                actor_ip=None,
+                user_agent=None,
+            )
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        logger.exception("Failed to persist raw retention audit log")
 
 
 def _compute_early_warnings(session: Session, project_id: int, now: datetime, recent_hours: int, baseline_days: int, min_events: int, z_threshold: float, ratio_threshold: float):
@@ -2542,6 +2625,10 @@ def scan_checks_once(session: Session):
         _maybe_archive_quarterly_rollups(session, now, project_ids)
     except Exception:
         logger.exception("Error archiving quarterly rollups")
+    try:
+        _maybe_prune_raw_data(session, now)
+    except Exception:
+        logger.exception("Error pruning raw retention data")
     try:
         _maybe_log_rollup_archive_health(session, now, project_ids)
     except Exception:

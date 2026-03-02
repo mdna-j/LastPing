@@ -1386,3 +1386,119 @@ def test_incident_open_run_key_idempotency(tmp_path):
         rows = session.exec(select(Incident).where(Incident.check_id == check.id)).all()
         assert len(rows) == 1
         assert rows[0].open_run_key == run_key
+
+
+def test_raw_retention_prunes_old_events_results_anomalies_heartbeats(tmp_path, monkeypatch):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_raw_retention.sqlite'}"
+    monkeypatch.setenv("RAW_RETENTION_ENABLED", "1")
+    monkeypatch.setenv("RAW_RETENTION_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("RAW_RETENTION_EVENTS_DAYS", "30")
+    monkeypatch.setenv("RAW_RETENTION_CHECK_RESULTS_DAYS", "30")
+    monkeypatch.setenv("RAW_RETENTION_ANOMALIES_DAYS", "30")
+    monkeypatch.setenv("RAW_RETENTION_HEARTBEATS_DAYS", "30")
+
+    from sqlmodel import Session, select
+    from src import db as dbmod
+    from src.models import (
+        Project,
+        Check,
+        CheckType,
+        CheckStatus,
+        Event,
+        EventType,
+        CheckResult,
+        Anomaly,
+        Heartbeat,
+        AuditLog,
+    )
+    from src import worker
+
+    dbmod.create_db_and_tables()
+    monkeypatch.setattr(worker, "_LAST_RAW_RETENTION_RUN", None)
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="proj_raw_retention")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        check = Check(
+            project_id=project.id,
+            name="http_raw_retention",
+            type=CheckType.HTTP,
+            url="http://example.invalid/health",
+            status=CheckStatus.UP,
+        )
+        session.add(check)
+        session.commit()
+        session.refresh(check)
+
+        now = datetime.utcnow()
+        old = now - timedelta(days=45)
+        recent = now - timedelta(days=5)
+
+        session.add(Event(check_id=check.id, project_id=project.id, event_type=EventType.DOWN, message="old", created_at=old))
+        session.add(Event(check_id=check.id, project_id=project.id, event_type=EventType.UP, message="recent", created_at=recent))
+
+        session.add(
+            CheckResult(
+                check_id=check.id,
+                project_id=project.id,
+                status=CheckStatus.DOWN,
+                error_message="old",
+                created_at=old,
+            )
+        )
+        session.add(
+            CheckResult(
+                check_id=check.id,
+                project_id=project.id,
+                status=CheckStatus.UP,
+                error_message=None,
+                created_at=recent,
+            )
+        )
+
+        session.add(
+            Anomaly(
+                check_id=check.id,
+                incident_id=None,
+                type="latency_spike",
+                severity=2.1,
+                window_start=old - timedelta(minutes=5),
+                window_end=old,
+                evidence_json='{"kind":"old"}',
+                created_at=old,
+            )
+        )
+        session.add(
+            Anomaly(
+                check_id=check.id,
+                incident_id=None,
+                type="latency_spike",
+                severity=1.1,
+                window_start=recent - timedelta(minutes=5),
+                window_end=recent,
+                evidence_json='{"kind":"recent"}',
+                created_at=recent,
+            )
+        )
+
+        session.add(Heartbeat(check_id=check.id, timestamp=old, payload="old"))
+        session.add(Heartbeat(check_id=check.id, timestamp=recent, payload="recent"))
+        session.commit()
+
+        worker._maybe_prune_raw_data(session, now)
+
+        assert len(session.exec(select(Event).where(Event.check_id == check.id)).all()) == 1
+        assert len(session.exec(select(CheckResult).where(CheckResult.check_id == check.id)).all()) == 1
+        assert len(session.exec(select(Anomaly).where(Anomaly.check_id == check.id)).all()) == 1
+        assert len(session.exec(select(Heartbeat).where(Heartbeat.check_id == check.id)).all()) == 1
+
+        logs = session.exec(
+            select(AuditLog).where(
+                AuditLog.action == "raw_retention_pruned",
+                AuditLog.target_type == "system",
+            )
+        ).all()
+        assert logs
