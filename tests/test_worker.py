@@ -1188,7 +1188,12 @@ def test_flapping_suppression_skips_alert_send(tmp_path, monkeypatch):
         session.refresh(check)
 
         down_calls = []
-        monkeypatch.setattr(worker, "notify_down", lambda chk, proj, reason=None: down_calls.append(reason))
+
+        def fake_notify_down(chk, proj, reason=None):
+            if chk.id == check.id:
+                down_calls.append(reason)
+
+        monkeypatch.setattr(worker, "notify_down", fake_notify_down)
         monkeypatch.setattr(worker, "notify_recovery", lambda chk, proj: None)
 
         # 1) DOWN alert (not yet considered flapping)
@@ -1268,3 +1273,116 @@ def test_check_result_run_key_idempotency(tmp_path):
         rows = session.exec(select(CheckResult).where(CheckResult.check_id == check.id)).all()
         assert len(rows) == 1
         assert rows[0].run_key == run_key
+
+
+def test_event_run_key_idempotency(tmp_path):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_event_run_key.sqlite'}"
+
+    from sqlmodel import Session, select
+    from src import db as dbmod
+    from src.models import Project, Check, CheckType, CheckStatus, Event, EventType
+    from src import worker
+
+    dbmod.create_db_and_tables()
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="proj_event_run_key")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        check = Check(
+            project_id=project.id,
+            name="http_event_idempotent",
+            type=CheckType.HTTP,
+            url="http://example.invalid/health",
+            status=CheckStatus.UP,
+        )
+        session.add(check)
+        session.commit()
+        session.refresh(check)
+
+        now = datetime.utcnow()
+        run_key = "poll:event:12345"
+        worker._record_event(
+            session,
+            check,
+            run_key=run_key,
+            event_type=EventType.DOWN,
+            message="timeout",
+            incident_id=None,
+            created_at=now,
+        )
+        session.commit()
+
+        worker._record_event(
+            session,
+            check,
+            run_key=run_key,
+            event_type=EventType.DOWN,
+            message="timeout",
+            incident_id=None,
+            created_at=now + timedelta(seconds=1),
+        )
+        session.commit()
+
+        rows = session.exec(select(Event).where(Event.check_id == check.id)).all()
+        assert len(rows) == 1
+        assert rows[0].run_key == run_key
+
+
+def test_incident_open_run_key_idempotency(tmp_path):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_incident_run_key.sqlite'}"
+
+    from sqlmodel import Session, select
+    from src import db as dbmod
+    from src.models import Project, Check, CheckType, CheckStatus, Incident
+    from src import worker
+
+    dbmod.create_db_and_tables()
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="proj_incident_run_key")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        check = Check(
+            project_id=project.id,
+            name="http_incident_idempotent",
+            type=CheckType.HTTP,
+            url="http://example.invalid/health",
+            status=CheckStatus.UP,
+        )
+        session.add(check)
+        session.commit()
+        session.refresh(check)
+
+        now = datetime.utcnow()
+        run_key = "poll:incident:12345"
+        incident, created = worker._get_or_create_open_incident(
+            session,
+            check,
+            signature="timeout",
+            now=now,
+            run_key=run_key,
+        )
+        assert incident is not None
+        assert created is True
+
+        # Resolve it, then re-run the same create path with identical run_key.
+        worker._resolve_open_incident(session, incident, now=now + timedelta(seconds=1), run_key="resolve:123")
+        incident_retry, created_retry = worker._get_or_create_open_incident(
+            session,
+            check,
+            signature="timeout",
+            now=now + timedelta(seconds=2),
+            run_key=run_key,
+        )
+        assert incident_retry is not None
+        assert incident_retry.id == incident.id
+        assert created_retry is False
+
+        rows = session.exec(select(Incident).where(Incident.check_id == check.id)).all()
+        assert len(rows) == 1
+        assert rows[0].open_run_key == run_key

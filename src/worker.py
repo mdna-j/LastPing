@@ -135,6 +135,136 @@ def _record_check_result(
         logger.exception("Error recording check evidence for check %s", getattr(check, "id", None))
 
 
+def _record_event(
+    session: Session,
+    check: Check,
+    *,
+    run_key: Optional[str],
+    event_type: str,
+    message: Optional[str],
+    incident_id: Optional[int],
+    created_at: datetime,
+    lease_owner: Optional[str] = None,
+    lease_fence: Optional[int] = None,
+) -> Optional[Event]:
+    """Persist an idempotent event row for a single check execution run."""
+    try:
+        if not _lease_fence_allows_write(session, check.id, lease_owner, lease_fence):
+            return None
+        if run_key:
+            with session.no_autoflush:
+                existing = session.exec(
+                    select(Event).where(
+                        Event.check_id == check.id,
+                        Event.event_type == event_type,
+                        Event.run_key == run_key,
+                    )
+                ).first()
+            if existing is not None:
+                return existing
+        row = Event(
+            check_id=check.id,
+            project_id=check.project_id,
+            event_type=event_type,
+            message=message,
+            incident_id=incident_id,
+            run_key=run_key,
+            created_at=created_at,
+        )
+        session.add(row)
+        return row
+    except Exception:
+        logger.exception("Error recording event for check %s", getattr(check, "id", None))
+        return None
+
+
+def _get_open_incident(session: Session, check_id: int) -> Optional[Incident]:
+    return session.exec(
+        select(Incident).where(Incident.check_id == check_id, Incident.resolved_at == None)
+    ).first()
+
+
+def _get_or_create_open_incident(
+    session: Session,
+    check: Check,
+    *,
+    signature: Optional[str],
+    now: datetime,
+    run_key: Optional[str],
+) -> Tuple[Optional[Incident], bool]:
+    """Return open incident for check, creating one once per run_key when needed."""
+    existing = _get_open_incident(session, check.id)
+    if existing is not None:
+        return existing, False
+    if run_key:
+        by_key = session.exec(
+            select(Incident).where(
+                Incident.check_id == check.id,
+                Incident.open_run_key == run_key,
+            )
+        ).first()
+        if by_key is not None:
+            return by_key, False
+
+    group_root = _find_group_root(session, check.project_id, signature or "", now)
+    row = Incident(
+        project_id=check.project_id,
+        check_id=check.id,
+        started_at=now,
+        status="open",
+        group_id=group_root,
+        open_run_key=run_key,
+    )
+    session.add(row)
+    try:
+        session.commit()
+        session.refresh(row)
+        return row, True
+    except IntegrityError:
+        session.rollback()
+        existing = _get_open_incident(session, check.id)
+        if existing is not None:
+            return existing, False
+        if run_key:
+            by_key = session.exec(
+                select(Incident).where(
+                    Incident.check_id == check.id,
+                    Incident.open_run_key == run_key,
+                )
+            ).first()
+            if by_key is not None:
+                return by_key, False
+        logger.exception("Failed to create open incident for check %s", getattr(check, "id", None))
+        return None, False
+    except Exception:
+        session.rollback()
+        logger.exception("Failed to create open incident for check %s", getattr(check, "id", None))
+        return None, False
+
+
+def _resolve_open_incident(session: Session, incident: Optional[Incident], *, now: datetime, run_key: Optional[str]) -> bool:
+    if incident is None:
+        return False
+    if incident.resolved_at is not None:
+        return False
+    if run_key and incident.resolve_run_key == run_key:
+        return False
+    incident.resolved_at = now
+    incident.status = "resolved"
+    incident.resolve_run_key = run_key
+    session.add(incident)
+    try:
+        session.commit()
+        return True
+    except IntegrityError:
+        session.rollback()
+        return False
+    except Exception:
+        session.rollback()
+        logger.exception("Failed to resolve incident %s", getattr(incident, "id", None))
+        return False
+
+
 def _event_state(event_type: Optional[str]) -> Optional[str]:
     if event_type in (EventType.DOWN, EventType.HTTP_FAILURE):
         return CheckStatus.DOWN
@@ -1865,23 +1995,32 @@ def scan_checks_once(session: Session):
                     check.consecutive_failures = (check.consecutive_failures or 0) + 1
                     reason = "missed heartbeat"
                     signature = _normalize_reason(reason)
-                    # find or create open incident for this check
-                    created_incident = False
-                    open_inc = session.exec(select(Incident).where(Incident.check_id == check.id, Incident.resolved_at == None)).first()
-                    if not open_inc:
-                        group_root = _find_group_root(session, check.project_id, signature, now)
-                        open_inc = Incident(project_id=check.project_id, check_id=check.id, started_at=now, status="open", group_id=group_root)
-                        session.add(open_inc)
-                        session.commit()
-                        session.refresh(open_inc)
-                        created_incident = True
+                    # find or create open incident for this check (idempotent by run_key)
+                    open_inc, created_incident = _get_or_create_open_incident(
+                        session,
+                        check,
+                        signature=signature,
+                        now=now,
+                        run_key=run_key,
+                    )
+                    if open_inc is None:
+                        continue
                     if created_incident:
                         _log_similar_incidents(session, project, open_inc.id, reason)
                     event_message = reason
                     if maintenance:
                         event_message = f"{reason} (suppressed due to maintenance)"
-                    event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.DOWN, message=event_message, incident_id=open_inc.id)
-                    session.add(event)
+                    _record_event(
+                        session,
+                        check,
+                        run_key=run_key,
+                        event_type=EventType.DOWN,
+                        message=event_message,
+                        incident_id=open_inc.id,
+                        created_at=now,
+                        lease_owner=lease_owner,
+                        lease_fence=lease_fence,
+                    )
                     _record_check_result(
                         session,
                         check,
@@ -1943,9 +2082,7 @@ def scan_checks_once(session: Session):
                         session.commit()
                 else:
                     check.consecutive_failures = (check.consecutive_failures or 0) + 1
-                    open_inc = session.exec(
-                        select(Incident).where(Incident.check_id == check.id, Incident.resolved_at == None)
-                    ).first()
+                    open_inc = _get_open_incident(session, check.id)
                     _record_check_result(
                         session,
                         check,
@@ -2006,14 +2143,19 @@ def scan_checks_once(session: Session):
                     check.status = CheckStatus.UP
                     check.consecutive_failures = 0
                     # close open incident if present
-                    open_inc = session.exec(select(Incident).where(Incident.check_id == check.id, Incident.resolved_at == None)).first()
-                    if open_inc:
-                        open_inc.resolved_at = now
-                        open_inc.status = "resolved"
-                        session.add(open_inc)
-                        session.commit()
-                    event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.UP, message="recovered", incident_id=(open_inc.id if open_inc else None))
-                    session.add(event)
+                    open_inc = _get_open_incident(session, check.id)
+                    _resolve_open_incident(session, open_inc, now=now, run_key=run_key)
+                    _record_event(
+                        session,
+                        check,
+                        run_key=run_key,
+                        event_type=EventType.UP,
+                        message="recovered",
+                        incident_id=(open_inc.id if open_inc else None),
+                        created_at=now,
+                        lease_owner=lease_owner,
+                        lease_fence=lease_fence,
+                    )
                     _record_check_result(
                         session,
                         check,
@@ -2113,22 +2255,27 @@ def scan_checks_once(session: Session):
                     # degrade state
                     if check.status != CheckStatus.DEGRADED:
                         # close open incident if exists
-                        open_inc = session.exec(select(Incident).where(Incident.check_id == check.id, Incident.resolved_at == None)).first()
-                        if open_inc:
-                            open_inc.resolved_at = now
-                            open_inc.status = "resolved"
-                            session.add(open_inc)
-                            session.commit()
+                        open_inc = _get_open_incident(session, check.id)
+                        _resolve_open_incident(session, open_inc, now=now, run_key=run_key)
                         check.status = CheckStatus.DEGRADED
                         check.consecutive_failures = 0
                         event_message = f"latency_ms={latency_ms:.1f}" if latency_ms is not None else "degraded"
                         if maintenance:
                             event_message = f"{event_message} (suppressed due to maintenance)"
-                        event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.DEGRADED, message=event_message)
-                        session.add(event)
+                        _record_event(
+                            session,
+                            check,
+                            run_key=run_key,
+                            event_type=EventType.DEGRADED,
+                            message=event_message,
+                            incident_id=None,
+                            created_at=now,
+                            lease_owner=lease_owner,
+                            lease_fence=lease_fence,
+                        )
                         if not maintenance:
-                            _trigger_remediation(session, project, check, EventType.DEGRADED, event.message, now)
-                            _ensure_oncall_alert(session, project, check, EventType.DEGRADED, event.message, now)
+                            _trigger_remediation(session, project, check, EventType.DEGRADED, event_message, now)
+                            _ensure_oncall_alert(session, project, check, EventType.DEGRADED, event_message, now)
                         if check.alert_enabled and not maintenance:
                             flapping_suppressed = _should_suppress_alert_due_to_flapping(
                                 session,
@@ -2181,15 +2328,20 @@ def scan_checks_once(session: Session):
                     if check.status in (CheckStatus.DOWN, CheckStatus.DEGRADED):
                         check.status = CheckStatus.UP
                         check.consecutive_failures = 0
-                        open_inc = session.exec(select(Incident).where(Incident.check_id == check.id, Incident.resolved_at == None)).first()
+                        open_inc = _get_open_incident(session, check.id)
                         evidence_incident_id = open_inc.id if open_inc else None
-                        if open_inc:
-                            open_inc.resolved_at = now
-                            open_inc.status = "resolved"
-                            session.add(open_inc)
-                            session.commit()
-                        event = Event(check_id=check.id, project_id=check.project_id, event_type=EventType.UP, message=f"check ok ({reason})", incident_id=(open_inc.id if open_inc else None))
-                        session.add(event)
+                        _resolve_open_incident(session, open_inc, now=now, run_key=run_key)
+                        _record_event(
+                            session,
+                            check,
+                            run_key=run_key,
+                            event_type=EventType.UP,
+                            message=f"check ok ({reason})",
+                            incident_id=(open_inc.id if open_inc else None),
+                            created_at=now,
+                            lease_owner=lease_owner,
+                            lease_fence=lease_fence,
+                        )
                         _close_oncall_alerts(session, check.id)
                         if check.alert_enabled and not maintenance:
                             flapping_suppressed = _should_suppress_alert_due_to_flapping(
@@ -2222,30 +2374,41 @@ def scan_checks_once(session: Session):
                 evidence_status = CheckStatus.DOWN
                 evidence_error = reason
                 check.consecutive_failures = (check.consecutive_failures or 0) + 1
-                open_inc = session.exec(
-                    select(Incident).where(Incident.check_id == check.id, Incident.resolved_at == None)
-                ).first()
+                open_inc = _get_open_incident(session, check.id)
                 evidence_incident_id = open_inc.id if open_inc else None
                 event_type = EventType.HTTP_FAILURE if check.type == CheckType.HTTP else EventType.DOWN
                 if check.status != CheckStatus.DOWN:
                     check.status = CheckStatus.DOWN
-                    created_incident = False
                     if not open_inc:
                         signature = _normalize_reason(reason)
-                        group_root = _find_group_root(session, check.project_id, signature, now)
-                        open_inc = Incident(project_id=check.project_id, check_id=check.id, started_at=now, status="open", group_id=group_root)
-                        session.add(open_inc)
-                        session.commit()
-                        session.refresh(open_inc)
-                        created_incident = True
+                        open_inc, created_incident = _get_or_create_open_incident(
+                            session,
+                            check,
+                            signature=signature,
+                            now=now,
+                            run_key=run_key,
+                        )
+                        if open_inc is None:
+                            continue
                         evidence_incident_id = open_inc.id
+                    else:
+                        created_incident = False
                     if created_incident:
                         _log_similar_incidents(session, project, open_inc.id, reason)
                     event_message = f"{reason}"
                     if maintenance:
                         event_message = f"{event_message} (suppressed due to maintenance)"
-                    event = Event(check_id=check.id, project_id=check.project_id, event_type=event_type, message=event_message, incident_id=open_inc.id)
-                    session.add(event)
+                    _record_event(
+                        session,
+                        check,
+                        run_key=run_key,
+                        event_type=event_type,
+                        message=event_message,
+                        incident_id=open_inc.id,
+                        created_at=now,
+                        lease_owner=lease_owner,
+                        lease_fence=lease_fence,
+                    )
                     rem_event = EventType.DOWN if event_type == EventType.HTTP_FAILURE else event_type
                     if not maintenance:
                         _trigger_remediation(session, project, check, rem_event, reason, now)

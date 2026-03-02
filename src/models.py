@@ -318,6 +318,7 @@ class Event(SQLModel, table=True):
     event_type: str
     message: Optional[str] = None
     incident_id: Optional[int] = Field(default=None, foreign_key="incident.id")
+    run_key: Optional[str] = Field(default=None, index=True, description="idempotency key for a single check execution run")
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
     check: Optional[Check] = Relationship(back_populates="events")
@@ -354,6 +355,8 @@ class Incident(SQLModel, table=True):
     group_id: Optional[int] = Field(default=None, foreign_key="incident.id", index=True)
     # If an incident was merged into another, track the target here.
     merged_into: Optional[int] = Field(default=None, foreign_key="incident.id", index=True)
+    open_run_key: Optional[str] = Field(default=None, index=True, description="idempotency key for incident creation run")
+    resolve_run_key: Optional[str] = Field(default=None, index=True, description="idempotency key for incident resolution run")
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
     # relationships
