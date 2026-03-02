@@ -98,9 +98,13 @@ def _record_check_result(
     error_message: Optional[str],
     incident_id: Optional[int],
     created_at: datetime,
+    lease_owner: Optional[str] = None,
+    lease_fence: Optional[int] = None,
 ) -> None:
     """Persist canonical execution evidence for a check run."""
     try:
+        if not _lease_fence_allows_write(session, check.id, lease_owner, lease_fence):
+            return
         if run_key:
             with session.no_autoflush:
                 exists = session.exec(
@@ -1296,10 +1300,23 @@ def _region_allows(worker_region: Optional[str], check_region: Optional[str]) ->
 
 
 def _allow_region_or_failover(session: Session, worker_region: Optional[str], check: Check, now: datetime) -> bool:
+    failover_enabled = os.environ.get("WORKER_REGION_FAILOVER", "0") == "1"
     if _region_allows(worker_region, getattr(check, "region", None)):
+        # Explicit failback cooldown: when a non-primary worker owns the lease,
+        # keep primary-region workers from reclaiming immediately.
+        cooldown = max(0, int(os.environ.get("WORKER_FAILBACK_COOLDOWN_SECONDS", "0")))
+        if failover_enabled and cooldown > 0:
+            lease = session.get(CheckLease, check.id)
+            if lease is not None:
+                owner = _worker_id()
+                if lease.lease_owner and lease.lease_owner != owner:
+                    db_now = _as_utc_naive(_db_now(session))
+                    lease_updated = _as_utc_naive(getattr(lease, "updated_at", db_now) or db_now)
+                    if lease_updated > (db_now - timedelta(seconds=cooldown)):
+                        return False
         return True
     # failover: allow other regions to pick up checks after leases expire
-    if os.environ.get("WORKER_REGION_FAILOVER", "0") != "1":
+    if not failover_enabled:
         return False
     grace = int(os.environ.get("WORKER_FAILOVER_AFTER_SECONDS", "300"))
     skew_tolerance = max(0, int(os.environ.get("WORKER_CLOCK_SKEW_TOLERANCE_SECONDS", "5")))
@@ -1313,9 +1330,36 @@ def _allow_region_or_failover(session: Session, worker_region: Optional[str], ch
     return lease_expires <= (db_now - timedelta(seconds=(grace + skew_tolerance)))
 
 
-def _acquire_lease(session: Session, check: Check, now: datetime) -> bool:
+def _lease_fence_allows_write(
+    session: Session,
+    check_id: int,
+    lease_owner: Optional[str],
+    lease_fence: Optional[int],
+) -> bool:
     if os.environ.get("WORKER_LEASES", "1") == "0":
         return True
+    # Backward-compatible path: if no lease context is provided, do not block writes.
+    if not lease_owner or lease_fence is None:
+        return True
+    lease = session.get(CheckLease, check_id)
+    if lease is None:
+        return False
+    if lease.lease_owner != lease_owner:
+        return False
+    if int(lease.lease_fence or 0) != int(lease_fence):
+        return False
+    skew_tolerance = max(0, int(os.environ.get("WORKER_CLOCK_SKEW_TOLERANCE_SECONDS", "5")))
+    lease_expires = getattr(lease, "lease_expires_at", None)
+    if lease_expires is None:
+        return False
+    db_now = _as_utc_naive(_db_now(session))
+    lease_expires_at = _as_utc_naive(lease_expires)
+    return lease_expires_at > (db_now - timedelta(seconds=skew_tolerance))
+
+
+def _acquire_lease(session: Session, check: Check, now: datetime) -> Optional[int]:
+    if os.environ.get("WORKER_LEASES", "1") == "0":
+        return 0
     lease_seconds = int(os.environ.get("WORKER_LEASE_SECONDS", "120"))
     skew_tolerance = max(0, int(os.environ.get("WORKER_CLOCK_SKEW_TOLERANCE_SECONDS", "5")))
     db_now = _db_now(session)
@@ -1344,7 +1388,10 @@ def _acquire_lease(session: Session, check: Check, now: datetime) -> bool:
         result = session.exec(update_stmt)
         if (result.rowcount or 0) > 0:
             session.commit()
-            return True
+            lease = session.get(CheckLease, check.id)
+            if lease is None:
+                return None
+            return int(lease.lease_fence or 0)
 
         # No updatable row found. Try initial insert for first-time acquisition.
         existing = session.get(CheckLease, check.id)
@@ -1359,8 +1406,8 @@ def _acquire_lease(session: Session, check: Check, now: datetime) -> bool:
                 )
             )
             session.commit()
-            return True
-        return False
+            return 1
+        return None
     except IntegrityError:
         # Another worker inserted concurrently. Retry the atomic update once.
         session.rollback()
@@ -1385,16 +1432,19 @@ def _acquire_lease(session: Session, check: Check, now: datetime) -> bool:
             retry_result = session.exec(retry_stmt)
             if (retry_result.rowcount or 0) > 0:
                 session.commit()
-                return True
-            return False
+                lease = session.get(CheckLease, check.id)
+                if lease is None:
+                    return None
+                return int(lease.lease_fence or 0)
+            return None
         except Exception:
             session.rollback()
             logger.exception("Failed to acquire lease for check %s after retry", getattr(check, "id", None))
-            return False
+            return None
     except Exception:
         session.rollback()
         logger.exception("Failed to acquire lease for check %s", getattr(check, "id", None))
-        return False
+        return None
 
 
 def _remediation_skip_reason(session: Session, hook: RemediationHook, project: Project, check: Check, now: datetime) -> Optional[str]:
@@ -1788,7 +1838,11 @@ def scan_checks_once(session: Session):
         project = session.get(Project, check.project_id)
         if not project:
             continue
-        if not _acquire_lease(session, check, now):
+        lease_owner = _worker_id()
+        lease_fence = _acquire_lease(session, check, now)
+        if lease_fence is None:
+            continue
+        if not _lease_fence_allows_write(session, check.id, lease_owner, lease_fence):
             continue
         maintenance = _in_maintenance(check, project, now)
         run_key = _check_run_key(check, now)
@@ -1837,6 +1891,8 @@ def scan_checks_once(session: Session):
                         error_message=reason,
                         incident_id=open_inc.id,
                         created_at=now,
+                        lease_owner=lease_owner,
+                        lease_fence=lease_fence,
                     )
                     if not maintenance:
                         _trigger_remediation(session, project, check, EventType.DOWN, reason, now)
@@ -1899,6 +1955,8 @@ def scan_checks_once(session: Session):
                         error_message="missed heartbeat",
                         incident_id=(open_inc.id if open_inc else None),
                         created_at=now,
+                        lease_owner=lease_owner,
+                        lease_fence=lease_fence,
                     )
                     # still down: allow re-alerts after cooldown if threshold met
                     should_alert = check.alert_enabled and (check.consecutive_failures >= (check.alert_after or 1))
@@ -1965,6 +2023,8 @@ def scan_checks_once(session: Session):
                         error_message=None,
                         incident_id=(open_inc.id if open_inc else None),
                         created_at=now,
+                        lease_owner=lease_owner,
+                        lease_fence=lease_fence,
                     )
                     _close_oncall_alerts(session, check.id)
                     # recovery alert: respect cooldown and enabled
@@ -2006,6 +2066,8 @@ def scan_checks_once(session: Session):
                         error_message=None,
                         incident_id=None,
                         created_at=now,
+                        lease_owner=lease_owner,
+                        lease_fence=lease_fence,
                     )
 
         # HTTP/TCP/DNS/SCRIPT checks are actively polled according to `interval` and `next_run`.
@@ -2276,6 +2338,8 @@ def scan_checks_once(session: Session):
                 error_message=evidence_error,
                 incident_id=evidence_incident_id,
                 created_at=now,
+                lease_owner=lease_owner,
+                lease_fence=lease_fence,
             )
             try:
                 check.next_run = now + timedelta(seconds=interval)

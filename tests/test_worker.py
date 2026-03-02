@@ -902,6 +902,61 @@ def test_region_failover_handles_mixed_timezone_datetimes(tmp_path, monkeypatch)
         assert worker._allow_region_or_failover(session, "eu-west", chk, now) is True
 
 
+def test_region_failback_cooldown_blocks_primary_reclaim(tmp_path, monkeypatch):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_region_failback_cooldown.sqlite'}"
+    monkeypatch.setenv("WORKER_REGION_FAILOVER", "1")
+    monkeypatch.setenv("WORKER_FAILBACK_COOLDOWN_SECONDS", "120")
+    monkeypatch.setenv("WORKER_REGION", "us-east")
+
+    from sqlmodel import Session
+    from src import db as dbmod
+    from src.models import Project, Check, CheckType, CheckStatus, CheckLease
+    from src import worker
+
+    dbmod.create_db_and_tables()
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="proj_region_failback_cooldown")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        chk = Check(
+            project_id=project.id,
+            name="http_region_failback_cooldown",
+            type=CheckType.HTTP,
+            url="http://example.ok/health",
+            region="us-east",
+            status=CheckStatus.UP,
+        )
+        session.add(chk)
+        session.commit()
+        session.refresh(chk)
+
+        now = datetime.utcnow()
+        monkeypatch.setattr(worker, "_db_now", lambda _session: now)
+
+        lease = CheckLease(
+            check_id=chk.id,
+            lease_owner="eu-west-worker-1",
+            lease_expires_at=now + timedelta(seconds=60),
+            updated_at=now - timedelta(seconds=30),
+            lease_fence=4,
+        )
+        session.add(lease)
+        session.commit()
+
+        # Primary region should honor failback cooldown while failover owner is recent.
+        assert worker._allow_region_or_failover(session, "us-east", chk, now) is False
+
+        lease.updated_at = now - timedelta(seconds=121)
+        session.add(lease)
+        session.commit()
+
+        # After cooldown window, primary region can resume ownership attempts.
+        assert worker._allow_region_or_failover(session, "us-east", chk, now) is True
+
+
 def test_degraded_recovery(tmp_path, monkeypatch):
     os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_deg_recover.sqlite'}"
 
@@ -993,13 +1048,15 @@ def test_lease_fencing_token_increments_on_acquire(tmp_path, monkeypatch):
         session.refresh(check)
 
         now = datetime.utcnow()
-        assert worker._acquire_lease(session, check, now) is True
+        first_fence = worker._acquire_lease(session, check, now)
+        assert first_fence == 1
         lease = session.get(CheckLease, check.id)
         assert lease is not None
         assert lease.lease_owner == "worker-test-1"
         assert lease.lease_fence == 1
 
-        assert worker._acquire_lease(session, check, now + timedelta(seconds=5)) is True
+        second_fence = worker._acquire_lease(session, check, now + timedelta(seconds=5))
+        assert second_fence == 2
         lease = session.get(CheckLease, check.id)
         assert lease is not None
         assert lease.lease_fence == 2
@@ -1010,11 +1067,89 @@ def test_lease_fencing_token_increments_on_acquire(tmp_path, monkeypatch):
         session.add(lease)
         session.commit()
 
-        assert worker._acquire_lease(session, check, now + timedelta(seconds=10)) is False
+        assert worker._acquire_lease(session, check, now + timedelta(seconds=10)) is None
         lease = session.get(CheckLease, check.id)
         assert lease is not None
         assert lease.lease_owner == "another-worker"
         assert lease.lease_fence == 7
+
+
+def test_check_result_write_requires_current_fence_token(tmp_path, monkeypatch):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_check_result_fence.sqlite'}"
+    monkeypatch.setenv("WORKER_LEASES", "1")
+    monkeypatch.setenv("WORKER_CLOCK_SKEW_TOLERANCE_SECONDS", "0")
+
+    from sqlmodel import Session, select
+    from src import db as dbmod
+    from src.models import Project, Check, CheckType, CheckStatus, CheckLease, CheckResult
+    from src import worker
+
+    dbmod.create_db_and_tables()
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="proj_check_result_fence")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        check = Check(
+            project_id=project.id,
+            name="http_check_result_fence",
+            type=CheckType.HTTP,
+            url="http://example.ok/health",
+            status=CheckStatus.UP,
+        )
+        session.add(check)
+        session.commit()
+        session.refresh(check)
+
+        now = datetime.utcnow()
+        lease = CheckLease(
+            check_id=check.id,
+            lease_owner="worker-primary",
+            lease_expires_at=now + timedelta(seconds=120),
+            lease_fence=9,
+            updated_at=now,
+        )
+        session.add(lease)
+        session.commit()
+
+        worker._record_check_result(
+            session,
+            check,
+            run_key="rk-1",
+            status=CheckStatus.UP,
+            latency_ms=12.3,
+            error_message=None,
+            incident_id=None,
+            created_at=now,
+            lease_owner="worker-primary",
+            lease_fence=9,
+        )
+        rows = session.exec(select(CheckResult).where(CheckResult.check_id == check.id)).all()
+        assert len(rows) == 1
+
+        # Simulate lease takeover by another worker (new fence token).
+        lease.lease_owner = "worker-secondary"
+        lease.lease_fence = 10
+        lease.updated_at = now + timedelta(seconds=1)
+        session.add(lease)
+        session.commit()
+
+        worker._record_check_result(
+            session,
+            check,
+            run_key="rk-2",
+            status=CheckStatus.DOWN,
+            latency_ms=None,
+            error_message="timeout",
+            incident_id=None,
+            created_at=now + timedelta(seconds=1),
+            lease_owner="worker-primary",
+            lease_fence=9,
+        )
+        rows = session.exec(select(CheckResult).where(CheckResult.check_id == check.id)).all()
+        assert len(rows) == 1
 
 
 def test_flapping_suppression_skips_alert_send(tmp_path, monkeypatch):
