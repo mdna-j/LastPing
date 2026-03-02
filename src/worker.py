@@ -16,7 +16,7 @@ Keep scan logic deterministic and side-effect minimal so tests remain
 stable.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import urllib.request
 import urllib.error
 import socket
@@ -47,15 +47,22 @@ def _now() -> datetime:
     return datetime.utcnow()
 
 
+def _as_utc_naive(value: datetime) -> datetime:
+    """Normalize datetime to UTC-naive for safe comparisons across DB drivers."""
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
 def _db_now(session: Session) -> datetime:
     """Return database-server UTC time when available (fallback to app clock)."""
     try:
         value = session.exec(select(func.now())).first()
         if isinstance(value, datetime):
-            return value
+            return _as_utc_naive(value)
     except Exception:
         logger.exception("Failed to read DB server time; falling back to app clock")
-    return _now()
+    return _as_utc_naive(_now())
 
 
 def _check_run_key(check: Check, now: datetime) -> str:
@@ -1296,13 +1303,14 @@ def _allow_region_or_failover(session: Session, worker_region: Optional[str], ch
         return False
     grace = int(os.environ.get("WORKER_FAILOVER_AFTER_SECONDS", "300"))
     skew_tolerance = max(0, int(os.environ.get("WORKER_CLOCK_SKEW_TOLERANCE_SECONDS", "5")))
-    db_now = _db_now(session)
+    db_now = _as_utc_naive(_db_now(session))
     lease = session.get(CheckLease, check.id)
     if lease is None or lease.lease_expires_at is None:
         # Do not allow non-matching regions to claim a check before its
         # owning region has acquired at least one lease.
         return False
-    return lease.lease_expires_at <= (db_now - timedelta(seconds=(grace + skew_tolerance)))
+    lease_expires = _as_utc_naive(lease.lease_expires_at)
+    return lease_expires <= (db_now - timedelta(seconds=(grace + skew_tolerance)))
 
 
 def _acquire_lease(session: Session, check: Check, now: datetime) -> bool:

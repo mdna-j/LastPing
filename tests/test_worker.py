@@ -1,5 +1,5 @@
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -853,6 +853,52 @@ def test_region_failover_requires_expired_lease(tmp_path, monkeypatch):
         lease.lease_expires_at = now - timedelta(seconds=301)
         session.add(lease)
         session.commit()
+        assert worker._allow_region_or_failover(session, "eu-west", chk, now) is True
+
+
+def test_region_failover_handles_mixed_timezone_datetimes(tmp_path, monkeypatch):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_region_failover_tz.sqlite'}"
+    monkeypatch.setenv("WORKER_REGION_FAILOVER", "1")
+    monkeypatch.setenv("WORKER_FAILOVER_AFTER_SECONDS", "300")
+    monkeypatch.setenv("WORKER_CLOCK_SKEW_TOLERANCE_SECONDS", "0")
+
+    from sqlmodel import Session
+    from src import db as dbmod
+    from src.models import Project, Check, CheckType, CheckStatus, CheckLease
+    from src import worker
+
+    dbmod.create_db_and_tables()
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="proj_region_failover_tz")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        chk = Check(
+            project_id=project.id,
+            name="http_region_failover_tz",
+            type=CheckType.HTTP,
+            url="http://example.ok/health",
+            region="us-east",
+            status=CheckStatus.UP,
+        )
+        session.add(chk)
+        session.commit()
+        session.refresh(chk)
+
+        now = datetime.utcnow()
+        lease = CheckLease(
+            check_id=chk.id,
+            lease_owner="us-east-1",
+            lease_expires_at=now - timedelta(seconds=301),  # naive
+            updated_at=now,
+        )
+        session.add(lease)
+        session.commit()
+
+        # Simulate DB adapters returning aware timestamps (e.g. Postgres timezone-aware now()).
+        monkeypatch.setattr(worker, "_db_now", lambda _session: datetime.now(timezone.utc))
         assert worker._allow_region_or_failover(session, "eu-west", chk, now) is True
 
 
