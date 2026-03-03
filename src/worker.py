@@ -7,6 +7,7 @@ import math
 import subprocess
 import sys
 import signal
+from pathlib import Path
 """
 Background worker: scans checks and executes monitoring logic.
 
@@ -1126,15 +1127,178 @@ def _retention_days(env_var: str, default_days: int) -> int:
     return max(0, days)
 
 
+def _retention_int(env_var: str, default_value: int, minimum: int = 0) -> int:
+    raw = os.environ.get(env_var, str(default_value)).strip()
+    try:
+        value = int(raw)
+    except Exception:
+        logger.warning("Invalid %s=%r; using default=%s", env_var, raw, default_value)
+        value = default_value
+    if value < minimum:
+        logger.warning("Invalid %s=%r; using minimum=%s", env_var, raw, minimum)
+        return minimum
+    return value
+
+
+def _retention_bool(env_var: str, default: str = "0") -> bool:
+    raw = (os.environ.get(env_var, default) or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _serialize_retention_value(value):
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8", errors="replace")
+        except Exception:
+            return repr(value)
+    return value
+
+
+def _archive_retention_rows(
+    *,
+    table_label: str,
+    rows: list,
+    cutoff: datetime,
+    now: datetime,
+    archive_dir: str,
+) -> int:
+    if not rows:
+        return 0
+    ts = now.strftime("%Y%m%dT%H%M%SZ")
+    out_dir = Path(archive_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_file = out_dir / f"{table_label}_{ts}.ndjson"
+    with out_file.open("a", encoding="utf-8") as fh:
+        for row in rows:
+            record = {}
+            for col in row.__table__.columns.keys():
+                record[col] = _serialize_retention_value(getattr(row, col))
+            record["_archive_table"] = table_label
+            record["_archive_cutoff"] = cutoff.isoformat()
+            record["_archived_at"] = now.isoformat()
+            fh.write(json.dumps(record, separators=(",", ":"), ensure_ascii=True) + "\n")
+    return len(rows)
+
+
+def _prune_raw_table_chunked(
+    session: Session,
+    *,
+    table_label: str,
+    model,
+    time_column,
+    cutoff: datetime,
+    batch_size: int,
+    max_batches: int,
+    batch_pause_seconds: float,
+    archive_enabled: bool,
+    archive_dir: str,
+    now: datetime,
+) -> dict:
+    deleted_total = 0
+    archived_total = 0
+    batches = 0
+    truncated = False
+
+    id_column = getattr(model, "id", None)
+    if id_column is None:
+        # Fallback path when model has no id column (not expected for current raw tables).
+        try:
+            result = session.exec(delete(model).where(time_column < cutoff))
+            deleted = int(result.rowcount or 0)
+            session.commit()
+            deleted_total += deleted
+            batches = 1 if deleted > 0 else 0
+        except Exception:
+            session.rollback()
+            logger.exception("Failed pruning %s older than cutoff=%s", table_label, cutoff.isoformat())
+        return {
+            "deleted": deleted_total,
+            "archived": archived_total,
+            "batches": batches,
+            "truncated": truncated,
+        }
+
+    while batches < max_batches:
+        stale_ids = session.exec(
+            select(id_column)
+            .where(time_column < cutoff)
+            .order_by(id_column)
+            .limit(batch_size)
+        ).all()
+        if not stale_ids:
+            break
+
+        if archive_enabled:
+            stale_rows = session.exec(
+                select(model)
+                .where(id_column.in_(stale_ids))
+                .order_by(id_column)
+            ).all()
+            try:
+                archived_total += _archive_retention_rows(
+                    table_label=table_label,
+                    rows=stale_rows,
+                    cutoff=cutoff,
+                    now=now,
+                    archive_dir=archive_dir,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed archiving %s chunk; skipping deletion to avoid data loss",
+                    table_label,
+                )
+                break
+
+        try:
+            result = session.exec(delete(model).where(id_column.in_(stale_ids)))
+            deleted_now = int(result.rowcount or 0)
+            session.commit()
+        except Exception:
+            session.rollback()
+            logger.exception("Failed pruning %s chunk older than cutoff=%s", table_label, cutoff.isoformat())
+            break
+
+        deleted_total += deleted_now
+        batches += 1
+        if len(stale_ids) < batch_size:
+            break
+        if batch_pause_seconds > 0:
+            time.sleep(batch_pause_seconds)
+
+    if batches >= max_batches:
+        has_more = session.exec(
+            select(id_column)
+            .where(time_column < cutoff)
+            .limit(1)
+        ).first()
+        truncated = has_more is not None
+
+    return {
+        "deleted": deleted_total,
+        "archived": archived_total,
+        "batches": batches,
+        "truncated": truncated,
+    }
+
+
 def _maybe_prune_raw_data(session: Session, now: datetime) -> None:
     if os.environ.get("RAW_RETENTION_ENABLED", "1") != "1":
         return
 
-    interval = int(os.environ.get("RAW_RETENTION_INTERVAL_SECONDS", "86400"))
+    interval = _retention_int("RAW_RETENTION_INTERVAL_SECONDS", 86400, minimum=0)
     global _LAST_RAW_RETENTION_RUN
     if _LAST_RAW_RETENTION_RUN and (now - _LAST_RAW_RETENTION_RUN).total_seconds() < interval:
         return
     _LAST_RAW_RETENTION_RUN = now
+
+    batch_size = _retention_int("RAW_RETENTION_DELETE_BATCH_SIZE", 5000, minimum=1)
+    max_batches_per_table = _retention_int("RAW_RETENTION_MAX_BATCHES_PER_TABLE", 200, minimum=1)
+    batch_pause_ms = _retention_int("RAW_RETENTION_BATCH_PAUSE_MS", 0, minimum=0)
+    batch_pause_seconds = float(batch_pause_ms) / 1000.0
+    archive_enabled = _retention_bool("RAW_RETENTION_ARCHIVE_ENABLED", "0")
+    archive_dir = os.environ.get("RAW_RETENTION_ARCHIVE_DIR") or os.path.join(os.getcwd(), "artifacts", "retention_archive")
 
     prune_targets = [
         ("events", Event, Event.created_at, _retention_days("RAW_RETENTION_EVENTS_DAYS", 90)),
@@ -1149,18 +1313,47 @@ def _maybe_prune_raw_data(session: Session, now: datetime) -> None:
     ]
 
     deleted_counts = {}
+    archived_counts = {}
+    batch_counts = {}
+    cutoffs = {}
+    truncated_tables = []
     total_deleted = 0
     for label, model, column, days in prune_targets:
         if days <= 0:
             continue
         cutoff = now - timedelta(days=days)
+        cutoffs[label] = cutoff.isoformat()
         try:
-            result = session.exec(delete(model).where(column < cutoff))
-            deleted = int(result.rowcount or 0)
+            stats = _prune_raw_table_chunked(
+                session,
+                table_label=label,
+                model=model,
+                time_column=column,
+                cutoff=cutoff,
+                batch_size=batch_size,
+                max_batches=max_batches_per_table,
+                batch_pause_seconds=batch_pause_seconds,
+                archive_enabled=archive_enabled,
+                archive_dir=archive_dir,
+                now=now,
+            )
+            deleted = int(stats.get("deleted", 0) or 0)
+            archived = int(stats.get("archived", 0) or 0)
+            batches = int(stats.get("batches", 0) or 0)
+            truncated = bool(stats.get("truncated"))
             if deleted > 0:
                 total_deleted += deleted
             deleted_counts[label] = deleted
-            session.commit()
+            archived_counts[label] = archived
+            batch_counts[label] = batches
+            if truncated:
+                truncated_tables.append(label)
+                logger.warning(
+                    "Raw retention reached batch cap for %s (max_batches=%s, batch_size=%s); stale rows remain. Tune chunk settings or use partitioning/offline archival for this table.",
+                    label,
+                    max_batches_per_table,
+                    batch_size,
+                )
         except Exception:
             session.rollback()
             logger.exception("Failed pruning %s older than %s days", label, days)
@@ -1172,12 +1365,33 @@ def _maybe_prune_raw_data(session: Session, now: datetime) -> None:
         details = json.dumps(
             {
                 "deleted": deleted_counts,
+                "archived": archived_counts,
+                "batches": batch_counts,
+                "cutoffs": cutoffs,
+                "truncated_tables": truncated_tables,
                 "retention_days": {
                     "events": _retention_days("RAW_RETENTION_EVENTS_DAYS", 90),
                     "check_results": _retention_days("RAW_RETENTION_CHECK_RESULTS_DAYS", 90),
                     "anomalies": _retention_days("RAW_RETENTION_ANOMALIES_DAYS", 180),
                     "heartbeats": _retention_days("RAW_RETENTION_HEARTBEATS_DAYS", 30),
                 },
+                "strategy": {
+                    "mode": "chunked_delete",
+                    "batch_size": batch_size,
+                    "max_batches_per_table": max_batches_per_table,
+                    "batch_pause_ms": batch_pause_ms,
+                    "archive_enabled": archive_enabled,
+                    "archive_dir": archive_dir if archive_enabled else None,
+                },
+                "ops_recommendations": (
+                    [
+                        "Increase RAW_RETENTION_MAX_BATCHES_PER_TABLE and/or RAW_RETENTION_DELETE_BATCH_SIZE.",
+                        "Enable RAW_RETENTION_ARCHIVE_ENABLED with durable storage for offline archival before delete.",
+                        "Use DB-native partitioning for high-volume tables and drop old partitions by policy.",
+                    ]
+                    if truncated_tables
+                    else []
+                ),
                 "ran_at": now.isoformat(),
             }
         )

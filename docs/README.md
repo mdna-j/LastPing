@@ -6,6 +6,7 @@ Contents:
 
 - `README.md` - this file (docs index)
 - `analytics_ml_ops.md` - predictive model training and drift monitoring runbook
+- `raw_retention_ops.md` - large-table retention tuning (chunked deletes, archival, partitioning guidance)
 
 Developer notes:
 

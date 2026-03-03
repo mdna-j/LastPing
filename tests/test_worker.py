@@ -1,5 +1,7 @@
 import os
+import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -1677,3 +1679,188 @@ def test_raw_retention_prunes_old_events_results_anomalies_heartbeats(tmp_path, 
             )
         ).all()
         assert logs
+
+
+def test_raw_retention_chunk_cap_records_truncated_tables(tmp_path, monkeypatch):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_raw_retention_chunk_cap.sqlite'}"
+    monkeypatch.setenv("RAW_RETENTION_ENABLED", "1")
+    monkeypatch.setenv("RAW_RETENTION_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("RAW_RETENTION_EVENTS_DAYS", "30")
+    monkeypatch.setenv("RAW_RETENTION_CHECK_RESULTS_DAYS", "0")
+    monkeypatch.setenv("RAW_RETENTION_ANOMALIES_DAYS", "0")
+    monkeypatch.setenv("RAW_RETENTION_HEARTBEATS_DAYS", "0")
+    monkeypatch.setenv("RAW_RETENTION_DELETE_BATCH_SIZE", "2")
+    monkeypatch.setenv("RAW_RETENTION_MAX_BATCHES_PER_TABLE", "1")
+    monkeypatch.setenv("RAW_RETENTION_ARCHIVE_ENABLED", "0")
+
+    from sqlmodel import Session, select
+    from src import db as dbmod
+    from src.models import Project, Check, CheckType, CheckStatus, Event, EventType, AuditLog
+    from src import worker
+
+    dbmod.create_db_and_tables()
+    monkeypatch.setattr(worker, "_LAST_RAW_RETENTION_RUN", None)
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="proj_raw_retention_chunk_cap")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        check = Check(
+            project_id=project.id,
+            name="http_raw_retention_chunk_cap",
+            type=CheckType.HTTP,
+            url="http://example.invalid/health",
+            status=CheckStatus.UP,
+        )
+        session.add(check)
+        session.commit()
+        session.refresh(check)
+
+        now = datetime.utcnow()
+        old = now - timedelta(days=45)
+        recent = now - timedelta(days=1)
+
+        for idx in range(5):
+            session.add(
+                Event(
+                    check_id=check.id,
+                    project_id=project.id,
+                    event_type=EventType.DOWN,
+                    message=f"old-{idx}",
+                    created_at=old,
+                )
+            )
+        session.add(
+            Event(
+                check_id=check.id,
+                project_id=project.id,
+                event_type=EventType.UP,
+                message="recent",
+                created_at=recent,
+            )
+        )
+        session.commit()
+
+        worker._maybe_prune_raw_data(session, now)
+
+        cutoff = now - timedelta(days=30)
+        remaining_old = session.exec(
+            select(Event).where(Event.check_id == check.id, Event.created_at < cutoff)
+        ).all()
+        assert len(remaining_old) == 3
+
+        log = session.exec(
+            select(AuditLog).where(AuditLog.action == "raw_retention_pruned").order_by(AuditLog.id.desc())
+        ).first()
+        assert log is not None
+        details = json.loads(log.details or "{}")
+        assert "events" in details.get("truncated_tables", [])
+        assert details.get("batches", {}).get("events") == 1
+        assert details.get("deleted", {}).get("events") == 2
+        assert details.get("ops_recommendations")
+
+
+def test_raw_retention_archives_rows_to_ndjson(tmp_path, monkeypatch):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_raw_retention_archive.sqlite'}"
+    archive_dir = tmp_path / "retention_archive"
+    monkeypatch.setenv("RAW_RETENTION_ENABLED", "1")
+    monkeypatch.setenv("RAW_RETENTION_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("RAW_RETENTION_EVENTS_DAYS", "30")
+    monkeypatch.setenv("RAW_RETENTION_CHECK_RESULTS_DAYS", "0")
+    monkeypatch.setenv("RAW_RETENTION_ANOMALIES_DAYS", "0")
+    monkeypatch.setenv("RAW_RETENTION_HEARTBEATS_DAYS", "0")
+    monkeypatch.setenv("RAW_RETENTION_DELETE_BATCH_SIZE", "100")
+    monkeypatch.setenv("RAW_RETENTION_MAX_BATCHES_PER_TABLE", "5")
+    monkeypatch.setenv("RAW_RETENTION_ARCHIVE_ENABLED", "1")
+    monkeypatch.setenv("RAW_RETENTION_ARCHIVE_DIR", str(archive_dir))
+
+    from sqlmodel import Session, select
+    from src import db as dbmod
+    from src.models import Project, Check, CheckType, CheckStatus, Event, EventType, AuditLog
+    from src import worker
+
+    dbmod.create_db_and_tables()
+    monkeypatch.setattr(worker, "_LAST_RAW_RETENTION_RUN", None)
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="proj_raw_retention_archive")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        check = Check(
+            project_id=project.id,
+            name="http_raw_retention_archive",
+            type=CheckType.HTTP,
+            url="http://example.invalid/health",
+            status=CheckStatus.UP,
+        )
+        session.add(check)
+        session.commit()
+        session.refresh(check)
+
+        now = datetime.utcnow()
+        old = now - timedelta(days=45)
+        recent = now - timedelta(days=1)
+
+        session.add(
+            Event(
+                check_id=check.id,
+                project_id=project.id,
+                event_type=EventType.DOWN,
+                message="old-a",
+                created_at=old,
+            )
+        )
+        session.add(
+            Event(
+                check_id=check.id,
+                project_id=project.id,
+                event_type=EventType.DOWN,
+                message="old-b",
+                created_at=old,
+            )
+        )
+        session.add(
+            Event(
+                check_id=check.id,
+                project_id=project.id,
+                event_type=EventType.UP,
+                message="recent",
+                created_at=recent,
+            )
+        )
+        session.commit()
+
+        worker._maybe_prune_raw_data(session, now)
+
+        cutoff = now - timedelta(days=30)
+        remaining_old = session.exec(
+            select(Event).where(Event.check_id == check.id, Event.created_at < cutoff)
+        ).all()
+        assert len(remaining_old) == 0
+
+        files = list(Path(archive_dir).glob("events_*.ndjson"))
+        assert files
+        archived = []
+        for p in files:
+            lines = p.read_text(encoding="utf-8").splitlines()
+            archived.extend(json.loads(line) for line in lines if line.strip())
+        own_rows = [
+            row
+            for row in archived
+            if row.get("check_id") == check.id and row.get("project_id") == project.id
+        ]
+        assert len(own_rows) == 2
+        assert {row.get("message") for row in own_rows} == {"old-a", "old-b"}
+        assert all(row.get("_archive_table") == "events" for row in own_rows)
+
+        log = session.exec(
+            select(AuditLog).where(AuditLog.action == "raw_retention_pruned").order_by(AuditLog.id.desc())
+        ).first()
+        assert log is not None
+        details = json.loads(log.details or "{}")
+        assert int(details.get("archived", {}).get("events") or 0) >= 2
+        assert details.get("strategy", {}).get("archive_enabled") is True
