@@ -741,6 +741,111 @@ def test_script_check_failure(tmp_path, monkeypatch):
         assert "exit=2" in (called["reason"] or "")
 
 
+def test_script_check_strict_isolation_blocks_host_executor(tmp_path, monkeypatch):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_script_iso.sqlite'}"
+    os.environ["CUSTOM_CHECKS_DIR"] = str(tmp_path / "custom_checks_iso")
+
+    from sqlmodel import Session
+    from src import db as dbmod
+    from src.models import Project, Check, CheckType, CheckStatus
+    from src import worker
+
+    dbmod.create_db_and_tables()
+    custom_dir = tmp_path / "custom_checks_iso"
+    custom_dir.mkdir(parents=True, exist_ok=True)
+    script = custom_dir / "ok.py"
+    script.write_text("print('ok')\n", encoding="utf-8")
+
+    monkeypatch.setenv("SCRIPT_CHECK_ISOLATION_REQUIRED", "1")
+    monkeypatch.setenv("SCRIPT_CHECK_EXECUTOR", "host")
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="proj_script_iso")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        chk = Check(
+            project_id=project.id,
+            name="script_iso",
+            type=CheckType.SCRIPT,
+            script_path="ok.py",
+            interval=60,
+            timeout=2,
+            retries=1,
+            status=CheckStatus.UP,
+            alert_enabled=True,
+            alert_after=1,
+            alert_cooldown=0,
+        )
+        session.add(chk)
+        session.commit()
+        session.refresh(chk)
+
+        called = {}
+
+        def fake_notify_down(chk2, proj, reason=None):
+            called["reason"] = reason
+
+        monkeypatch.setattr(worker, "notify_down", fake_notify_down)
+        worker.scan_checks_once(session)
+
+        session.refresh(chk)
+        assert chk.status == CheckStatus.DOWN
+        assert "sandbox_required" in (called.get("reason") or "")
+
+
+def test_script_check_uses_docker_executor_command(tmp_path, monkeypatch):
+    os.environ["CUSTOM_CHECKS_DIR"] = str(tmp_path / "custom_checks_docker")
+
+    from src.models import Project, Check, CheckType
+    from src import worker
+
+    custom_dir = tmp_path / "custom_checks_docker"
+    custom_dir.mkdir(parents=True, exist_ok=True)
+    script = custom_dir / "ok.py"
+    script.write_text("print('ok')\n", encoding="utf-8")
+
+    monkeypatch.setenv("SCRIPT_CHECK_EXECUTOR", "docker")
+    monkeypatch.setenv("SCRIPT_CHECK_DOCKER_IMAGE", "python:3.11-alpine")
+    monkeypatch.setenv("SCRIPT_CHECK_MAX_MEMORY_MB", "128")
+    monkeypatch.setenv("SCRIPT_CHECK_MAX_PIDS", "32")
+    monkeypatch.setenv("SCRIPT_CHECK_MAX_CPUS", "0.25")
+    monkeypatch.setenv("SCRIPT_CHECK_DOCKER_USER", "65534:65534")
+
+    captured = {}
+
+    def fake_run(cmd, timeout_s, env):
+        captured["cmd"] = cmd
+        captured["timeout_s"] = timeout_s
+        captured["env"] = env
+        return 0, "ok", "", False
+
+    monkeypatch.setattr(worker, "_run_subprocess_sandboxed", fake_run)
+
+    check = Check(
+        project_id=1,
+        name="script_docker",
+        type=CheckType.SCRIPT,
+        script_path="ok.py",
+        script_args='["--probe"]',
+    )
+    project = Project(id=1, name="proj_script_docker")
+
+    ok, msg, latency_ms = worker._script_check(check, project, timeout=3, retries=1)
+    assert ok is True
+    assert msg == "ok"
+    assert latency_ms is not None
+    cmd = captured["cmd"]
+    assert cmd[:2] == ["docker", "run"]
+    assert "--network" in cmd and "none" in cmd
+    assert "--read-only" in cmd
+    assert "python:3.11-alpine" in cmd
+    assert any(part.endswith(":/checks:ro") for part in cmd)
+    assert "/checks/ok.py" in cmd
+    assert "--probe" in cmd
+
+
 def test_check_schema_requires_script_path_for_script_type():
     from src.routers.checks import CheckCreate
 

@@ -545,8 +545,7 @@ def _resolve_script_path(script_path: str) -> Optional[str]:
     if any(p == ".." for p in parts):
         return None
 
-    base_dir = os.environ.get("CUSTOM_CHECKS_DIR") or os.path.join(os.getcwd(), "custom_checks")
-    base_real = os.path.realpath(base_dir)
+    base_real = os.path.realpath(os.environ.get("CUSTOM_CHECKS_DIR") or os.path.join(os.getcwd(), "custom_checks"))
     full_real = os.path.realpath(os.path.join(base_real, *parts))
 
     # ensure path stays under base dir
@@ -556,6 +555,82 @@ def _resolve_script_path(script_path: str) -> Optional[str]:
     if not os.path.isfile(full_real):
         return None
     return full_real
+
+
+def _script_executor_mode() -> str:
+    raw = (os.environ.get("SCRIPT_CHECK_EXECUTOR") or "host").strip().lower()
+    if raw in ("", "local"):
+        return "host"
+    return raw
+
+
+def _script_isolation_required() -> bool:
+    raw = (os.environ.get("SCRIPT_CHECK_ISOLATION_REQUIRED") or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _build_script_command(resolved_script_path: str, args: list[str], env: dict) -> tuple[Optional[list[str]], Optional[str]]:
+    mode = _script_executor_mode()
+    if mode == "host":
+        cmd = [sys.executable, resolved_script_path] if resolved_script_path.endswith(".py") else [resolved_script_path]
+        cmd.extend(args)
+        return cmd, None
+
+    if mode == "docker":
+        image = (os.environ.get("SCRIPT_CHECK_DOCKER_IMAGE") or "python:3.11-alpine").strip()
+        if not image:
+            return None, "docker_image_not_configured"
+
+        base_real = os.path.realpath(os.environ.get("CUSTOM_CHECKS_DIR") or os.path.join(os.getcwd(), "custom_checks"))
+        try:
+            relative = os.path.relpath(resolved_script_path, base_real).replace("\\", "/")
+        except ValueError:
+            return None, "script_path_outside_base"
+        if relative.startswith("../") or relative == "..":
+            return None, "script_path_outside_base"
+
+        memory_mb = max(32, int(os.environ.get("SCRIPT_CHECK_MAX_MEMORY_MB", "256")))
+        pids_limit = max(8, int(os.environ.get("SCRIPT_CHECK_MAX_PIDS", "64")))
+        max_cpus = (os.environ.get("SCRIPT_CHECK_MAX_CPUS") or "0.50").strip() or "0.50"
+        docker_user = (os.environ.get("SCRIPT_CHECK_DOCKER_USER") or "65534:65534").strip()
+        mount_spec = f"{base_real}:/checks:ro"
+
+        cmd = [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--pids-limit",
+            str(pids_limit),
+            "--memory",
+            f"{memory_mb}m",
+            "--cpus",
+            max_cpus,
+            "-v",
+            mount_spec,
+            "-w",
+            "/checks",
+        ]
+        if docker_user:
+            cmd.extend(["--user", docker_user])
+        for key, value in env.items():
+            if key.startswith("LASTPING_"):
+                cmd.extend(["-e", f"{key}={value}"])
+
+        cmd.append(image)
+        container_script = f"/checks/{relative}"
+        if resolved_script_path.endswith(".py"):
+            cmd.extend(["python", container_script])
+        else:
+            cmd.append(container_script)
+        cmd.extend(args)
+        return cmd, None
+
+    return None, f"unsupported_script_executor:{mode}"
 
 
 def _run_subprocess_sandboxed(cmd: list[str], timeout_s: int, env: dict) -> tuple[int, str, str, bool]:
@@ -609,7 +684,12 @@ def _run_subprocess_sandboxed(cmd: list[str], timeout_s: int, env: dict) -> tupl
         except Exception:
             pass
 
-    proc = subprocess.Popen(cmd, **popen_kwargs)  # noqa: S603
+    try:
+        proc = subprocess.Popen(cmd, **popen_kwargs)  # noqa: S603
+    except FileNotFoundError as exc:
+        return 127, "", str(exc), False
+    except Exception as exc:
+        return 126, "", str(exc), False
     try:
         out, err = proc.communicate(timeout=timeout_s)
         return proc.returncode or 0, out or "", err or "", False
@@ -643,9 +723,6 @@ def _script_check(check: Check, project: Project, timeout: int, retries: int) ->
         return False, f"script_not_found:{script_path}", None
 
     args = _parse_script_args(getattr(check, "script_args", None))
-    # If the script is a python file, run it with the current interpreter for portability.
-    cmd = [sys.executable, resolved] if resolved.endswith(".py") else [resolved]
-    cmd.extend(args)
 
     env = {
         "PATH": os.environ.get("PATH", ""),
@@ -655,6 +732,13 @@ def _script_check(check: Check, project: Project, timeout: int, retries: int) ->
         "LASTPING_CHECK_NAME": str(getattr(check, "name", "")),
         "LASTPING_CHECK_TYPE": str(getattr(check, "type", "")),
     }
+    mode = _script_executor_mode()
+    if _script_isolation_required() and mode == "host":
+        return False, "sandbox_required:set SCRIPT_CHECK_EXECUTOR=docker", None
+
+    cmd, build_error = _build_script_command(resolved, args, env)
+    if not cmd:
+        return False, build_error or "script_executor_error", None
 
     last_reason = "unknown"
     for attempt in range(max(1, int(retries or 1))):
