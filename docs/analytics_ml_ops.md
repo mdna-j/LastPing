@@ -6,13 +6,19 @@ This runbook covers scheduled training, quality monitoring, and drift handling f
 
 - Workflow: `.github/workflows/predictive_model_ops.yml`
 - Schedule: daily (`cron: 10 5 * * *`)
-- DB secret: `ANALYTICS_DATABASE_URL`
+- Required scheduled config:
+  - Secret: `ANALYTICS_DATABASE_URL`
+  - Variable: `MODEL_OPS_OWNER`
+  - Secret: `MODEL_OPS_ALERT_WEBHOOK_URL`
 
 Each run:
 1. Trains seasonal models (`seasonal_hourly_v1`) for all projects.
 2. Evaluates active models over a recent window.
 3. Persists quality rows to `predictive_model_quality`.
 4. Uploads `artifacts/predictive_model_ops.json`.
+5. Uploads readiness/evidence artifacts:
+   - `artifacts/predictive_model_ops_readiness.json`
+   - `artifacts/predictive_model_ops_evidence.json`
 
 ## Manual Run
 

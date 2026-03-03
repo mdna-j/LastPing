@@ -71,6 +71,44 @@ jobs:
           if [ -z "$MODEL_OPS_OWNER" ]; then
             missing+=("MODEL_OPS_OWNER")
           fi
+          if [ -z "$MODEL_OPS_ALERT_WEBHOOK_URL" ]; then
+            missing+=("MODEL_OPS_ALERT_WEBHOOK_URL")
+          fi
+
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          event_name = os.getenv("GITHUB_EVENT_NAME", "unknown")
+          missing = []
+          if not os.getenv("DATABASE_URL"):
+              missing.append("ANALYTICS_DATABASE_URL")
+          if not os.getenv("MODEL_OPS_OWNER"):
+              missing.append("MODEL_OPS_OWNER")
+          if not os.getenv("MODEL_OPS_ALERT_WEBHOOK_URL"):
+              missing.append("MODEL_OPS_ALERT_WEBHOOK_URL")
+
+          record = {
+              "status": "ready" if not missing else "missing_config",
+              "event": event_name,
+              "required_for_schedule": [
+                  "ANALYTICS_DATABASE_URL",
+                  "MODEL_OPS_OWNER",
+                  "MODEL_OPS_ALERT_WEBHOOK_URL",
+              ],
+              "missing": missing,
+              "configured": {
+                  "analytics_database_url": bool(os.getenv("DATABASE_URL")),
+                  "model_ops_owner": bool(os.getenv("MODEL_OPS_OWNER")),
+                  "model_ops_alert_webhook_url": bool(os.getenv("MODEL_OPS_ALERT_WEBHOOK_URL")),
+              },
+          }
+          Path("artifacts/predictive_model_ops_readiness.json").write_text(
+              json.dumps(record, indent=2),
+              encoding="utf-8",
+          )
+          PY
 
           if [ "${#missing[@]}" -gt 0 ] && [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
             echo "::error::Missing required scheduled configuration: ${missing[*]}"
@@ -125,15 +163,30 @@ jobs:
 
           p = Path("artifacts/predictive_model_ops.json")
           data = json.loads(p.read_text(encoding="utf-8"))
+          readiness_path = Path("artifacts/predictive_model_ops_readiness.json")
+          readiness = {}
+          if readiness_path.exists():
+              readiness = json.loads(readiness_path.read_text(encoding="utf-8"))
           totals = data.get("totals", {})
           owner = os.getenv("MODEL_OPS_OWNER") or "unassigned"
           strict_mode = os.getenv("STRICT_MODE") or "false"
           event_name = os.getenv("GITHUB_EVENT_NAME") or "unknown"
+          run_url = "{}/{}/actions/runs/{}".format(
+              os.getenv("GITHUB_SERVER_URL"),
+              os.getenv("GITHUB_REPOSITORY"),
+              os.getenv("GITHUB_RUN_ID"),
+          )
 
           lines = ["## Predictive Model Ops", ""]
           lines.append(f"- Event: `{event_name}`")
+          lines.append(f"- Run URL: {run_url}")
           lines.append(f"- Owner: `{owner}`")
           lines.append(f"- Strict mode: `{strict_mode}`")
+          if readiness:
+              lines.append(f"- Config readiness: `{readiness.get('status', 'unknown')}`")
+              missing = readiness.get("missing", [])
+              if missing:
+                  lines.append(f"- Missing config: `{', '.join(missing)}`")
 
           status = data.get("status")
           if status in {"skipped", "failed_config"}:
@@ -216,6 +269,50 @@ jobs:
           elif [ -f artifacts/predictive_model_ops_alert.json ] && [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
             echo "::warning::Drift detected but MODEL_OPS_ALERT_WEBHOOK_URL is not configured."
           fi
+
+      - name: Write run evidence
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          result_path = Path("artifacts/predictive_model_ops.json")
+          readiness_path = Path("artifacts/predictive_model_ops_readiness.json")
+
+          result = {}
+          readiness = {}
+          if result_path.exists():
+              result = json.loads(result_path.read_text(encoding="utf-8"))
+          if readiness_path.exists():
+              readiness = json.loads(readiness_path.read_text(encoding="utf-8"))
+
+          evidence = {
+              "captured_at_utc": datetime.now(timezone.utc).isoformat(),
+              "event": os.getenv("GITHUB_EVENT_NAME"),
+              "workflow": os.getenv("GITHUB_WORKFLOW"),
+              "run_id": os.getenv("GITHUB_RUN_ID"),
+              "run_number": os.getenv("GITHUB_RUN_NUMBER"),
+              "run_attempt": os.getenv("GITHUB_RUN_ATTEMPT"),
+              "run_url": "{}/{}/actions/runs/{}".format(
+                  os.getenv("GITHUB_SERVER_URL"),
+                  os.getenv("GITHUB_REPOSITORY"),
+                  os.getenv("GITHUB_RUN_ID"),
+              ),
+              "owner_configured": bool(os.getenv("MODEL_OPS_OWNER")),
+              "webhook_configured": bool(os.getenv("MODEL_OPS_ALERT_WEBHOOK_URL")),
+              "database_configured": bool(os.getenv("DATABASE_URL")),
+              "readiness": readiness,
+              "result": result,
+          }
+
+          Path("artifacts/predictive_model_ops_evidence.json").write_text(
+              json.dumps(evidence, indent=2),
+              encoding="utf-8",
+          )
+          PY
 
       - name: Upload artifacts
         if: always()
