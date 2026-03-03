@@ -116,23 +116,23 @@ def _record_check_result(
                 ).first()
             if exists is not None:
                 return
-        row = CheckResult(
-            check_id=check.id,
-            project_id=check.project_id,
-            incident_id=incident_id,
-            run_key=run_key,
-            status=status,
-            latency_ms=latency_ms,
-            error_message=error_message,
-            created_at=created_at,
-        )
-        session.add(row)
-        session.commit()
+        with session.begin_nested():
+            row = CheckResult(
+                check_id=check.id,
+                project_id=check.project_id,
+                incident_id=incident_id,
+                run_key=run_key,
+                status=status,
+                latency_ms=latency_ms,
+                error_message=error_message,
+                created_at=created_at,
+            )
+            session.add(row)
+            session.flush()
     except IntegrityError:
         # Unique (check_id, run_key) collisions are expected on retries.
-        session.rollback()
+        return
     except Exception:
-        session.rollback()
         logger.exception("Error recording check evidence for check %s", getattr(check, "id", None))
 
 
@@ -216,13 +216,12 @@ def _get_or_create_open_incident(
         group_id=group_root,
         open_run_key=run_key,
     )
-    session.add(row)
     try:
-        session.commit()
-        session.refresh(row)
+        with session.begin_nested():
+            session.add(row)
+            session.flush()
         return row, True
     except IntegrityError:
-        session.rollback()
         existing = _get_open_incident(session, check.id)
         if existing is not None:
             return existing, False
@@ -238,7 +237,6 @@ def _get_or_create_open_incident(
         logger.exception("Failed to create open incident for check %s", getattr(check, "id", None))
         return None, False
     except Exception:
-        session.rollback()
         logger.exception("Failed to create open incident for check %s", getattr(check, "id", None))
         return None, False
 
@@ -253,15 +251,14 @@ def _resolve_open_incident(session: Session, incident: Optional[Incident], *, no
     incident.resolved_at = now
     incident.status = "resolved"
     incident.resolve_run_key = run_key
-    session.add(incident)
     try:
-        session.commit()
+        with session.begin_nested():
+            session.add(incident)
+            session.flush()
         return True
     except IntegrityError:
-        session.rollback()
         return False
     except Exception:
-        session.rollback()
         logger.exception("Failed to resolve incident %s", getattr(incident, "id", None))
         return False
 
@@ -2356,6 +2353,18 @@ def scan_checks_once(session: Session):
                             lease_owner=lease_owner,
                             lease_fence=lease_fence,
                         )
+                        _record_check_result(
+                            session,
+                            check,
+                            run_key=run_key,
+                            status=CheckStatus.DEGRADED,
+                            latency_ms=latency_ms,
+                            error_message=evidence_error,
+                            incident_id=None,
+                            created_at=now,
+                            lease_owner=lease_owner,
+                            lease_fence=lease_fence,
+                        )
                         if not maintenance:
                             _trigger_remediation(session, project, check, EventType.DEGRADED, event_message, now)
                             _ensure_oncall_alert(session, project, check, EventType.DEGRADED, event_message, now)
@@ -2383,6 +2392,18 @@ def scan_checks_once(session: Session):
                                     logger.exception("Error sending DEGRADED alert")
                     else:
                         # still degraded: allow re-alerts after cooldown
+                        _record_check_result(
+                            session,
+                            check,
+                            run_key=run_key,
+                            status=CheckStatus.DEGRADED,
+                            latency_ms=latency_ms,
+                            error_message=evidence_error,
+                            incident_id=None,
+                            created_at=now,
+                            lease_owner=lease_owner,
+                            lease_fence=lease_fence,
+                        )
                         if check.alert_enabled and not maintenance:
                             flapping_suppressed = _should_suppress_alert_due_to_flapping(
                                 session,
@@ -2425,6 +2446,18 @@ def scan_checks_once(session: Session):
                             lease_owner=lease_owner,
                             lease_fence=lease_fence,
                         )
+                        _record_check_result(
+                            session,
+                            check,
+                            run_key=run_key,
+                            status=CheckStatus.UP,
+                            latency_ms=latency_ms,
+                            error_message=None,
+                            incident_id=(open_inc.id if open_inc else None),
+                            created_at=now,
+                            lease_owner=lease_owner,
+                            lease_fence=lease_fence,
+                        )
                         _close_oncall_alerts(session, check.id)
                         if check.alert_enabled and not maintenance:
                             flapping_suppressed = _should_suppress_alert_due_to_flapping(
@@ -2450,6 +2483,18 @@ def scan_checks_once(session: Session):
                                     logger.exception("Error sending recovery alert")
                     else:
                         check.consecutive_failures = 0
+                        _record_check_result(
+                            session,
+                            check,
+                            run_key=run_key,
+                            status=CheckStatus.UP,
+                            latency_ms=latency_ms,
+                            error_message=None,
+                            incident_id=None,
+                            created_at=now,
+                            lease_owner=lease_owner,
+                            lease_fence=lease_fence,
+                        )
                         session.add(check)
                         session.commit()
             else:
@@ -2487,6 +2532,18 @@ def scan_checks_once(session: Session):
                         run_key=run_key,
                         event_type=event_type,
                         message=event_message,
+                        incident_id=open_inc.id,
+                        created_at=now,
+                        lease_owner=lease_owner,
+                        lease_fence=lease_fence,
+                    )
+                    _record_check_result(
+                        session,
+                        check,
+                        run_key=run_key,
+                        status=CheckStatus.DOWN,
+                        latency_ms=None,
+                        error_message=reason,
                         incident_id=open_inc.id,
                         created_at=now,
                         lease_owner=lease_owner,
@@ -2531,11 +2588,23 @@ def scan_checks_once(session: Session):
                                         session.commit()
                                     except Exception:
                                         logger.exception("Error sending DOWN alert")
-                            _trigger_check_escalation(session, project, check, open_inc, now, reason)
+                        _trigger_check_escalation(session, project, check, open_inc, now, reason)
                     else:
                         session.add(check)
                         session.commit()
                 else:
+                    _record_check_result(
+                        session,
+                        check,
+                        run_key=run_key,
+                        status=CheckStatus.DOWN,
+                        latency_ms=None,
+                        error_message=evidence_error,
+                        incident_id=evidence_incident_id,
+                        created_at=now,
+                        lease_owner=lease_owner,
+                        lease_fence=lease_fence,
+                    )
                     should_alert = check.alert_enabled and (check.consecutive_failures >= (check.alert_after or 1))
                     flapping_suppressed = False
                     if should_alert and not maintenance:
@@ -2575,18 +2644,6 @@ def scan_checks_once(session: Session):
                     else:
                         session.add(check)
                         session.commit()
-            _record_check_result(
-                session,
-                check,
-                run_key=run_key,
-                status=evidence_status,
-                latency_ms=latency_ms,
-                error_message=evidence_error,
-                incident_id=evidence_incident_id,
-                created_at=now,
-                lease_owner=lease_owner,
-                lease_fence=lease_fence,
-            )
             try:
                 check.next_run = now + timedelta(seconds=interval)
                 session.add(check)

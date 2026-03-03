@@ -1388,6 +1388,76 @@ def test_incident_open_run_key_idempotency(tmp_path):
         assert rows[0].open_run_key == run_key
 
 
+def test_evidence_helpers_do_not_commit_outer_session(tmp_path, monkeypatch):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_evidence_txn.sqlite'}"
+
+    from sqlmodel import Session, select
+    from src import db as dbmod
+    from src.models import Project, Check, CheckType, CheckStatus, Incident, Event, EventType, CheckResult
+    from src import worker
+
+    dbmod.create_db_and_tables()
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="proj_evidence_txn")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        check = Check(
+            project_id=project.id,
+            name="http_evidence_txn",
+            type=CheckType.HTTP,
+            url="http://example.invalid/health",
+            status=CheckStatus.UP,
+        )
+        session.add(check)
+        session.commit()
+        session.refresh(check)
+        check_id = check.id
+
+        # These helpers should participate in the caller's transaction and
+        # never commit independently.
+        monkeypatch.setattr(session, "commit", lambda: (_ for _ in ()).throw(AssertionError("unexpected commit from helper")))
+
+        now = datetime.utcnow()
+        run_key = "poll:txn:12345"
+        incident, created = worker._get_or_create_open_incident(
+            session,
+            check,
+            signature="timeout",
+            now=now,
+            run_key=run_key,
+        )
+        assert incident is not None
+        assert created is True
+
+        worker._record_event(
+            session,
+            check,
+            run_key=run_key,
+            event_type=EventType.DOWN,
+            message="timeout",
+            incident_id=incident.id,
+            created_at=now,
+        )
+        worker._record_check_result(
+            session,
+            check,
+            run_key=run_key,
+            status=CheckStatus.DOWN,
+            latency_ms=None,
+            error_message="timeout",
+            incident_id=incident.id,
+            created_at=now,
+        )
+
+        # Same-session reads should see pending evidence without an explicit commit.
+        assert session.exec(select(Incident).where(Incident.check_id == check_id)).first() is not None
+        assert session.exec(select(Event).where(Event.check_id == check_id)).first() is not None
+        assert session.exec(select(CheckResult).where(CheckResult.check_id == check_id)).first() is not None
+
+
 def test_raw_retention_prunes_old_events_results_anomalies_heartbeats(tmp_path, monkeypatch):
     os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_raw_retention.sqlite'}"
     monkeypatch.setenv("RAW_RETENTION_ENABLED", "1")
