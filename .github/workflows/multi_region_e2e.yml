@@ -2,6 +2,32 @@ name: Multi-Region E2E
 
 on:
   workflow_dispatch:
+    inputs:
+      staging_signoff:
+        description: "Record formal staging operational signoff evidence"
+        required: false
+        default: false
+        type: boolean
+      staging_environment:
+        description: "Staging environment name (e.g. staging-us)"
+        required: false
+        type: string
+      signoff_owner:
+        description: "Person/team approving signoff"
+        required: false
+        type: string
+      change_ticket:
+        description: "Change ticket / CAB reference"
+        required: false
+        type: string
+      evidence_link:
+        description: "Link to dashboard/logs/runbook evidence"
+        required: false
+        type: string
+      signoff_notes:
+        description: "Optional notes for this signoff"
+        required: false
+        type: string
   schedule:
     - cron: "17 */6 * * *"
     - cron: "41 3 * * *"
@@ -250,3 +276,103 @@ jobs:
         if: always()
         run: |
           docker compose down -v
+
+  staging_signoff:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.staging_signoff == 'true'
+    needs: [e2e]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate Required Signoff Inputs
+        env:
+          STAGING_ENVIRONMENT: ${{ github.event.inputs.staging_environment }}
+          SIGNOFF_OWNER: ${{ github.event.inputs.signoff_owner }}
+          CHANGE_TICKET: ${{ github.event.inputs.change_ticket }}
+          EVIDENCE_LINK: ${{ github.event.inputs.evidence_link }}
+        run: |
+          missing=0
+          if [ -z "$STAGING_ENVIRONMENT" ]; then
+            echo "Missing required input: staging_environment"
+            missing=1
+          fi
+          if [ -z "$SIGNOFF_OWNER" ]; then
+            echo "Missing required input: signoff_owner"
+            missing=1
+          fi
+          if [ -z "$CHANGE_TICKET" ]; then
+            echo "Missing required input: change_ticket"
+            missing=1
+          fi
+          if [ -z "$EVIDENCE_LINK" ]; then
+            echo "Missing required input: evidence_link"
+            missing=1
+          fi
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
+      - name: Build Staging Signoff Evidence
+        env:
+          STAGING_ENVIRONMENT: ${{ github.event.inputs.staging_environment }}
+          SIGNOFF_OWNER: ${{ github.event.inputs.signoff_owner }}
+          CHANGE_TICKET: ${{ github.event.inputs.change_ticket }}
+          EVIDENCE_LINK: ${{ github.event.inputs.evidence_link }}
+          SIGNOFF_NOTES: ${{ github.event.inputs.signoff_notes }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          mkdir -p artifacts
+          python - <<'PY'
+          import datetime
+          import json
+          import os
+          from pathlib import Path
+
+          record = {
+              "status": "approved",
+              "recorded_at_utc": datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+              "workflow": "Multi-Region E2E",
+              "run_id": os.environ.get("GITHUB_RUN_ID"),
+              "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
+              "run_url": os.environ.get("RUN_URL"),
+              "repository": os.environ.get("GITHUB_REPOSITORY"),
+              "ref": os.environ.get("GITHUB_REF"),
+              "sha": os.environ.get("GITHUB_SHA"),
+              "actor": os.environ.get("GITHUB_ACTOR"),
+              "staging_environment": os.environ.get("STAGING_ENVIRONMENT"),
+              "signoff_owner": os.environ.get("SIGNOFF_OWNER"),
+              "change_ticket": os.environ.get("CHANGE_TICKET"),
+              "evidence_link": os.environ.get("EVIDENCE_LINK"),
+              "notes": os.environ.get("SIGNOFF_NOTES", ""),
+          }
+          Path("artifacts/staging_signoff.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+          Path("artifacts/staging_signoff.md").write_text(
+              "\n".join(
+                  [
+                      "## Staging Operational Signoff",
+                      "",
+                      f"- Status: `APPROVED`",
+                      f"- Environment: `{record['staging_environment']}`",
+                      f"- Signoff owner: `{record['signoff_owner']}`",
+                      f"- Change ticket: `{record['change_ticket']}`",
+                      f"- Evidence: {record['evidence_link']}",
+                      f"- Commit: `{record['sha']}`",
+                      f"- Run: {record['run_url']}",
+                      f"- Recorded (UTC): `{record['recorded_at_utc']}`",
+                  ]
+              ) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Upload Staging Signoff Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-signoff-${{ github.run_id }}
+          path: artifacts/staging_signoff.*
+          retention-days: 30
+
+      - name: Publish Staging Signoff Summary
+        run: |
+          cat artifacts/staging_signoff.md >> "$GITHUB_STEP_SUMMARY"
