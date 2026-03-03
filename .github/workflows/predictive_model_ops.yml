@@ -43,14 +43,16 @@ jobs:
     runs-on: ubuntu-latest
     env:
       DATABASE_URL: ${{ secrets.ANALYTICS_DATABASE_URL }}
+      MODEL_OPS_OWNER: ${{ vars.MODEL_OPS_OWNER }}
+      MODEL_OPS_ALERT_WEBHOOK_URL: ${{ secrets.MODEL_OPS_ALERT_WEBHOOK_URL }}
       DAYS: ${{ inputs.days }}
       MIN_EVENTS: ${{ inputs.min_events }}
       EVAL_HOURS: ${{ inputs.eval_hours }}
       MIN_SAMPLES: ${{ inputs.min_samples }}
       DRIFT_RATIO_THRESHOLD: ${{ inputs.drift_ratio_threshold }}
       MAE_THRESHOLD: ${{ inputs.mae_threshold }}
-      STRICT_MODE: ${{ inputs.strict }}
-      DISABLE_DRIFTED: ${{ inputs.disable_drifted }}
+      STRICT_MODE: ${{ github.event_name == 'schedule' && 'true' || inputs.strict }}
+      DISABLE_DRIFTED: ${{ github.event_name == 'schedule' && 'true' || inputs.disable_drifted }}
     steps:
       - uses: actions/checkout@v4
 
@@ -58,6 +60,27 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      - name: Validate scheduled configuration
+        run: |
+          mkdir -p artifacts
+          missing=()
+          if [ -z "$DATABASE_URL" ]; then
+            missing+=("ANALYTICS_DATABASE_URL")
+          fi
+          if [ -z "$MODEL_OPS_OWNER" ]; then
+            missing+=("MODEL_OPS_OWNER")
+          fi
+
+          if [ "${#missing[@]}" -gt 0 ] && [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
+            echo "::error::Missing required scheduled configuration: ${missing[*]}"
+            printf '%s\n' '{"status":"failed_config","reason":"Missing required scheduled configuration"}' > artifacts/predictive_model_ops.json
+            exit 1
+          fi
+
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::warning::Missing configuration for manual run: ${missing[*]}"
+          fi
 
       - name: Install dependencies
         run: |
@@ -69,7 +92,7 @@ jobs:
         run: |
           mkdir -p artifacts
           if [ -z "$DATABASE_URL" ]; then
-            echo "ANALYTICS_DATABASE_URL not set; skipping predictive model ops."
+            echo "::warning::ANALYTICS_DATABASE_URL not set; skipping predictive model ops for manual run."
             printf '%s\n' '{"status":"skipped","reason":"ANALYTICS_DATABASE_URL not configured"}' > artifacts/predictive_model_ops.json
             exit 0
           fi
@@ -95,8 +118,103 @@ jobs:
         if: always()
         run: |
           if [ -f artifacts/predictive_model_ops.json ]; then
-            python -c "import json; from pathlib import Path; p=Path('artifacts/predictive_model_ops.json'); data=json.loads(p.read_text(encoding='utf-8')); lines=['## Predictive Model Ops']; t=data.get('totals', {}); lines += ['','- Status: SKIPPED','- Reason: %s' % data.get('reason','unknown')] if data.get('status') == 'skipped' else ['','- Projects: %s' % t.get('projects',0),'- Trained models: %s' % t.get('trained',0),'- Evaluated models: %s' % t.get('evaluated',0),'- Drifted: %s' % t.get('drifted',0),'- OK: %s' % t.get('ok',0),'- Insufficient data: %s' % t.get('insufficient_data',0),'- Retired superseded: %s' % t.get('retired_superseded',0),'- Disabled drifted: %s' % t.get('disabled_drifted',0)]; Path('artifacts/predictive_model_ops_summary.md').write_text('\n'.join(lines)+'\n', encoding='utf-8')"
+            python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          p = Path("artifacts/predictive_model_ops.json")
+          data = json.loads(p.read_text(encoding="utf-8"))
+          totals = data.get("totals", {})
+          owner = os.getenv("MODEL_OPS_OWNER") or "unassigned"
+          strict_mode = os.getenv("STRICT_MODE") or "false"
+          event_name = os.getenv("GITHUB_EVENT_NAME") or "unknown"
+
+          lines = ["## Predictive Model Ops", ""]
+          lines.append(f"- Event: `{event_name}`")
+          lines.append(f"- Owner: `{owner}`")
+          lines.append(f"- Strict mode: `{strict_mode}`")
+
+          status = data.get("status")
+          if status in {"skipped", "failed_config"}:
+              lines.append(f"- Status: `{str(status).upper()}`")
+              lines.append(f"- Reason: `{data.get('reason', 'unknown')}`")
+          else:
+              lines.append(f"- Projects: `{totals.get('projects', 0)}`")
+              lines.append(f"- Trained models: `{totals.get('trained', 0)}`")
+              lines.append(f"- Evaluated models: `{totals.get('evaluated', 0)}`")
+              lines.append(f"- Drifted: `{totals.get('drifted', 0)}`")
+              lines.append(f"- OK: `{totals.get('ok', 0)}`")
+              lines.append(f"- Insufficient data: `{totals.get('insufficient_data', 0)}`")
+              lines.append(f"- Retired superseded: `{totals.get('retired_superseded', 0)}`")
+              lines.append(f"- Disabled drifted: `{totals.get('disabled_drifted', 0)}`")
+
+          Path("artifacts/predictive_model_ops_summary.md").write_text(
+              "\n".join(lines) + "\n",
+              encoding="utf-8",
+          )
+          PY
             cat artifacts/predictive_model_ops_summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Notify drift owner
+        if: always()
+        run: |
+          if [ ! -f artifacts/predictive_model_ops.json ]; then
+            exit 0
+          fi
+
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          p = Path("artifacts/predictive_model_ops.json")
+          data = json.loads(p.read_text(encoding="utf-8"))
+          status = data.get("status")
+          totals = data.get("totals", {})
+          drifted = int(totals.get("drifted", 0) or 0)
+          owner = os.getenv("MODEL_OPS_OWNER") or "unassigned"
+          run_url = "{}/{}/actions/runs/{}".format(
+              os.getenv("GITHUB_SERVER_URL"),
+              os.getenv("GITHUB_REPOSITORY"),
+              os.getenv("GITHUB_RUN_ID"),
+          )
+
+          lines = []
+          if status in {"skipped", "failed_config"}:
+              lines.append(f"- Drift notification: not sent (`{status}`)")
+          elif drifted > 0:
+              lines.append(f"- Drift notification owner: `{owner}`")
+              lines.append(f"- Drifted models: `{drifted}`")
+              payload = {
+                  "text": (
+                      f"[LastPing][Predictive Ops] Drift detected ({drifted} model(s)). "
+                      f"Owner: {owner}. Run: {run_url}"
+                  )
+              }
+              Path("artifacts/predictive_model_ops_alert.json").write_text(
+                  json.dumps(payload),
+                  encoding="utf-8",
+              )
+          else:
+              lines.append("- Drift notification: not required (`0` drifted)")
+
+          Path("artifacts/predictive_model_ops_alert.md").write_text(
+              "\n".join(lines) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+          cat artifacts/predictive_model_ops_alert.md >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -f artifacts/predictive_model_ops_alert.json ] && [ -n "$MODEL_OPS_ALERT_WEBHOOK_URL" ]; then
+            curl -fsS -X POST "$MODEL_OPS_ALERT_WEBHOOK_URL" \
+              -H "Content-Type: application/json" \
+              --data @artifacts/predictive_model_ops_alert.json \
+              || echo "::warning::Failed to post predictive drift notification webhook."
+          elif [ -f artifacts/predictive_model_ops_alert.json ] && [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
+            echo "::warning::Drift detected but MODEL_OPS_ALERT_WEBHOOK_URL is not configured."
           fi
 
       - name: Upload artifacts
