@@ -1,7 +1,8 @@
 from fastapi import FastAPI, Depends
 from fastapi.staticfiles import StaticFiles
 
-from .db import create_db_and_tables, DATABASE_URL
+from . import db as dbmod
+from .db import create_db_and_tables
 from .routers.projects import router as projects_router
 from .routers.checks import router as checks_router
 from .routers.heartbeats import router as heartbeats_router
@@ -27,7 +28,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 @app.on_event("startup")
 def on_startup():
     # Initialize database for local SQLite dev only; migrations handle Postgres.
-    if DATABASE_URL.startswith("sqlite"):
+    if dbmod.get_database_url().startswith("sqlite"):
         create_db_and_tables()
 
 

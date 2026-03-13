@@ -12,7 +12,7 @@ def test_worker_marks_overdue_heartbeat(tmp_path, monkeypatch):
     # import after setting DATABASE_URL so engine is created with test DB
     from sqlmodel import Session, select
     from src import db as dbmod
-    from src.models import Project, Check, CheckType, CheckStatus, Event, EventType
+    from src.models import Project, Check, CheckType, CheckStatus, Event, EventType, Incident, CheckResult
     from src import worker
 
     dbmod.create_db_and_tables()
@@ -55,6 +55,16 @@ def test_worker_marks_overdue_heartbeat(tmp_path, monkeypatch):
 
         events = session.exec(select(Event).where(Event.check_id == check.id)).all()
         assert any(e.event_type == EventType.DOWN for e in events)
+        incident = session.exec(
+            select(Incident).where(Incident.check_id == check.id, Incident.resolved_at == None)
+        ).first()
+        assert incident is not None
+        latest_result = session.exec(
+            select(CheckResult).where(CheckResult.check_id == check.id).order_by(CheckResult.id.desc())
+        ).first()
+        assert latest_result is not None
+        assert latest_result.incident_id == incident.id
+        assert latest_result.status == CheckStatus.DOWN
         assert 'down' in called
 
 
@@ -1563,6 +1573,84 @@ def test_evidence_helpers_do_not_commit_outer_session(tmp_path, monkeypatch):
         assert session.exec(select(Incident).where(Incident.check_id == check_id)).first() is not None
         assert session.exec(select(Event).where(Event.check_id == check_id)).first() is not None
         assert session.exec(select(CheckResult).where(CheckResult.check_id == check_id)).first() is not None
+
+
+def test_compute_uptime_snapshots_batches_commit_once(tmp_path, monkeypatch):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_snapshot_batch.sqlite'}"
+
+    from sqlmodel import Session, select
+    from src import db as dbmod
+    from src.models import Project, Check, CheckType, CheckStatus, Event, EventType, UptimeSnapshot
+    from src import worker
+
+    dbmod.create_db_and_tables()
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="proj_snapshot_batch")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        check_a = Check(
+            project_id=project.id,
+            name="http_snapshot_a",
+            type=CheckType.HTTP,
+            url="http://example.invalid/a",
+            status=CheckStatus.UP,
+        )
+        check_b = Check(
+            project_id=project.id,
+            name="http_snapshot_b",
+            type=CheckType.HTTP,
+            url="http://example.invalid/b",
+            status=CheckStatus.DOWN,
+        )
+        session.add(check_a)
+        session.add(check_b)
+        session.commit()
+        session.refresh(check_a)
+        session.refresh(check_b)
+
+        now = datetime.utcnow()
+        session.add(
+            Event(
+                check_id=check_b.id,
+                project_id=project.id,
+                event_type=EventType.DOWN,
+                message="down",
+                created_at=now - timedelta(hours=2),
+            )
+        )
+        session.add(
+            Event(
+                check_id=check_b.id,
+                project_id=project.id,
+                event_type=EventType.UP,
+                message="up",
+                created_at=now - timedelta(hours=1),
+            )
+        )
+        session.commit()
+
+        commit_count = {"value": 0}
+        original_commit = session.commit
+
+        def counted_commit():
+            commit_count["value"] += 1
+            return original_commit()
+
+        monkeypatch.setattr(session, "commit", counted_commit)
+
+        worker._compute_uptime_snapshots(session, now)
+
+        snapshots = session.exec(
+            select(UptimeSnapshot)
+            .where(UptimeSnapshot.project_id == project.id)
+            .where(UptimeSnapshot.check_id.in_([check_a.id, check_b.id]))
+            .order_by(UptimeSnapshot.id)
+        ).all()
+        assert len(snapshots) == 2
+        assert commit_count["value"] == 1
 
 
 def test_raw_retention_prunes_old_events_results_anomalies_heartbeats(tmp_path, monkeypatch):

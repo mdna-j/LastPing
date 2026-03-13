@@ -1,0 +1,49 @@
+{
+  "generated_at": "2026-03-13T20:47:06.535965",
+  "database": "artifacts\\profiling\\profile.sqlite",
+  "checks_seeded": 40,
+  "events_per_check": 25,
+  "repeat": 3,
+  "results": [
+    {
+      "label": "worker_scan_once",
+      "repeat": 3,
+      "elapsed_seconds": 0.467,
+      "avg_ms": 155.68,
+      "profile": "artifacts\\profiling\\worker_scan_once.prof",
+      "top_functions": "artifacts\\profiling\\worker_scan_once.txt"
+    },
+    {
+      "label": "metrics_availability",
+      "repeat": 3,
+      "elapsed_seconds": 0.1598,
+      "avg_ms": 53.27,
+      "profile": "artifacts\\profiling\\metrics_availability.prof",
+      "top_functions": "artifacts\\profiling\\metrics_availability.txt"
+    },
+    {
+      "label": "analytics_trends",
+      "repeat": 3,
+      "elapsed_seconds": 0.1027,
+      "avg_ms": 34.25,
+      "profile": "artifacts\\profiling\\analytics_trends.prof",
+      "top_functions": "artifacts\\profiling\\analytics_trends.txt"
+    },
+    {
+      "label": "incidents_list",
+      "repeat": 3,
+      "elapsed_seconds": 0.0909,
+      "avg_ms": 30.29,
+      "profile": "artifacts\\profiling\\incidents_list.prof",
+      "top_functions": "artifacts\\profiling\\incidents_list.txt"
+    },
+    {
+      "label": "ui_dashboard_health",
+      "repeat": 3,
+      "elapsed_seconds": 0.0215,
+      "avg_ms": 7.18,
+      "profile": "artifacts\\profiling\\ui_dashboard_health.prof",
+      "top_functions": "artifacts\\profiling\\ui_dashboard_health.txt"
+    }
+  ]
+}

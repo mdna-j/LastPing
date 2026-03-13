@@ -49,6 +49,22 @@ def _now() -> datetime:
     return datetime.utcnow()
 
 
+def _session_has_pending_changes(session: Session) -> bool:
+    return bool(session.new or session.dirty or session.deleted)
+
+
+def _commit_pending(session: Session, *, context: str) -> bool:
+    if not _session_has_pending_changes(session):
+        return False
+    try:
+        session.commit()
+        return True
+    except Exception:
+        session.rollback()
+        logger.exception("Error %s", context)
+        return False
+
+
 def _as_utc_naive(value: datetime) -> datetime:
     """Normalize datetime to UTC-naive for safe comparisons across DB drivers."""
     if value.tzinfo is None:
@@ -1666,6 +1682,7 @@ def _compute_uptime_snapshots(session: Session, now: datetime):
     window_start = now - timedelta(hours=24)
     stmt = select(Check)
     all_checks = session.exec(stmt).all()
+    snapshots: list[UptimeSnapshot] = []
     for c in all_checks:
         ev_stmt = select(Event).where(
             Event.project_id == c.project_id,
@@ -1710,20 +1727,24 @@ def _compute_uptime_snapshots(session: Session, now: datetime):
         if downs:
             mttr = sum(downs) / len(downs)
 
-        snap = UptimeSnapshot(
-            project_id=c.project_id,
-            check_id=c.id,
-            window_start=window_start,
-            window_end=window_end,
-            uptime_percent=uptime_pct,
-            mttr_seconds=mttr,
+        snapshots.append(
+            UptimeSnapshot(
+                project_id=c.project_id,
+                check_id=c.id,
+                window_start=window_start,
+                window_end=window_end,
+                uptime_percent=uptime_pct,
+                mttr_seconds=mttr,
+            )
         )
-        try:
-            session.add(snap)
-            session.commit()
-        except Exception:
-            session.rollback()
-            logger.exception("Failed to persist uptime snapshot for check %s", c.id)
+    if not snapshots:
+        return
+    try:
+        session.add_all(snapshots)
+        session.commit()
+    except Exception:
+        session.rollback()
+        logger.exception("Failed to persist uptime snapshots for %s checks", len(snapshots))
 
 
 def _log_similar_incidents(session: Session, project: Project, incident_id: int, reason: Optional[str]):
@@ -2597,6 +2618,7 @@ def scan_checks_once(session: Session):
             interval = getattr(check, "interval", None) or 60
             if check.next_run is not None and now < check.next_run:
                 continue
+            check.next_run = now + timedelta(seconds=interval)
 
             ok = False
             reason = "unknown"
@@ -2942,12 +2964,8 @@ def scan_checks_once(session: Session):
                     else:
                         session.add(check)
                         session.commit()
-            try:
-                check.next_run = now + timedelta(seconds=interval)
-                session.add(check)
-                session.commit()
-            except Exception:
-                logger.exception("Error persisting next_run for check %s", getattr(check, 'id', None))
+
+        _commit_pending(session, context=f"persisting worker state for check {getattr(check, 'id', None)}")
 
         if not processed_oncall:
             processed_oncall = True
