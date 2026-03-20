@@ -6,8 +6,17 @@
 
 | Scenario | Avg ms | Total s |
 |---|---:|---:|
-| `worker_scan_once` | `155.68` | `0.467` |
-| `metrics_availability` | `53.27` | `0.1598` |
-| `analytics_trends` | `34.25` | `0.1027` |
-| `incidents_list` | `30.29` | `0.0909` |
-| `ui_dashboard_health` | `7.18` | `0.0215` |
+| `worker_scan_once` | `135.89` | `0.4077` |
+| `metrics_availability` | `55.41` | `0.1662` |
+| `metrics_availability_direct` | `41.32` | `0.124` |
+| `analytics_trends` | `34.47` | `0.1034` |
+| `incidents_list` | `31.9` | `0.0957` |
+| `analytics_trends_direct` | `9.31` | `0.0279` |
+| `ui_dashboard_health` | `7.5` | `0.0225` |
+
+## Direct vs HTTP
+
+| HTTP scenario | Direct scenario | HTTP avg ms | Direct avg ms | HTTP overhead ms |
+|---|---|---:|---:|---:|
+| `metrics_availability` | `metrics_availability_direct` | `55.41` | `41.32` | `14.09` |
+| `analytics_trends` | `analytics_trends_direct` | `34.47` | `9.31` | `25.16` |

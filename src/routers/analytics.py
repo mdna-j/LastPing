@@ -67,6 +67,44 @@ def _linear_forecast(values: List[float]) -> tuple[float, float, float]:
     return slope, intercept, next_val
 
 
+def _compute_failure_trends(
+    session: Session,
+    project_id: int,
+    start_dt: datetime,
+    end_dt: datetime,
+    interval: str,
+) -> dict:
+    stmt = select(Event).where(Event.project_id == project_id, Event.created_at >= start_dt, Event.created_at <= end_dt)
+    events = session.exec(stmt).all()
+    buckets: Dict[str, int] = {}
+    interval = interval.lower()
+    if interval not in ("hour", "day", "week"):
+        raise HTTPException(status_code=400, detail="interval must be hour, day, or week")
+
+    def bucket_key(dt: datetime) -> str:
+        if interval == "hour":
+            b = dt.replace(minute=0, second=0, microsecond=0)
+        elif interval == "week":
+            monday = dt - timedelta(days=dt.weekday())
+            b = monday.replace(hour=0, minute=0, second=0, microsecond=0)
+        else:
+            b = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        return b.isoformat()
+
+    for ev in events:
+        if ev.event_type in ("down", "http_failure"):
+            key = bucket_key(ev.created_at)
+            buckets[key] = buckets.get(key, 0) + 1
+    series = [{"bucket_start": k, "down_events": buckets[k]} for k in sorted(buckets.keys())]
+    return {
+        "project_id": project_id,
+        "start": start_dt.isoformat(),
+        "end": end_dt.isoformat(),
+        "interval": interval,
+        "series": series,
+    }
+
+
 class PredictiveTrainIn(BaseModel):
     check_id: Optional[int] = None
     days: conint(ge=1, le=365) = 30
@@ -105,28 +143,7 @@ def failure_trends(project_id: int = Path(..., ge=1), days: int = Query(30, ge=1
     """Return aggregated counts of down events for simple trend analysis."""
     end_dt = datetime.utcnow()
     start_dt = end_dt - timedelta(days=days)
-    stmt = select(Event).where(Event.project_id == project_id, Event.created_at >= start_dt, Event.created_at <= end_dt)
-    events = session.exec(stmt).all()
-    buckets: Dict[str, int] = {}
-    interval = interval.lower()
-    if interval not in ("hour", "day", "week"):
-        raise HTTPException(status_code=400, detail="interval must be hour, day, or week")
-
-    def bucket_key(dt: datetime) -> str:
-        if interval == "hour":
-            b = dt.replace(minute=0, second=0, microsecond=0)
-        elif interval == "week":
-            monday = dt - timedelta(days=dt.weekday())
-            b = monday.replace(hour=0, minute=0, second=0, microsecond=0)
-        else:
-            b = dt.replace(hour=0, minute=0, second=0, microsecond=0)
-        return b.isoformat()
-    for ev in events:
-        if ev.event_type in ("down", "http_failure"):
-            key = bucket_key(ev.created_at)
-            buckets[key] = buckets.get(key, 0) + 1
-    series = [{"bucket_start": k, "down_events": buckets[k]} for k in sorted(buckets.keys())]
-    return {"project_id": project_id, "start": start_dt.isoformat(), "end": end_dt.isoformat(), "interval": interval, "series": series}
+    return _compute_failure_trends(session, project_id, start_dt, end_dt, interval)
 
 
 @router.get("/analytics/patterns")

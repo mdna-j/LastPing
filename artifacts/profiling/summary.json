@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-03-13T20:47:06.535965",
+  "generated_at": "2026-03-20T20:17:52.031573",
   "database": "artifacts\\profiling\\profile.sqlite",
   "checks_seeded": 40,
   "events_per_check": 25,
@@ -8,42 +8,74 @@
     {
       "label": "worker_scan_once",
       "repeat": 3,
-      "elapsed_seconds": 0.467,
-      "avg_ms": 155.68,
+      "elapsed_seconds": 0.4077,
+      "avg_ms": 135.89,
       "profile": "artifacts\\profiling\\worker_scan_once.prof",
       "top_functions": "artifacts\\profiling\\worker_scan_once.txt"
     },
     {
       "label": "metrics_availability",
       "repeat": 3,
-      "elapsed_seconds": 0.1598,
-      "avg_ms": 53.27,
+      "elapsed_seconds": 0.1662,
+      "avg_ms": 55.41,
       "profile": "artifacts\\profiling\\metrics_availability.prof",
       "top_functions": "artifacts\\profiling\\metrics_availability.txt"
     },
     {
+      "label": "metrics_availability_direct",
+      "repeat": 3,
+      "elapsed_seconds": 0.124,
+      "avg_ms": 41.32,
+      "profile": "artifacts\\profiling\\metrics_availability_direct.prof",
+      "top_functions": "artifacts\\profiling\\metrics_availability_direct.txt"
+    },
+    {
       "label": "analytics_trends",
       "repeat": 3,
-      "elapsed_seconds": 0.1027,
-      "avg_ms": 34.25,
+      "elapsed_seconds": 0.1034,
+      "avg_ms": 34.47,
       "profile": "artifacts\\profiling\\analytics_trends.prof",
       "top_functions": "artifacts\\profiling\\analytics_trends.txt"
     },
     {
       "label": "incidents_list",
       "repeat": 3,
-      "elapsed_seconds": 0.0909,
-      "avg_ms": 30.29,
+      "elapsed_seconds": 0.0957,
+      "avg_ms": 31.9,
       "profile": "artifacts\\profiling\\incidents_list.prof",
       "top_functions": "artifacts\\profiling\\incidents_list.txt"
     },
     {
+      "label": "analytics_trends_direct",
+      "repeat": 3,
+      "elapsed_seconds": 0.0279,
+      "avg_ms": 9.31,
+      "profile": "artifacts\\profiling\\analytics_trends_direct.prof",
+      "top_functions": "artifacts\\profiling\\analytics_trends_direct.txt"
+    },
+    {
       "label": "ui_dashboard_health",
       "repeat": 3,
-      "elapsed_seconds": 0.0215,
-      "avg_ms": 7.18,
+      "elapsed_seconds": 0.0225,
+      "avg_ms": 7.5,
       "profile": "artifacts\\profiling\\ui_dashboard_health.prof",
       "top_functions": "artifacts\\profiling\\ui_dashboard_health.txt"
+    }
+  ],
+  "comparisons": [
+    {
+      "http_label": "metrics_availability",
+      "direct_label": "metrics_availability_direct",
+      "http_avg_ms": 55.41,
+      "direct_avg_ms": 41.32,
+      "http_overhead_ms": 14.09
+    },
+    {
+      "http_label": "analytics_trends",
+      "direct_label": "analytics_trends_direct",
+      "http_avg_ms": 34.47,
+      "direct_avg_ms": 9.31,
+      "http_overhead_ms": 25.16
     }
   ]
 }

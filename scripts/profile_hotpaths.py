@@ -77,6 +77,8 @@ def main() -> int:
 
     from src import db as dbmod
     from src.main import app
+    from src.routers.analytics import _compute_failure_trends
+    from src.routers.metrics import _compute_availability_report
     from src.models import (
         Check,
         CheckLease,
@@ -244,6 +246,17 @@ def main() -> int:
         )
         response.raise_for_status()
 
+    def availability_report_direct():
+        with Session(dbmod.engine) as session:
+            payload = _compute_availability_report(
+                session,
+                project_id,
+                datetime.fromisoformat(start),
+                datetime.fromisoformat(end),
+            )
+            if payload.get("project_id") != project_id:
+                raise RuntimeError("Unexpected project id from direct availability profile")
+
     def analytics_trends():
         response = client.get(
             f"/projects/{project_id}/analytics/trends?days=30&interval=day",
@@ -251,16 +264,52 @@ def main() -> int:
         )
         response.raise_for_status()
 
+    def analytics_trends_direct():
+        with Session(dbmod.engine) as session:
+            end_dt = datetime.utcnow()
+            start_dt = end_dt - timedelta(days=30)
+            payload = _compute_failure_trends(
+                session,
+                project_id,
+                start_dt,
+                end_dt,
+                "day",
+            )
+            if payload.get("project_id") != project_id:
+                raise RuntimeError("Unexpected project id from direct trends profile")
+
     scenarios = [
         ("worker_scan_once", worker_scan_once),
         ("ui_dashboard_health", dashboard_health),
         ("incidents_list", incidents_list),
         ("metrics_availability", availability_report),
+        ("metrics_availability_direct", availability_report_direct),
         ("analytics_trends", analytics_trends),
+        ("analytics_trends_direct", analytics_trends_direct),
     ]
 
     results = [profile_call(label, args.repeat, fn, output_dir) for label, fn in scenarios]
     results.sort(key=lambda row: row["avg_ms"], reverse=True)
+    result_map = {row["label"]: row for row in results}
+
+    comparisons = []
+    for http_label, direct_label in (
+        ("metrics_availability", "metrics_availability_direct"),
+        ("analytics_trends", "analytics_trends_direct"),
+    ):
+        http_row = result_map.get(http_label)
+        direct_row = result_map.get(direct_label)
+        if not http_row or not direct_row:
+            continue
+        comparisons.append(
+            {
+                "http_label": http_label,
+                "direct_label": direct_label,
+                "http_avg_ms": http_row["avg_ms"],
+                "direct_avg_ms": direct_row["avg_ms"],
+                "http_overhead_ms": round(http_row["avg_ms"] - direct_row["avg_ms"], 2),
+            }
+        )
 
     summary = {
         "generated_at": datetime.utcnow().isoformat(),
@@ -269,6 +318,7 @@ def main() -> int:
         "events_per_check": args.events_per_check,
         "repeat": args.repeat,
         "results": results,
+        "comparisons": comparisons,
     }
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
@@ -284,6 +334,20 @@ def main() -> int:
     ]
     for row in results:
         lines.append(f"| `{row['label']}` | `{row['avg_ms']}` | `{row['elapsed_seconds']}` |")
+    if comparisons:
+        lines.extend(
+            [
+                "",
+                "## Direct vs HTTP",
+                "",
+                "| HTTP scenario | Direct scenario | HTTP avg ms | Direct avg ms | HTTP overhead ms |",
+                "|---|---|---:|---:|---:|",
+            ]
+        )
+        for row in comparisons:
+            lines.append(
+                f"| `{row['http_label']}` | `{row['direct_label']}` | `{row['http_avg_ms']}` | `{row['direct_avg_ms']}` | `{row['http_overhead_ms']}` |"
+            )
     (output_dir / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     print(json.dumps(summary, indent=2))

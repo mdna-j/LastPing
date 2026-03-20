@@ -1,33 +1,33 @@
-         4965 function calls (4941 primitive calls) in 0.160 seconds
+         4933 function calls (4909 primitive calls) in 0.166 seconds
 
    Ordered by: cumulative time
    List reduced from 319 to 25 due to restriction <25>
 
    ncalls  tottime  percall  cumtime  percall filename:lineno(function)
-        3    0.000    0.000    0.160    0.053 C:\Users\medin\OneDrive\Desktop\LastPing\scripts\profile_hotpaths.py:240(availability_report)
-        3    0.000    0.000    0.160    0.053 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\testclient.py:481(get)
-        3    0.000    0.000    0.160    0.053 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\site-packages\httpx\_client.py:1024(get)
-        3    0.000    0.000    0.160    0.053 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\testclient.py:441(request)
-        3    0.000    0.000    0.159    0.053 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\site-packages\httpx\_client.py:760(request)
-        3    0.000    0.000    0.159    0.053 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\site-packages\httpx\_client.py:868(send)
-        3    0.000    0.000    0.159    0.053 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\site-packages\httpx\_client.py:917(_send_handling_auth)
-        3    0.000    0.000    0.159    0.053 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\site-packages\httpx\_client.py:951(_send_handling_redirects)
-        3    0.000    0.000    0.159    0.053 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\site-packages\httpx\_client.py:988(_send_single_request)
-        3    0.000    0.000    0.158    0.053 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\testclient.py:200(handle_request)
-       37    0.156    0.004    0.156    0.004 {method 'acquire' of '_thread.lock' objects}
-       14    0.000    0.000    0.155    0.011 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\threading.py:295(wait)
-       21    0.000    0.000    0.155    0.007 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\concurrent\futures\_base.py:428(result)
-        9    0.000    0.000    0.154    0.017 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\site-packages\anyio\from_thread.py:319(call)
+        3    0.000    0.000    0.166    0.055 C:\Users\medin\OneDrive\Desktop\LastPing\scripts\profile_hotpaths.py:242(availability_report)
+        3    0.000    0.000    0.166    0.055 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\testclient.py:481(get)
+        3    0.000    0.000    0.166    0.055 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\site-packages\httpx\_client.py:1024(get)
+        3    0.000    0.000    0.166    0.055 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\testclient.py:441(request)
+        3    0.000    0.000    0.166    0.055 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\site-packages\httpx\_client.py:760(request)
+        3    0.000    0.000    0.165    0.055 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\site-packages\httpx\_client.py:868(send)
+        3    0.000    0.000    0.165    0.055 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\site-packages\httpx\_client.py:917(_send_handling_auth)
+        3    0.000    0.000    0.165    0.055 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\site-packages\httpx\_client.py:951(_send_handling_redirects)
+        3    0.000    0.000    0.165    0.055 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\site-packages\httpx\_client.py:988(_send_single_request)
+        3    0.000    0.000    0.164    0.055 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\testclient.py:200(handle_request)
+       29    0.162    0.006    0.162    0.006 {method 'acquire' of '_thread.lock' objects}
+       10    0.000    0.000    0.161    0.016 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\threading.py:295(wait)
+       21    0.000    0.000    0.161    0.008 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\concurrent\futures\_base.py:428(result)
+        9    0.000    0.000    0.161    0.018 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\site-packages\anyio\from_thread.py:319(call)
     42/33    0.000    0.000    0.004    0.000 {built-in method builtins.next}
         6    0.000    0.000    0.004    0.001 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\testclient.py:408(_portal_factory)
         6    0.000    0.000    0.004    0.001 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\site-packages\anyio\from_thread.py:499(start_blocking_portal)
-    18/15    0.000    0.000    0.003    0.000 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\contextlib.py:132(__enter__)
+    18/15    0.000    0.000    0.002    0.000 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\contextlib.py:132(__enter__)
     18/15    0.000    0.000    0.001    0.000 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\contextlib.py:141(__exit__)
         9    0.000    0.000    0.001    0.000 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\site-packages\anyio\from_thread.py:352(start_task_soon)
         9    0.000    0.000    0.001    0.000 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\site-packages\anyio\from_thread.py:278(_spawn_task_from_thread)
         9    0.000    0.000    0.001    0.000 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\site-packages\anyio\from_thread.py:95(run_sync)
         9    0.000    0.000    0.001    0.000 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\site-packages\anyio\_backends\_asyncio.py:2551(run_sync_from_thread)
-        3    0.000    0.000    0.001    0.000 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\threading.py:1087(join)
-        3    0.000    0.000    0.001    0.000 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\threading.py:1125(_wait_for_tstate_lock)
+        9    0.000    0.000    0.001    0.000 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py:805(call_soon_threadsafe)
+        9    0.000    0.000    0.001    0.000 C:\Users\medin\AppData\Local\Programs\Python\Python311\Lib\asyncio\proactor_events.py:817(_write_to_self)
 
 
