@@ -4,10 +4,15 @@ import io
 import json
 import os
 import pstats
+import shutil
 import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
 def parse_args() -> argparse.Namespace:
@@ -15,6 +20,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--checks", type=int, default=60, help="Number of synthetic checks to seed")
     p.add_argument("--events-per-check", type=int, default=40, help="Synthetic events per check")
     p.add_argument("--repeat", type=int, default=5, help="Repetitions per profiled scenario")
+    p.add_argument(
+        "--retention-rows-per-check",
+        type=int,
+        default=30,
+        help="Synthetic stale/current rows per check for raw retention profiling",
+    )
     p.add_argument(
         "--output-dir",
         default="artifacts/profiling",
@@ -28,14 +39,19 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def profile_call(label: str, repeat: int, fn, output_dir: Path) -> dict:
+def profile_call(label: str, repeat: int, fn, output_dir: Path, *, setup_fn=None, teardown_fn=None) -> dict:
     profiler = cProfile.Profile()
-    started = time.perf_counter()
-    profiler.enable()
-    for _ in range(repeat):
+    elapsed = 0.0
+    for idx in range(repeat):
+        if setup_fn is not None:
+            setup_fn(idx)
+        started = time.perf_counter()
+        profiler.enable()
         fn()
-    profiler.disable()
-    elapsed = time.perf_counter() - started
+        profiler.disable()
+        elapsed += time.perf_counter() - started
+        if teardown_fn is not None:
+            teardown_fn(idx)
 
     prof_path = output_dir / f"{label}.prof"
     txt_path = output_dir / f"{label}.txt"
@@ -56,6 +72,119 @@ def profile_call(label: str, repeat: int, fn, output_dir: Path) -> dict:
     }
 
 
+def _seed_raw_retention_rows(session, *, project_id: int, checks: list, base_now: datetime, rows_per_check: int) -> None:
+    from src.models import Anomaly, CheckResult, CheckStatus, Event, EventType, Heartbeat
+
+    old_base = base_now - timedelta(days=120)
+    fresh_base = base_now - timedelta(days=2)
+    for idx, check in enumerate(checks):
+        for offset in range(rows_per_check):
+            created_at = old_base + timedelta(minutes=offset)
+            status = CheckStatus.DOWN if offset % 5 == 0 else CheckStatus.UP
+            event_type = EventType.DOWN if status == CheckStatus.DOWN else EventType.UP
+            session.add(
+                Event(
+                    check_id=check.id,
+                    project_id=project_id,
+                    incident_id=None,
+                    event_type=event_type,
+                    message=f"retention-old-{idx}-{offset}",
+                    run_key=f"retention-old-{check.id}-{offset}",
+                    created_at=created_at,
+                )
+            )
+            session.add(
+                CheckResult(
+                    check_id=check.id,
+                    project_id=project_id,
+                    incident_id=None,
+                    run_key=f"retention-old-{check.id}-{offset}",
+                    status=status,
+                    latency_ms=60.0 + (offset % 10),
+                    error_message="retention-old-error" if status == CheckStatus.DOWN else None,
+                    created_at=created_at,
+                )
+            )
+            session.add(
+                Anomaly(
+                    check_id=check.id,
+                    incident_id=None,
+                    type="latency_spike" if offset % 2 == 0 else "flapping",
+                    severity=0.6 + ((offset % 5) * 0.1),
+                    window_start=created_at - timedelta(minutes=5),
+                    window_end=created_at,
+                    evidence_json=json.dumps({"offset": offset, "age": "old"}),
+                    created_at=created_at,
+                )
+            )
+            session.add(
+                Heartbeat(
+                    check_id=check.id,
+                    timestamp=created_at,
+                    payload=f"retention-old-heartbeat-{idx}-{offset}",
+                )
+            )
+
+            fresh_created_at = fresh_base + timedelta(minutes=offset)
+            fresh_status = CheckStatus.DEGRADED if offset % 7 == 0 else CheckStatus.UP
+            fresh_event_type = EventType.DEGRADED if fresh_status == CheckStatus.DEGRADED else EventType.UP
+            session.add(
+                Event(
+                    check_id=check.id,
+                    project_id=project_id,
+                    incident_id=None,
+                    event_type=fresh_event_type,
+                    message=f"retention-fresh-{idx}-{offset}",
+                    run_key=f"retention-fresh-{check.id}-{offset}",
+                    created_at=fresh_created_at,
+                )
+            )
+            session.add(
+                CheckResult(
+                    check_id=check.id,
+                    project_id=project_id,
+                    incident_id=None,
+                    run_key=f"retention-fresh-{check.id}-{offset}",
+                    status=fresh_status,
+                    latency_ms=35.0 + (offset % 8),
+                    error_message=None,
+                    created_at=fresh_created_at,
+                )
+            )
+            session.add(
+                Anomaly(
+                    check_id=check.id,
+                    incident_id=None,
+                    type="latency_spike",
+                    severity=0.4,
+                    window_start=fresh_created_at - timedelta(minutes=3),
+                    window_end=fresh_created_at,
+                    evidence_json=json.dumps({"offset": offset, "age": "fresh"}),
+                    created_at=fresh_created_at,
+                )
+            )
+            session.add(
+                Heartbeat(
+                    check_id=check.id,
+                    timestamp=fresh_created_at,
+                    payload=f"retention-fresh-heartbeat-{idx}-{offset}",
+                )
+            )
+    session.commit()
+
+
+def _count_raw_retention_rows(session, *, project_id: int, check_ids: set[int]) -> dict:
+    from src.models import Anomaly, CheckResult, Event, Heartbeat
+    from sqlmodel import select
+
+    return {
+        "events": len(session.exec(select(Event.id).where(Event.project_id == project_id)).all()),
+        "check_results": len(session.exec(select(CheckResult.id).where(CheckResult.project_id == project_id)).all()),
+        "anomalies": len(session.exec(select(Anomaly.id).where(Anomaly.check_id.in_(check_ids))).all()),
+        "heartbeats": len(session.exec(select(Heartbeat.id).where(Heartbeat.check_id.in_(check_ids))).all()),
+    }
+
+
 def main() -> int:
     args = parse_args()
     output_dir = Path(args.output_dir)
@@ -73,6 +202,7 @@ def main() -> int:
     os.environ["API_RATE_LIMIT_WINDOW_SECONDS"] = "60"
 
     from fastapi.testclient import TestClient
+    from sqlalchemy import delete
     from sqlmodel import Session
 
     from src import db as dbmod
@@ -98,6 +228,7 @@ def main() -> int:
 
     api_key = "profile-key"
     now = datetime.utcnow()
+    retention_archive_dir = output_dir / "retention_archive"
 
     with Session(dbmod.engine) as session:
         project = Project(
@@ -213,6 +344,7 @@ def main() -> int:
         session.commit()
 
         project_id = project.id
+        check_ids = {check.id for check in checks}
 
     worker.notify_down = lambda *args, **kwargs: None
     worker.notify_recovery = lambda *args, **kwargs: None
@@ -221,6 +353,17 @@ def main() -> int:
     worker._tcp_check = lambda host, port, timeout: (True, "tcp_ok", 11.0)
     worker._dns_check = lambda host, record_type=None: (True, "dns_ok", 7.0)
     worker._script_check = lambda check, project, timeout=5, retries=1: (True, "script_ok", 15.0)
+
+    os.environ["RAW_RETENTION_ENABLED"] = "1"
+    os.environ["RAW_RETENTION_INTERVAL_SECONDS"] = "0"
+    os.environ["RAW_RETENTION_EVENTS_DAYS"] = "30"
+    os.environ["RAW_RETENTION_CHECK_RESULTS_DAYS"] = "30"
+    os.environ["RAW_RETENTION_ANOMALIES_DAYS"] = "30"
+    os.environ["RAW_RETENTION_HEARTBEATS_DAYS"] = "30"
+    os.environ["RAW_RETENTION_DELETE_BATCH_SIZE"] = "1000"
+    os.environ["RAW_RETENTION_MAX_BATCHES_PER_TABLE"] = "100"
+    os.environ["RAW_RETENTION_BATCH_PAUSE_MS"] = "0"
+    os.environ["RAW_RETENTION_ARCHIVE_DIR"] = str(retention_archive_dir)
 
     client = TestClient(app)
     headers = {"Authorization": f"Bearer {api_key}"}
@@ -278,17 +421,82 @@ def main() -> int:
             if payload.get("project_id") != project_id:
                 raise RuntimeError("Unexpected project id from direct trends profile")
 
+    retention_run_counter = {"value": 0}
+    retention_state = {"run_now": now, "before_counts": None, "archive_enabled": False, "archive_dir": retention_archive_dir}
+
+    def prepare_raw_retention_run(archive_enabled: bool):
+        retention_run_counter["value"] += 1
+        run_now = now + timedelta(seconds=retention_run_counter["value"])
+        archive_run_dir = retention_archive_dir / f"run_{retention_run_counter['value']}"
+        if archive_run_dir.exists():
+            shutil.rmtree(archive_run_dir)
+        os.environ["RAW_RETENTION_ARCHIVE_ENABLED"] = "1" if archive_enabled else "0"
+        os.environ["RAW_RETENTION_ARCHIVE_DIR"] = str(archive_run_dir)
+
+        with Session(dbmod.engine) as session:
+            session.exec(delete(worker.Event).where(worker.Event.project_id == project_id, worker.Event.run_key.like("retention-%")))
+            session.exec(delete(worker.CheckResult).where(worker.CheckResult.project_id == project_id, worker.CheckResult.run_key.like("retention-%")))
+            session.exec(delete(worker.Anomaly).where(worker.Anomaly.check_id.in_(check_ids)))
+            session.exec(delete(worker.Heartbeat).where(worker.Heartbeat.check_id.in_(check_ids), worker.Heartbeat.payload.like("retention-%")))
+            session.exec(delete(worker.AuditLog).where(worker.AuditLog.action == "raw_retention_pruned"))
+            session.commit()
+
+            _seed_raw_retention_rows(
+                session,
+                project_id=project_id,
+                checks=checks,
+                base_now=run_now,
+                rows_per_check=args.retention_rows_per_check,
+            )
+            retention_state["run_now"] = run_now
+            retention_state["archive_enabled"] = archive_enabled
+            retention_state["archive_dir"] = archive_run_dir
+            retention_state["before_counts"] = _count_raw_retention_rows(session, project_id=project_id, check_ids=check_ids)
+
+    def raw_retention_prune():
+        with Session(dbmod.engine) as session:
+            worker._LAST_RAW_RETENTION_RUN = None
+            worker._maybe_prune_raw_data(session, retention_state["run_now"])
+
+    def verify_raw_retention_run():
+        with Session(dbmod.engine) as session:
+            after_counts = _count_raw_retention_rows(session, project_id=project_id, check_ids=check_ids)
+        before_counts = retention_state["before_counts"] or {}
+        if not all(after_counts[label] < before_counts[label] for label in before_counts):
+            raise RuntimeError(
+                f"Raw retention profiling did not delete rows as expected: before={before_counts} after={after_counts}"
+            )
+        if retention_state["archive_enabled"]:
+            archived_files = list(Path(retention_state["archive_dir"]).glob("*.ndjson"))
+            if not archived_files:
+                raise RuntimeError("Expected retention archive files to be written")
+
     scenarios = [
-        ("worker_scan_once", worker_scan_once),
-        ("ui_dashboard_health", dashboard_health),
-        ("incidents_list", incidents_list),
-        ("metrics_availability", availability_report),
-        ("metrics_availability_direct", availability_report_direct),
-        ("analytics_trends", analytics_trends),
-        ("analytics_trends_direct", analytics_trends_direct),
+        ("worker_scan_once", worker_scan_once, None, None),
+        ("ui_dashboard_health", dashboard_health, None, None),
+        ("incidents_list", incidents_list, None, None),
+        ("metrics_availability", availability_report, None, None),
+        ("metrics_availability_direct", availability_report_direct, None, None),
+        ("analytics_trends", analytics_trends, None, None),
+        ("analytics_trends_direct", analytics_trends_direct, None, None),
+        (
+            "raw_retention_prune_direct",
+            raw_retention_prune,
+            lambda idx: prepare_raw_retention_run(False),
+            lambda idx: verify_raw_retention_run(),
+        ),
+        (
+            "raw_retention_prune_archive_direct",
+            raw_retention_prune,
+            lambda idx: prepare_raw_retention_run(True),
+            lambda idx: verify_raw_retention_run(),
+        ),
     ]
 
-    results = [profile_call(label, args.repeat, fn, output_dir) for label, fn in scenarios]
+    results = [
+        profile_call(label, args.repeat, fn, output_dir, setup_fn=setup_fn, teardown_fn=teardown_fn)
+        for label, fn, setup_fn, teardown_fn in scenarios
+    ]
     results.sort(key=lambda row: row["avg_ms"], reverse=True)
     result_map = {row["label"]: row for row in results}
 
@@ -311,14 +519,30 @@ def main() -> int:
             }
         )
 
+    retention_comparisons = []
+    prune_row = result_map.get("raw_retention_prune_direct")
+    archive_row = result_map.get("raw_retention_prune_archive_direct")
+    if prune_row and archive_row:
+        retention_comparisons.append(
+            {
+                "baseline_label": "raw_retention_prune_direct",
+                "archive_label": "raw_retention_prune_archive_direct",
+                "baseline_avg_ms": prune_row["avg_ms"],
+                "archive_avg_ms": archive_row["avg_ms"],
+                "archive_overhead_ms": round(archive_row["avg_ms"] - prune_row["avg_ms"], 2),
+            }
+        )
+
     summary = {
         "generated_at": datetime.utcnow().isoformat(),
         "database": str(db_path),
         "checks_seeded": args.checks,
         "events_per_check": args.events_per_check,
+        "retention_rows_per_check": args.retention_rows_per_check,
         "repeat": args.repeat,
         "results": results,
         "comparisons": comparisons,
+        "retention_comparisons": retention_comparisons,
     }
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
@@ -327,6 +551,7 @@ def main() -> int:
         "",
         f"- checks_seeded: `{args.checks}`",
         f"- events_per_check: `{args.events_per_check}`",
+        f"- retention_rows_per_check: `{args.retention_rows_per_check}`",
         f"- repeat: `{args.repeat}`",
         "",
         "| Scenario | Avg ms | Total s |",
@@ -347,6 +572,20 @@ def main() -> int:
         for row in comparisons:
             lines.append(
                 f"| `{row['http_label']}` | `{row['direct_label']}` | `{row['http_avg_ms']}` | `{row['direct_avg_ms']}` | `{row['http_overhead_ms']}` |"
+            )
+    if retention_comparisons:
+        lines.extend(
+            [
+                "",
+                "## Retention Overhead",
+                "",
+                "| Baseline scenario | Archive scenario | Baseline avg ms | Archive avg ms | Archive overhead ms |",
+                "|---|---|---:|---:|---:|",
+            ]
+        )
+        for row in retention_comparisons:
+            lines.append(
+                f"| `{row['baseline_label']}` | `{row['archive_label']}` | `{row['baseline_avg_ms']}` | `{row['archive_avg_ms']}` | `{row['archive_overhead_ms']}` |"
             )
     (output_dir / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 

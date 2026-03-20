@@ -1,81 +1,107 @@
 {
-  "generated_at": "2026-03-20T20:17:52.031573",
+  "generated_at": "2026-03-20T20:47:55.703952",
   "database": "artifacts\\profiling\\profile.sqlite",
-  "checks_seeded": 40,
-  "events_per_check": 25,
+  "checks_seeded": 30,
+  "events_per_check": 20,
+  "retention_rows_per_check": 20,
   "repeat": 3,
   "results": [
     {
+      "label": "raw_retention_prune_archive_direct",
+      "repeat": 3,
+      "elapsed_seconds": 0.7314,
+      "avg_ms": 243.81,
+      "profile": "artifacts\\profiling\\raw_retention_prune_archive_direct.prof",
+      "top_functions": "artifacts\\profiling\\raw_retention_prune_archive_direct.txt"
+    },
+    {
       "label": "worker_scan_once",
       "repeat": 3,
-      "elapsed_seconds": 0.4077,
-      "avg_ms": 135.89,
+      "elapsed_seconds": 0.4491,
+      "avg_ms": 149.7,
       "profile": "artifacts\\profiling\\worker_scan_once.prof",
       "top_functions": "artifacts\\profiling\\worker_scan_once.txt"
     },
     {
       "label": "metrics_availability",
       "repeat": 3,
-      "elapsed_seconds": 0.1662,
-      "avg_ms": 55.41,
+      "elapsed_seconds": 0.1476,
+      "avg_ms": 49.19,
       "profile": "artifacts\\profiling\\metrics_availability.prof",
       "top_functions": "artifacts\\profiling\\metrics_availability.txt"
     },
     {
-      "label": "metrics_availability_direct",
+      "label": "raw_retention_prune_direct",
       "repeat": 3,
-      "elapsed_seconds": 0.124,
-      "avg_ms": 41.32,
-      "profile": "artifacts\\profiling\\metrics_availability_direct.prof",
-      "top_functions": "artifacts\\profiling\\metrics_availability_direct.txt"
+      "elapsed_seconds": 0.133,
+      "avg_ms": 44.33,
+      "profile": "artifacts\\profiling\\raw_retention_prune_direct.prof",
+      "top_functions": "artifacts\\profiling\\raw_retention_prune_direct.txt"
     },
     {
       "label": "analytics_trends",
       "repeat": 3,
-      "elapsed_seconds": 0.1034,
-      "avg_ms": 34.47,
+      "elapsed_seconds": 0.109,
+      "avg_ms": 36.32,
       "profile": "artifacts\\profiling\\analytics_trends.prof",
       "top_functions": "artifacts\\profiling\\analytics_trends.txt"
     },
     {
       "label": "incidents_list",
       "repeat": 3,
-      "elapsed_seconds": 0.0957,
-      "avg_ms": 31.9,
+      "elapsed_seconds": 0.0949,
+      "avg_ms": 31.62,
       "profile": "artifacts\\profiling\\incidents_list.prof",
       "top_functions": "artifacts\\profiling\\incidents_list.txt"
     },
     {
-      "label": "analytics_trends_direct",
+      "label": "metrics_availability_direct",
       "repeat": 3,
-      "elapsed_seconds": 0.0279,
-      "avg_ms": 9.31,
-      "profile": "artifacts\\profiling\\analytics_trends_direct.prof",
-      "top_functions": "artifacts\\profiling\\analytics_trends_direct.txt"
+      "elapsed_seconds": 0.092,
+      "avg_ms": 30.67,
+      "profile": "artifacts\\profiling\\metrics_availability_direct.prof",
+      "top_functions": "artifacts\\profiling\\metrics_availability_direct.txt"
     },
     {
       "label": "ui_dashboard_health",
       "repeat": 3,
-      "elapsed_seconds": 0.0225,
-      "avg_ms": 7.5,
+      "elapsed_seconds": 0.0188,
+      "avg_ms": 6.28,
       "profile": "artifacts\\profiling\\ui_dashboard_health.prof",
       "top_functions": "artifacts\\profiling\\ui_dashboard_health.txt"
+    },
+    {
+      "label": "analytics_trends_direct",
+      "repeat": 3,
+      "elapsed_seconds": 0.0175,
+      "avg_ms": 5.85,
+      "profile": "artifacts\\profiling\\analytics_trends_direct.prof",
+      "top_functions": "artifacts\\profiling\\analytics_trends_direct.txt"
     }
   ],
   "comparisons": [
     {
       "http_label": "metrics_availability",
       "direct_label": "metrics_availability_direct",
-      "http_avg_ms": 55.41,
-      "direct_avg_ms": 41.32,
-      "http_overhead_ms": 14.09
+      "http_avg_ms": 49.19,
+      "direct_avg_ms": 30.67,
+      "http_overhead_ms": 18.52
     },
     {
       "http_label": "analytics_trends",
       "direct_label": "analytics_trends_direct",
-      "http_avg_ms": 34.47,
-      "direct_avg_ms": 9.31,
-      "http_overhead_ms": 25.16
+      "http_avg_ms": 36.32,
+      "direct_avg_ms": 5.85,
+      "http_overhead_ms": 30.47
+    }
+  ],
+  "retention_comparisons": [
+    {
+      "baseline_label": "raw_retention_prune_direct",
+      "archive_label": "raw_retention_prune_archive_direct",
+      "baseline_avg_ms": 44.33,
+      "archive_avg_ms": 243.81,
+      "archive_overhead_ms": 199.48
     }
   ]
 }
