@@ -6,23 +6,17 @@ are authenticated using a project's API key. It accepts either an
 `Authorization: Bearer <key>` header or `X-API-KEY` header.
 """
 
+import importlib
+import os
+from datetime import datetime
 from typing import Optional
 
-from fastapi import Depends, Header, HTTPException, status, Request
-from sqlmodel import Session
+from fastapi import Depends, Header, HTTPException, Request, status
+from sqlmodel import Session, select
 
 from .db import get_session
-from .models import Project
+from .models import ApiKey, ApiKeyUsage, Project, ProjectMembership, User, UserToken, UserUsage
 from .security import verify_api_key
-import os
-from fastapi import Header
-from datetime import datetime
-from sqlmodel import select
-from .models import ApiKey, ApiKeyUsage, UserUsage
-import importlib
-from .models import User, UserToken, ProjectMembership
-from datetime import datetime
-from fastapi import Header
 
 # Optional Redis support for distributed rate limiting
 _redis = None
@@ -38,6 +32,99 @@ if os.environ.get('REDIS_URL'):
 # In-memory fallback counters for user-token rate limiting when Redis is not configured.
 _user_counters: dict = {}
 _public_counters: dict = {}
+_CACHE_MISS = object()
+
+
+def _deps_cache(session: Session) -> dict:
+    return session.info.setdefault("deps_cache", {})
+
+
+def _get_cached_project(session: Session, project_id: int) -> Optional[Project]:
+    cache = _deps_cache(session)
+    cache_key = ("project", project_id)
+    project = cache.get(cache_key, _CACHE_MISS)
+    if project is _CACHE_MISS:
+        project = session.get(Project, project_id)
+        cache[cache_key] = project
+    return project
+
+
+def _get_cached_user_token(session: Session, token: str) -> Optional[UserToken]:
+    cache = _deps_cache(session)
+    cache_key = ("user_token", token)
+    user_token = cache.get(cache_key, _CACHE_MISS)
+    if user_token is _CACHE_MISS:
+        user_token = session.exec(select(UserToken).where(UserToken.token == token)).first()
+        cache[cache_key] = user_token
+    return user_token
+
+
+def _get_cached_user(session: Session, user_id: int) -> Optional[User]:
+    cache = _deps_cache(session)
+    cache_key = ("user", user_id)
+    user = cache.get(cache_key, _CACHE_MISS)
+    if user is _CACHE_MISS:
+        user = session.get(User, user_id)
+        cache[cache_key] = user
+    return user
+
+
+def _get_cached_membership(session: Session, user_id: int, project_id: int) -> Optional[ProjectMembership]:
+    cache = _deps_cache(session)
+    cache_key = ("membership", user_id, project_id)
+    membership = cache.get(cache_key, _CACHE_MISS)
+    if membership is _CACHE_MISS:
+        membership = session.exec(
+            select(ProjectMembership).where(
+                ProjectMembership.user_id == user_id,
+                ProjectMembership.project_id == project_id,
+            )
+        ).first()
+        cache[cache_key] = membership
+    return membership
+
+
+def _extract_bearer_token(authorization: Optional[str]) -> Optional[str]:
+    if authorization and authorization.lower().startswith("bearer "):
+        return authorization.split(None, 1)[1].strip()
+    return None
+
+
+def _get_valid_user_token(session: Session, authorization: Optional[str]) -> UserToken:
+    token = _extract_bearer_token(authorization)
+    if not token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token")
+    ut = _get_cached_user_token(session, token)
+    if not ut:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    if ut.expires_at and ut.expires_at < datetime.utcnow():
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
+    return ut
+
+
+def _match_project_api_key(session: Session, project_id: int, key: str) -> tuple[Optional[ApiKey], bool]:
+    cache = _deps_cache(session)
+    cache_key = ("project_api_key_match", project_id, key)
+    cached = cache.get(cache_key, _CACHE_MISS)
+    if cached is not _CACHE_MISS:
+        return cached
+
+    stmt = select(ApiKey).where(ApiKey.project_id == project_id)
+    candidates = session.exec(stmt).all()
+    matched = None
+    for api_key in candidates:
+        if verify_api_key(key, api_key.key_hash):
+            matched = api_key
+            break
+    if matched:
+        result = (matched, False)
+    else:
+        project = _get_cached_project(session, project_id)
+        project_primary = bool(project and getattr(project, "api_key_hash", None) and verify_api_key(key, project.api_key_hash))
+        result = (None, project_primary)
+
+    cache[cache_key] = result
+    return result
 
 
 def _get_client_ip(request: Request) -> Optional[str]:
@@ -122,9 +209,9 @@ def limit_public_requests(
         _enforce_rate_limit("pubip", client_ip, ip_limit, window)
 
     # If a bearer user token is present, also enforce per-user limit.
-    if authorization and authorization.lower().startswith("bearer "):
-        token = authorization.split(None, 1)[1].strip()
-        ut = session.exec(select(UserToken).where(UserToken.token == token)).first()
+    token = _extract_bearer_token(authorization)
+    if token:
+        ut = _get_cached_user_token(session, token)
         if ut and (not ut.expires_at or ut.expires_at >= datetime.utcnow()):
             _enforce_rate_limit("pubuser", str(ut.user_id), user_limit, window)
 
@@ -137,7 +224,7 @@ def require_admin_or_project_api_key(project_id: int, x_admin_token: Optional[st
     """
     admin_token = os.environ.get('ADMIN_TOKEN')
     if admin_token and x_admin_token and x_admin_token == admin_token:
-        project = session.get(Project, project_id)
+        project = _get_cached_project(session, project_id)
         if not project:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
         return project
@@ -170,12 +257,12 @@ def require_project_api_key(project_id: int, authorization: Optional[str] = Head
     if not key:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing API key")
 
-    project = session.get(Project, project_id)
+    project = _get_cached_project(session, project_id)
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
-    # Only verify against the stored PBKDF2 hash.
-    if getattr(project, "api_key_hash", None) and verify_api_key(key, project.api_key_hash):
+    _matched_api_key, project_primary = _match_project_api_key(session, project_id, key)
+    if project_primary:
         return project
 
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API key")
@@ -198,30 +285,18 @@ def limit_by_api_key(project_id: int, authorization: Optional[str] = Header(None
     if not key:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing API key")
 
-    # find matching ApiKey for project
     window_seconds = int(os.environ.get("API_RATE_LIMIT_WINDOW_SECONDS", "60"))
-    stmt = select(ApiKey).where(ApiKey.project_id == project_id)
-    candidates = session.exec(stmt).all()
-    matched = None
-    for ak in candidates:
-        if verify_api_key(key, ak.key_hash):
-            matched = ak
-            break
+    matched, project_primary = _match_project_api_key(session, project_id, key)
     if not matched:
         # Backwards compatibility: allow the project's primary API key stored on `Project.api_key_hash`
         # even when no `ApiKey` rows exist yet.
-        project = session.get(Project, project_id)
-        if project and getattr(project, "api_key_hash", None) and verify_api_key(key, project.api_key_hash):
+        if project_primary:
             return None
 
         # If no API key matched, allow bearer user tokens and apply per-user rate limits.
-        if authorization and authorization.lower().startswith('bearer '):
-            token = authorization.split(None, 1)[1].strip()
-            ut = session.exec(select(UserToken).where(UserToken.token == token)).first()
-            if not ut:
-                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-            if ut.expires_at and ut.expires_at < datetime.utcnow():
-                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
+        token = _extract_bearer_token(authorization)
+        if token:
+            ut = _get_valid_user_token(session, authorization)
 
             # Rate limit per-user (configurable via env var USER_RATE_LIMIT_PER_MINUTE)
             limit = int(os.environ.get('USER_RATE_LIMIT_PER_MINUTE', '60'))
@@ -313,20 +388,12 @@ def limit_by_api_key(project_id: int, authorization: Optional[str] = Header(None
 
 
 def get_current_user(authorization: Optional[str] = Header(None), session: Session = Depends(get_session)) -> User:
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token")
-    token = authorization.split(None, 1)[1].strip()
-    ut = session.exec(select(UserToken).where(UserToken.token == token)).first()
-    if not ut:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-    if ut.expires_at and ut.expires_at < datetime.utcnow():
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
-    user = session.get(User, ut.user_id)
-    return user
+    ut = _get_valid_user_token(session, authorization)
+    return _get_cached_user(session, ut.user_id)
 
 
 def require_project_role(project_id: int, role: str, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)) -> ProjectMembership:
-    pm = session.exec(select(ProjectMembership).where(ProjectMembership.user_id == current_user.id, ProjectMembership.project_id == project_id)).first()
+    pm = _get_cached_membership(session, current_user.id, project_id)
     if not pm:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not a project member")
     if role == 'owner' and pm.role != 'owner':
@@ -341,26 +408,18 @@ def require_admin_or_owner(project_id: int, x_admin_token: Optional[str] = Heade
     """
     admin_token = os.environ.get('ADMIN_TOKEN')
     if admin_token and x_admin_token and x_admin_token == admin_token:
-        project = session.get(Project, project_id)
+        project = _get_cached_project(session, project_id)
         if not project:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
         return project
 
     # validate bearer token and ensure owner role
-    if not authorization or not authorization.lower().startswith('bearer '):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token")
-    token = authorization.split(None, 1)[1].strip()
-    ut = session.exec(select(UserToken).where(UserToken.token == token)).first()
-    if not ut:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-    if ut.expires_at and ut.expires_at < datetime.utcnow():
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
-
-    pm = session.exec(select(ProjectMembership).where(ProjectMembership.user_id == ut.user_id, ProjectMembership.project_id == project_id)).first()
+    ut = _get_valid_user_token(session, authorization)
+    pm = _get_cached_membership(session, ut.user_id, project_id)
     if not pm or pm.role != 'owner':
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Owner role required")
 
-    project = session.get(Project, project_id)
+    project = _get_cached_project(session, project_id)
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     return project
@@ -378,9 +437,9 @@ def get_audit_context(request: Optional[Request], authorization: Optional[str], 
     admin_token = os.environ.get('ADMIN_TOKEN')
     if admin_token and x_admin_token and x_admin_token == admin_token:
         actor = 'admin'
-    elif authorization and authorization.lower().startswith('bearer '):
-        tok = authorization.split(None, 1)[1].strip()
-        ut = session.exec(select(UserToken).where(UserToken.token == tok)).first()
+    else:
+        tok = _extract_bearer_token(authorization)
+        ut = _get_cached_user_token(session, tok) if tok else None
         if ut:
             actor = f"user:{ut.user_id}"
     try:
