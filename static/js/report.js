@@ -159,6 +159,7 @@ function renderReportChart(series, rollup){
 }
 
 async function loadReport(){
+  const perf = window.LastPingShell ? window.LastPingShell.createPerfTracker("Reports") : null;
   const pid = document.getElementById("projectId").value || "1";
   const {start, end, checkId, rollup} = getRange();
   const headers = reportHeaders();
@@ -181,12 +182,16 @@ async function loadReport(){
     }
 
     const [checksRes, reportRes] = await Promise.all([
-      fetch(`/projects/${pid}/checks`),
-      fetch(url, {headers}),
+      perf && window.LastPingShell
+        ? perf.fetchJson("checks", `/projects/${pid}/checks`)
+        : fetch(`/projects/${pid}/checks`).then(async (res)=> ({ok: res.ok, status: res.status, data: res.ok ? await res.json() : null})),
+      perf && window.LastPingShell
+        ? perf.fetchJson("availability-report", url, {headers})
+        : fetch(url, {headers}).then(async (res)=> ({ok: res.ok, status: res.status, data: res.ok ? await res.json() : null})),
     ]);
-    const checks = checksRes.ok ? await checksRes.json() : [];
+    const checks = checksRes.ok ? (checksRes.data || []) : [];
     const shellPromise = window.LastPingShell
-      ? window.LastPingShell.hydratePageShell(pid, checks)
+      ? window.LastPingShell.hydratePageShell(pid, checks, {perf})
       : Promise.resolve({checks, health: null});
 
     if(!reportRes.ok){
@@ -197,12 +202,20 @@ async function loadReport(){
       return;
     }
 
-    const payload = await reportRes.json();
+    const payload = reportRes.data || {};
     const series = payload.series || [];
     const shellData = await shellPromise;
-    renderReportCards(shellData.checks, shellData.health, series);
-    renderReportTable(series, rollup);
-    renderReportChart(series, rollup);
+    if(perf){
+      perf.measureRender("reports-render", ()=>{
+        renderReportCards(shellData.checks, shellData.health, series);
+        renderReportTable(series, rollup);
+        renderReportChart(series, rollup);
+      });
+    }else{
+      renderReportCards(shellData.checks, shellData.health, series);
+      renderReportTable(series, rollup);
+      renderReportChart(series, rollup);
+    }
   }catch(_e){
     alert("Failed to load report");
     renderReportTable([], getRange().rollup);
@@ -213,6 +226,7 @@ async function loadReport(){
     if(window.LastPingShell){
       window.LastPingShell.setChartLoading("reportChartCard", false);
     }
+    if(perf) perf.finish();
   }
 }
 

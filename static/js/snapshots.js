@@ -295,6 +295,7 @@ async function exportCsv(){
 }
 
 async function loadSnapshots(){
+  const perf = window.LastPingShell ? window.LastPingShell.createPerfTracker("Snapshots") : null;
   const pid = document.getElementById("projectId").value || "1";
   const checkId = document.getElementById("checkId").value || null;
   const start = document.getElementById("start").value || null;
@@ -314,17 +315,21 @@ async function loadSnapshots(){
     if(start) params.set("start", start);
     if(end) params.set("end", end);
     const q = (url)=> params.toString() ? `${url}?${params.toString()}` : url;
+    const jsonFetch = (label, url, opts)=> {
+      if(perf && window.LastPingShell) return perf.fetchJson(label, url, opts);
+      return fetch(url, opts).then(async (res)=> ({ok: res.ok, status: res.status, data: res.ok ? await res.json() : null}));
+    };
 
     const [checksRes, uptimeRes, mttrRes, snapsRes] = await Promise.all([
-      fetch(`/projects/${pid}/checks`),
-      fetch(q(`/projects/${pid}/metrics/uptime`), {headers}),
-      fetch(q(`/projects/${pid}/metrics/mttr`), {headers}),
-      fetch(q(`/projects/${pid}/metrics/snapshots`), {headers}),
+      jsonFetch("checks", `/projects/${pid}/checks`),
+      jsonFetch("uptime", q(`/projects/${pid}/metrics/uptime`), {headers}),
+      jsonFetch("mttr", q(`/projects/${pid}/metrics/mttr`), {headers}),
+      jsonFetch("snapshots", q(`/projects/${pid}/metrics/snapshots`), {headers}),
     ]);
 
-    const checks = checksRes.ok ? await checksRes.json() : [];
+    const checks = checksRes.ok ? (checksRes.data || []) : [];
     const shellPromise = window.LastPingShell
-      ? window.LastPingShell.hydratePageShell(pid, checks)
+      ? window.LastPingShell.hydratePageShell(pid, checks, {perf})
       : Promise.resolve({checks, health: null});
 
     if(!uptimeRes.ok || !mttrRes.ok || !snapsRes.ok){
@@ -334,14 +339,22 @@ async function loadSnapshots(){
       return;
     }
 
-    const uptimeJson = await uptimeRes.json();
-    const mttrJson = await mttrRes.json();
-    const snapsJson = await snapsRes.json();
+    const uptimeJson = uptimeRes.data;
+    const mttrJson = mttrRes.data;
+    const snapsJson = snapsRes.data || [];
     const shellData = await shellPromise;
 
-    renderSnapshotCards(shellData.checks, shellData.health, uptimeJson, mttrJson, snapsJson);
-    renderSnapshotRows(uptimeJson, mttrJson, snapsJson);
-    renderSnapshotChart(snapsJson);
+    if(perf){
+      perf.measureRender("snapshots-render", ()=>{
+        renderSnapshotCards(shellData.checks, shellData.health, uptimeJson, mttrJson, snapsJson);
+        renderSnapshotRows(uptimeJson, mttrJson, snapsJson);
+        renderSnapshotChart(snapsJson);
+      });
+    }else{
+      renderSnapshotCards(shellData.checks, shellData.health, uptimeJson, mttrJson, snapsJson);
+      renderSnapshotRows(uptimeJson, mttrJson, snapsJson);
+      renderSnapshotChart(snapsJson);
+    }
 
     try{
       localStorage.setItem("lastSnapshotsPrefs", JSON.stringify({projectId: pid, checkId, start, end}));
@@ -357,6 +370,7 @@ async function loadSnapshots(){
     if(window.LastPingShell){
       window.LastPingShell.setChartLoading("snapshotUptimeChartCard", false);
     }
+    if(perf) perf.finish();
   }
 }
 

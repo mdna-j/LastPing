@@ -36,18 +36,25 @@ function renderSettingsCards(checks, health, slo, alerts){
 }
 
 async function loadSettings(){
+  const perf = window.LastPingShell ? window.LastPingShell.createPerfTracker("Settings") : null;
   const pid = document.getElementById("projectId").value || "1";
   const headers = headersSettings();
 
   try{
     const [checksRes, sloRes, alertRes] = await Promise.all([
-      fetch(`/projects/${pid}/checks`),
-      fetch(`/projects/${pid}/slo`, {headers}),
-      fetch(`/projects/${pid}/alert-settings`, {headers}),
+      perf && window.LastPingShell
+        ? perf.fetchJson("checks", `/projects/${pid}/checks`)
+        : fetch(`/projects/${pid}/checks`).then(async (res)=> ({ok: res.ok, status: res.status, data: res.ok ? await res.json() : null})),
+      perf && window.LastPingShell
+        ? perf.fetchJson("slo", `/projects/${pid}/slo`, {headers})
+        : fetch(`/projects/${pid}/slo`, {headers}).then(async (res)=> ({ok: res.ok, status: res.status, data: res.ok ? await res.json() : null})),
+      perf && window.LastPingShell
+        ? perf.fetchJson("alert-settings", `/projects/${pid}/alert-settings`, {headers})
+        : fetch(`/projects/${pid}/alert-settings`, {headers}).then(async (res)=> ({ok: res.ok, status: res.status, data: res.ok ? await res.json() : null})),
     ]);
-    const checks = checksRes.ok ? await checksRes.json() : [];
+    const checks = checksRes.ok ? (checksRes.data || []) : [];
     const shellPromise = window.LastPingShell
-      ? window.LastPingShell.hydratePageShell(pid, checks)
+      ? window.LastPingShell.hydratePageShell(pid, checks, {perf})
       : Promise.resolve({checks, health: null});
 
     if(!sloRes.ok || !alertRes.ok){
@@ -57,24 +64,30 @@ async function loadSettings(){
       return;
     }
 
-    const slo = await sloRes.json();
-    const alerts = await alertRes.json();
+    const slo = sloRes.data || {};
+    const alerts = alertRes.data || {};
     const shellData = await shellPromise;
 
-    document.getElementById("sloTarget").value = slo.slo_target ?? "";
-    document.getElementById("slaTarget").value = slo.sla_target ?? "";
-    document.getElementById("smsEnabled").checked = !!alerts.sms_enabled;
-    document.getElementById("smsTo").value = alerts.sms_to ?? "";
-    document.getElementById("oncallEnabled").checked = !!alerts.oncall_enabled;
-    document.getElementById("oncallEmail").value = alerts.oncall_email ?? "";
+    const render = ()=>{
+      document.getElementById("sloTarget").value = slo.slo_target ?? "";
+      document.getElementById("slaTarget").value = slo.sla_target ?? "";
+      document.getElementById("smsEnabled").checked = !!alerts.sms_enabled;
+      document.getElementById("smsTo").value = alerts.sms_to ?? "";
+      document.getElementById("oncallEnabled").checked = !!alerts.oncall_enabled;
+      document.getElementById("oncallEmail").value = alerts.oncall_email ?? "";
 
-    renderSettingsCards(shellData.checks, shellData.health, slo, alerts);
+      renderSettingsCards(shellData.checks, shellData.health, slo, alerts);
+    };
+    if(perf) perf.measureRender("settings-render", render);
+    else render();
   }catch(_e){
     if(window.LastPingShell){
-      const shellData = await window.LastPingShell.hydratePageShell(pid, null);
+      const shellData = await window.LastPingShell.hydratePageShell(pid, null, {perf});
       renderSettingsCards(shellData.checks, shellData.health, null, null);
     }
     alert("Failed to load settings");
+  }finally{
+    if(perf) perf.finish();
   }
 }
 

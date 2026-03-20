@@ -600,6 +600,7 @@ def dashboard_page():
     </div>
 
     <script src="/static/js/vendor/chart.min.js"></script>
+    <script src="/static/js/ui_shell.js"></script>
     <script src="/static/js/dashboard.js"></script>
     </body>
     </html>

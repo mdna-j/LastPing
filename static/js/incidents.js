@@ -95,6 +95,7 @@ function incidentCardHtml(pid, incident, mergedHtml){
 }
 
 async function loadIncidents(){
+  const perf = window.LastPingShell ? window.LastPingShell.createPerfTracker("Incidents") : null;
   const pid = getIncidentPageProjectId();
   const checkFilter = incidentFilterCheckId();
   const listEl = document.getElementById("list");
@@ -102,12 +103,16 @@ async function loadIncidents(){
 
   try{
     const [checksRes, incidentsRes] = await Promise.all([
-      fetch(`/projects/${pid}/checks`),
-      fetch(`/projects/${pid}/incidents`),
+      perf && window.LastPingShell
+        ? perf.fetchJson("checks", `/projects/${pid}/checks`)
+        : fetch(`/projects/${pid}/checks`).then(async (res)=> ({ok: res.ok, status: res.status, data: res.ok ? await res.json() : null})),
+      perf && window.LastPingShell
+        ? perf.fetchJson("incidents", `/projects/${pid}/incidents`)
+        : fetch(`/projects/${pid}/incidents`).then(async (res)=> ({ok: res.ok, status: res.status, data: res.ok ? await res.json() : null})),
     ]);
-    const checks = checksRes.ok ? await checksRes.json() : [];
+    const checks = checksRes.ok ? (checksRes.data || []) : [];
     const shellPromise = window.LastPingShell
-      ? window.LastPingShell.hydratePageShell(pid, checks)
+      ? window.LastPingShell.hydratePageShell(pid, checks, {perf})
       : Promise.resolve({checks, health: null});
 
     if(!incidentsRes.ok){
@@ -117,7 +122,7 @@ async function loadIncidents(){
       return;
     }
 
-    let incidents = await incidentsRes.json();
+    let incidents = incidentsRes.data || [];
     if(checkFilter){
       incidents = incidents.filter((i)=> i.check_id === checkFilter);
     }
@@ -133,24 +138,29 @@ async function loadIncidents(){
     }
     const topLevel = incidents.filter((item)=> !item.merged_into);
 
-    if(listEl){
-      if(!incidents.length){
-        listEl.innerHTML = `<div class="muted">${checkFilter ? `No incidents for check ${checkFilter}` : "No incidents"}</div>`;
-      }else{
-        listEl.innerHTML = topLevel.map((item)=>{
-          const merged = children[item.id] || [];
-          const mergedHtml = merged.length
-            ? `<div style="margin-top:8px;padding-left:12px"><strong>Merged:</strong>${merged.map((m)=> `<div class="card" style="margin-top:6px"><div><strong>Incident ${m.id}</strong> - check ${m.check_id} <span class="muted">(${m.status})</span></div><div class="muted">Started: ${m.started_at}</div></div>`).join("")}</div>`
-            : "";
-          return incidentCardHtml(pid, item, mergedHtml);
-        }).join("");
-      }
-    }
-
     const shellData = await shellPromise;
-    renderIncidentCards(shellData.checks, shellData.health, incidents);
+    const render = ()=>{
+      if(listEl){
+        if(!incidents.length){
+          listEl.innerHTML = `<div class="muted">${checkFilter ? `No incidents for check ${checkFilter}` : "No incidents"}</div>`;
+        }else{
+          listEl.innerHTML = topLevel.map((item)=>{
+            const merged = children[item.id] || [];
+            const mergedHtml = merged.length
+              ? `<div style="margin-top:8px;padding-left:12px"><strong>Merged:</strong>${merged.map((m)=> `<div class="card" style="margin-top:6px"><div><strong>Incident ${m.id}</strong> - check ${m.check_id} <span class="muted">(${m.status})</span></div><div class="muted">Started: ${m.started_at}</div></div>`).join("")}</div>`
+              : "";
+            return incidentCardHtml(pid, item, mergedHtml);
+          }).join("");
+        }
+      }
+      renderIncidentCards(shellData.checks, shellData.health, incidents);
+    };
+    if(perf) perf.measureRender("incidents-render", render);
+    else render();
   }catch(_e){
     if(listEl) listEl.innerText = "Failed to load incidents";
+  }finally{
+    if(perf) perf.finish();
   }
 }
 

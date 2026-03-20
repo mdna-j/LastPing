@@ -426,6 +426,55 @@ tbody tr:hover {
   border-radius: 14px;
 }
 
+.perf-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(17, 27, 44, 0.96) 0%, rgba(12, 20, 32, 0.97) 100%);
+}
+
+.perf-strip-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.perf-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding-right: 12px;
+  border-right: 1px solid #263b56;
+  min-height: 28px;
+}
+
+.perf-item:last-child {
+  border-right: 0;
+  padding-right: 0;
+}
+
+.perf-item-wide {
+  flex: 1 1 240px;
+  min-width: 240px;
+}
+
+.perf-strip-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.perf-meta {
+  color: var(--muted);
+  font-size: 0.83rem;
+}
+
 .health-item {
   display: inline-flex;
   align-items: center;
@@ -854,11 +903,17 @@ tbody tr:hover {
     align-items: stretch;
   }
 
+  .perf-strip-row,
+  .perf-strip-meta {
+    align-items: stretch;
+  }
+
   .hero-banner {
     align-items: flex-start;
   }
 
-  .health-item {
+  .health-item,
+  .perf-item {
     border-right: 0;
     margin-right: 0;
     padding-right: 0;

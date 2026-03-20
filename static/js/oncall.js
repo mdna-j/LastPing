@@ -250,59 +250,90 @@ function groupByLevel(chain){
 }
 
 async function refreshOncall(){
+  const perf = window.LastPingShell ? window.LastPingShell.createPerfTracker("On-call") : null;
   const pid = getProjectId();
   const h = headersOncall();
   const escFilter = document.getElementById('escFilterCheckId').value;
   const escUrl = escFilter ? `/projects/${pid}/oncall/escalations?check_id=${encodeURIComponent(escFilter)}` : `/projects/${pid}/oncall/escalations`;
-  const [rots, escs, alerts] = await Promise.all([
-    fetch(`/projects/${pid}/oncall/rotations`, {headers: h}),
-    fetch(escUrl, {headers: h}),
-    fetch(`/projects/${pid}/oncall/alerts?status_filter=open`, {headers: h}),
-  ]);
-  if(!rots.ok || !escs.ok || !alerts.ok){
+  try{
+    const [rots, escs, alerts] = await Promise.all([
+      perf && window.LastPingShell
+        ? perf.fetchJson('rotations', `/projects/${pid}/oncall/rotations`, {headers: h})
+        : fetch(`/projects/${pid}/oncall/rotations`, {headers: h}).then(async (res)=> ({ok: res.ok, status: res.status, data: res.ok ? await res.json() : null})),
+      perf && window.LastPingShell
+        ? perf.fetchJson('escalations', escUrl, {headers: h})
+        : fetch(escUrl, {headers: h}).then(async (res)=> ({ok: res.ok, status: res.status, data: res.ok ? await res.json() : null})),
+      perf && window.LastPingShell
+        ? perf.fetchJson('alerts', `/projects/${pid}/oncall/alerts?status_filter=open`, {headers: h})
+        : fetch(`/projects/${pid}/oncall/alerts?status_filter=open`, {headers: h}).then(async (res)=> ({ok: res.ok, status: res.status, data: res.ok ? await res.json() : null})),
+    ]);
+    if(!rots.ok || !escs.ok || !alerts.ok){
+      const shellData = window.LastPingShell
+        ? await window.LastPingShell.hydratePageShell(pid, oncallChecks && oncallChecks.length ? oncallChecks : null, {perf})
+        : {checks: oncallChecks || [], health: null};
+      renderOncallCards(shellData.checks, shellData.health, []);
+      alert('Failed to load on-call data');
+      return;
+    }
+    const rotJson = rots.data || [];
+    const escJson = escs.data || [];
+    const alertJson = alerts.data || [];
+    oncallRotations = rotJson || [];
+    oncallEscalations = escJson || [];
+
+    const rotDiv = document.getElementById('rotations');
+    const memberDiv = document.getElementById('members');
+    memberDiv.innerHTML = '';
+    if(perf){
+      perf.measureRender('oncall-rotations', ()=>{
+        rotDiv.innerHTML = rotJson.map(r => `<div class="card"><div><strong>${r.name}</strong> (id:${r.id}) interval:${r.interval_minutes} enabled:${r.enabled}</div><button class="btn" onclick="deleteRotation(${pid}, ${r.id})">Delete</button></div>`).join('');
+      });
+    }else{
+      rotDiv.innerHTML = rotJson.map(r => `<div class="card"><div><strong>${r.name}</strong> (id:${r.id}) interval:${r.interval_minutes} enabled:${r.enabled}</div><button class="btn" onclick="deleteRotation(${pid}, ${r.id})">Delete</button></div>`).join('');
+    }
+    for(const r of rotJson){
+      const mres = perf && window.LastPingShell
+        ? await perf.fetchJson(`rotation-members:${r.id}`, `/projects/${pid}/oncall/rotations/${r.id}/members`, {headers: h})
+        : await fetch(`/projects/${pid}/oncall/rotations/${r.id}/members`, {headers: h}).then(async (res)=> ({ok: res.ok, status: res.status, data: res.ok ? await res.json() : null}));
+      if(!mres.ok) continue;
+      const members = mres.data || [];
+      const html = members.map(m => `<div class="card"><div>Rotation ${r.id} - ${m.name} ${m.email||''} ${m.phone||''} order:${m.order}</div></div>`).join('');
+      if(perf) perf.measureRender(`oncall-members:${r.id}`, ()=>{ memberDiv.innerHTML += html; });
+      else memberDiv.innerHTML += html;
+    }
+
+    const escDiv = document.getElementById('escalations');
+    const renderEscalations = ()=> {
+      escDiv.innerHTML = escJson.map(e => {
+        const scope = e.check_id ? `check:${e.check_id}` : 'project-wide';
+        const target = e.target_type === 'rotation' ? `rotation:${e.rotation_id}` : (e.target_value || '');
+        const filt = e.event_types ? ` events:${e.event_types}` : '';
+        return `<div class="card"><div>${scope} level:${e.level} ${e.target_type} delay:${e.delay_minutes} ${target}${filt} ${e.enabled === false ? '(disabled)' : ''}</div><button class="btn" onclick="deleteEscalation(${pid}, ${e.id})">Delete</button></div>`;
+      }).join('');
+    };
+    if(perf) perf.measureRender('oncall-escalations', renderEscalations);
+    else renderEscalations();
+
+    const alertDiv = document.getElementById('alerts');
+    const renderAlerts = ()=> {
+      alertDiv.innerHTML = alertJson.map(a => `<div class="card"><div>Alert ${a.id} check:${a.check_id} event:${a.event_type} level:${a.escalation_level}</div><div class="muted">${a.message||''}</div><button class="btn" onclick="closeAlert(${pid}, ${a.id})">Close</button></div>`).join('');
+    };
+    if(perf) perf.measureRender('oncall-alerts', renderAlerts);
+    else renderAlerts();
+
     const shellData = window.LastPingShell
-      ? await window.LastPingShell.hydratePageShell(pid, oncallChecks && oncallChecks.length ? oncallChecks : null)
+      ? await window.LastPingShell.hydratePageShell(pid, oncallChecks && oncallChecks.length ? oncallChecks : null, {perf})
       : {checks: oncallChecks || [], health: null};
-    renderOncallCards(shellData.checks, shellData.health, []);
-    alert('Failed to load on-call data');
-    return;
+    const render = ()=>{
+      renderOncallCards(shellData.checks, shellData.health, alertJson);
+      renderPolicyChain();
+      renderPolicyPreview();
+    };
+    if(perf) perf.measureRender('oncall-summary', render);
+    else render();
+  }finally{
+    if(perf) perf.finish();
   }
-  const rotJson = await rots.json();
-  const escJson = await escs.json();
-  const alertJson = await alerts.json();
-  oncallRotations = rotJson || [];
-  oncallEscalations = escJson || [];
-
-  const rotDiv = document.getElementById('rotations');
-  const memberDiv = document.getElementById('members');
-  memberDiv.innerHTML = '';
-  rotDiv.innerHTML = rotJson.map(r => `<div class="card"><div><strong>${r.name}</strong> (id:${r.id}) interval:${r.interval_minutes} enabled:${r.enabled}</div><button class="btn" onclick="deleteRotation(${pid}, ${r.id})">Delete</button></div>`).join('');
-  for(const r of rotJson){
-    const mres = await fetch(`/projects/${pid}/oncall/rotations/${r.id}/members`, {headers: h});
-    if(!mres.ok) continue;
-    const members = await mres.json();
-    const html = members.map(m => `<div class="card"><div>Rotation ${r.id} - ${m.name} ${m.email||''} ${m.phone||''} order:${m.order}</div></div>`).join('');
-    memberDiv.innerHTML += html;
-  }
-
-  const escDiv = document.getElementById('escalations');
-  escDiv.innerHTML = escJson.map(e => {
-    const scope = e.check_id ? `check:${e.check_id}` : 'project-wide';
-    const target = e.target_type === 'rotation' ? `rotation:${e.rotation_id}` : (e.target_value || '');
-    const filt = e.event_types ? ` events:${e.event_types}` : '';
-    return `<div class="card"><div>${scope} level:${e.level} ${e.target_type} delay:${e.delay_minutes} ${target}${filt} ${e.enabled === false ? '(disabled)' : ''}</div><button class="btn" onclick="deleteEscalation(${pid}, ${e.id})">Delete</button></div>`;
-  }).join('');
-
-  const alertDiv = document.getElementById('alerts');
-  alertDiv.innerHTML = alertJson.map(a => `<div class="card"><div>Alert ${a.id} check:${a.check_id} event:${a.event_type} level:${a.escalation_level}</div><div class="muted">${a.message||''}</div><button class="btn" onclick="closeAlert(${pid}, ${a.id})">Close</button></div>`).join('');
-
-  const shellData = window.LastPingShell
-    ? await window.LastPingShell.hydratePageShell(pid, oncallChecks && oncallChecks.length ? oncallChecks : null)
-    : {checks: oncallChecks || [], health: null};
-  renderOncallCards(shellData.checks, shellData.health, alertJson);
-
-  renderPolicyChain();
-  renderPolicyPreview();
 }
 
 async function loadChecksForEscalations(){

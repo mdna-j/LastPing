@@ -1,5 +1,27 @@
 // Shared shell helpers for /ui pages outside dashboard.
 (function(){
+  function byteLength(text){
+    if(!text) return 0;
+    try{
+      return new TextEncoder().encode(text).length;
+    }catch(_e){
+      return text.length;
+    }
+  }
+
+  function formatPerfMs(value){
+    if(value === null || value === undefined || Number.isNaN(value)) return "n/a";
+    if(value >= 1000) return `${(value / 1000).toFixed(2)}s`;
+    return `${value.toFixed(value >= 100 ? 0 : 1)}ms`;
+  }
+
+  function formatPerfBytes(bytes){
+    if(bytes === null || bytes === undefined || Number.isNaN(bytes)) return "n/a";
+    if(bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+    if(bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${bytes} B`;
+  }
+
   function localTime(value){
     if(!value) return "n/a";
     const dt = new Date(value);
@@ -85,6 +107,168 @@
     emptyEl.classList.toggle("hidden", !shouldShow);
   }
 
+  function ensurePerfStrip(){
+    const main = document.querySelector(".main-stage");
+    if(!main) return null;
+    let el = document.getElementById("frontendPerfStrip");
+    if(el) return el;
+
+    el = document.createElement("section");
+    el.id = "frontendPerfStrip";
+    el.className = "card perf-strip";
+    el.innerHTML = `
+      <div class="perf-strip-row">
+        <div class="perf-item"><span class="health-label">Profile</span><span class="health-value" id="perfViewName">-</span></div>
+        <div class="perf-item"><span class="health-label">Page load</span><span class="health-value" id="perfLoadMs">-</span></div>
+        <div class="perf-item"><span class="health-label">Render</span><span class="health-value" id="perfRenderMs">-</span></div>
+        <div class="perf-item"><span class="health-label">Payload</span><span class="health-value" id="perfPayload">-</span></div>
+        <div class="perf-item"><span class="health-label">Requests</span><span class="health-value" id="perfRequestCount">-</span></div>
+        <div class="perf-item perf-item-wide"><span class="health-label">Slowest</span><span class="health-value" id="perfSlowest">-</span></div>
+      </div>
+      <div class="perf-strip-meta">
+        <div class="perf-meta" id="perfRequestSummary">No requests measured yet.</div>
+        <div class="perf-meta" id="perfPaintSummary">FCP n/a</div>
+      </div>
+    `;
+
+    const health = main.querySelector(".health-strip");
+    const controls = main.querySelector(".controls-card");
+    if(health){
+      health.insertAdjacentElement("afterend", el);
+    }else if(controls){
+      controls.insertAdjacentElement("beforebegin", el);
+    }else{
+      main.insertBefore(el, main.firstChild);
+    }
+    return el;
+  }
+
+  function navPerfSummary(){
+    const nav = performance.getEntriesByType ? performance.getEntriesByType("navigation")[0] : null;
+    const paints = performance.getEntriesByType ? performance.getEntriesByType("paint") : [];
+    const fcpEntry = paints.find((entry)=> entry.name === "first-contentful-paint");
+    return {
+      domReadyMs: nav ? nav.domContentLoadedEventEnd : null,
+      loadEventMs: nav ? nav.loadEventEnd : null,
+      fcpMs: fcpEntry ? fcpEntry.startTime : null,
+    };
+  }
+
+  function renderPerfStrip(state){
+    const el = ensurePerfStrip();
+    if(!el || !state) return;
+
+    const requests = state.requests || [];
+    const slowest = requests.length
+      ? requests.slice().sort((a, b)=> b.duration - a.duration)[0]
+      : null;
+    const totalMs = state.finishedAt
+      ? Math.max(0, state.finishedAt - state.startedAt)
+      : Math.max(0, performance.now() - state.startedAt);
+    const requestSummary = requests.length
+      ? requests
+        .slice()
+        .sort((a, b)=> b.duration - a.duration)
+        .slice(0, 4)
+        .map((r)=> `${r.label} ${formatPerfMs(r.duration)} (${formatPerfBytes(r.bytes)})`)
+        .join(" | ")
+      : "No requests measured yet.";
+    const paints = [];
+    if(state.navPerf && state.navPerf.fcpMs !== null && state.navPerf.fcpMs !== undefined){
+      paints.push(`FCP ${formatPerfMs(state.navPerf.fcpMs)}`);
+    }
+    if(state.navPerf && state.navPerf.domReadyMs !== null && state.navPerf.domReadyMs !== undefined){
+      paints.push(`DOM ready ${formatPerfMs(state.navPerf.domReadyMs)}`);
+    }
+    if(state.navPerf && state.navPerf.loadEventMs !== null && state.navPerf.loadEventMs !== undefined){
+      paints.push(`window load ${formatPerfMs(state.navPerf.loadEventMs)}`);
+    }
+
+    const setText = (id, value)=>{
+      const node = document.getElementById(id);
+      if(node) node.textContent = value;
+    };
+    setText("perfViewName", state.pageName || "UI");
+    setText("perfLoadMs", formatPerfMs(totalMs));
+    setText("perfRenderMs", formatPerfMs(state.renderMs || 0));
+    setText("perfPayload", formatPerfBytes(state.payloadBytes || 0));
+    setText("perfRequestCount", String(requests.length));
+    setText("perfSlowest", slowest ? `${slowest.label} ${formatPerfMs(slowest.duration)}` : "n/a");
+    setText("perfRequestSummary", requestSummary);
+    setText("perfPaintSummary", paints.length ? paints.join(" | ") : "FCP n/a");
+  }
+
+  function createPerfTracker(pageName){
+    const state = {
+      pageName,
+      startedAt: performance.now(),
+      finishedAt: null,
+      payloadBytes: 0,
+      renderMs: 0,
+      requests: [],
+      navPerf: navPerfSummary(),
+    };
+
+    function recordRequest(entry){
+      state.requests.push(entry);
+      state.payloadBytes += entry.bytes || 0;
+      renderPerfStrip(state);
+    }
+
+    renderPerfStrip(state);
+
+    return {
+      async fetchJson(label, url, options){
+        const startedAt = performance.now();
+        try{
+          const res = await fetch(url, options);
+          const text = await res.text();
+          const duration = performance.now() - startedAt;
+          recordRequest({
+            label,
+            duration,
+            bytes: byteLength(text),
+            ok: res.ok,
+            status: res.status,
+          });
+
+          let data = null;
+          if(text){
+            try{
+              data = JSON.parse(text);
+            }catch(err){
+              if(res.ok) throw err;
+            }
+          }
+          return {ok: res.ok, status: res.status, data, text};
+        }catch(err){
+          recordRequest({
+            label,
+            duration: performance.now() - startedAt,
+            bytes: 0,
+            ok: false,
+            status: "ERR",
+          });
+          throw err;
+        }
+      },
+
+      measureRender(_label, fn){
+        const startedAt = performance.now();
+        const result = fn();
+        state.renderMs += performance.now() - startedAt;
+        renderPerfStrip(state);
+        return result;
+      },
+
+      finish(){
+        state.finishedAt = performance.now();
+        renderPerfStrip(state);
+        return state;
+      },
+    };
+  }
+
   function renderHero(healthData, checks){
     const banner = document.getElementById("incidentHeroBanner");
     const title = document.getElementById("incidentHeroTitle");
@@ -118,8 +302,12 @@
     banner.classList.remove("hero-banner-hidden");
   }
 
-  async function fetchChecks(projectId){
+  async function fetchChecks(projectId, perf){
     try{
+      if(perf){
+        const res = await perf.fetchJson("checks", `/projects/${projectId}/checks`);
+        return res.ok ? (res.data || []) : [];
+      }
       const res = await fetch(`/projects/${projectId}/checks`);
       if(!res.ok) return [];
       return await res.json();
@@ -128,8 +316,12 @@
     }
   }
 
-  async function fetchHealth(projectId){
+  async function fetchHealth(projectId, perf){
     try{
+      if(perf){
+        const res = await perf.fetchJson("health", `/ui/dashboard/health?project_id=${encodeURIComponent(projectId)}`);
+        return res.ok ? (res.data || null) : null;
+      }
       const res = await fetch(`/ui/dashboard/health?project_id=${encodeURIComponent(projectId)}`);
       if(!res.ok) return null;
       return await res.json();
@@ -158,12 +350,13 @@
     setHealthValue("healthRegionHealth", data.region_health_summary || regionSummaryFromChecks(checks || []));
   }
 
-  async function hydratePageShell(projectId, checksOverride){
+  async function hydratePageShell(projectId, checksOverride, options){
+    const perf = options && options.perf;
     let checks = Array.isArray(checksOverride) ? checksOverride : null;
-    if(!checks) checks = await fetchChecks(projectId);
+    if(!checks) checks = await fetchChecks(projectId, perf);
 
     setHealthStripFromFallback(checks);
-    const health = await fetchHealth(projectId);
+    const health = await fetchHealth(projectId, perf);
     setHealthStripFromData(health, checks);
     renderHero(health, checks);
     return {checks, health};
@@ -201,5 +394,8 @@
     setChartEmpty,
     hydratePageShell,
     renderShellKpis,
+    createPerfTracker,
+    formatPerfBytes,
+    formatPerfMs,
   };
 })();
