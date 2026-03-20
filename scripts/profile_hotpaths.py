@@ -4,7 +4,6 @@ import io
 import json
 import os
 import pstats
-import shutil
 import sys
 import time
 from datetime import datetime, timedelta
@@ -427,9 +426,7 @@ def main() -> int:
     def prepare_raw_retention_run(archive_enabled: bool):
         retention_run_counter["value"] += 1
         run_now = now + timedelta(seconds=retention_run_counter["value"])
-        archive_run_dir = retention_archive_dir / f"run_{retention_run_counter['value']}"
-        if archive_run_dir.exists():
-            shutil.rmtree(archive_run_dir)
+        archive_run_dir = retention_archive_dir / f"run_{retention_run_counter['value']}_{int(time.time() * 1000)}"
         os.environ["RAW_RETENTION_ARCHIVE_ENABLED"] = "1" if archive_enabled else "0"
         os.environ["RAW_RETENTION_ARCHIVE_DIR"] = str(archive_run_dir)
 

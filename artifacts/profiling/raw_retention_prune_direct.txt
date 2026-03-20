@@ -1,33 +1,33 @@
-         70094 function calls (69754 primitive calls) in 0.133 seconds
+         70075 function calls (69735 primitive calls) in 0.133 seconds
 
    Ordered by: cumulative time
    List reduced from 580 to 25 due to restriction <25>
 
    ncalls  tottime  percall  cumtime  percall filename:lineno(function)
-        3    0.000    0.000    0.133    0.044 C:\Users\medin\OneDrive\Desktop\LastPing\scripts\profile_hotpaths.py:456(raw_retention_prune)
-        3    0.001    0.000    0.133    0.044 C:\Users\medin\OneDrive\Desktop\LastPing\src\worker.py:1306(_maybe_prune_raw_data)
-       12    0.000    0.000    0.120    0.010 C:\Users\medin\OneDrive\Desktop\LastPing\src\worker.py:1205(_prune_raw_table_chunked)
-    99/39    0.000    0.000    0.068    0.002 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\orm\state_changes.py:93(_go)
-       15    0.000    0.000    0.067    0.004 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\orm\session.py:1994(commit)
-    18/15    0.000    0.000    0.067    0.004 <string>:1(commit)
-    18/15    0.000    0.000    0.067    0.004 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\orm\session.py:1304(commit)
-       15    0.000    0.000    0.061    0.004 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\engine\base.py:2623(commit)
-       15    0.000    0.000    0.061    0.004 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\engine\base.py:2740(_do_commit)
-       15    0.000    0.000    0.061    0.004 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\engine\base.py:2715(_connection_commit_impl)
-       15    0.000    0.000    0.061    0.004 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\engine\base.py:1132(_commit_impl)
-       15    0.000    0.000    0.061    0.004 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\engine\default.py:714(do_commit)
-       15    0.061    0.004    0.061    0.004 {method 'commit' of 'sqlite3.Connection' objects}
-       24    0.000    0.000    0.044    0.002 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlmodel\orm\session.py:54(exec)
-       24    0.000    0.000    0.044    0.002 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\orm\session.py:2291(execute)
-       24    0.000    0.000    0.044    0.002 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\orm\session.py:2136(_execute_internal)
-       27    0.000    0.000    0.042    0.002 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\engine\base.py:1375(execute)
-       27    0.000    0.000    0.042    0.002 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\sql\elements.py:518(_execute_on_connection)
-       27    0.000    0.000    0.042    0.002 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\engine\base.py:1591(_execute_clauseelement)
-       24    0.000    0.000    0.041    0.002 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\orm\context.py:296(orm_execute_statement)
-       27    0.000    0.000    0.039    0.001 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\engine\base.py:1791(_execute_context)
-       12    0.000    0.000    0.037    0.003 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\orm\bulk_persistence.py:2005(orm_execute_statement)
-       27    0.000    0.000    0.030    0.001 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\engine\base.py:1850(_exec_single_context)
-       27    0.000    0.000    0.029    0.001 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\engine\default.py:951(do_execute)
-       27    0.029    0.001    0.029    0.001 {method 'execute' of 'sqlite3.Cursor' objects}
+        3    0.000    0.000    0.133    0.044 C:\Users\medin\OneDrive\Desktop\LastPing\scripts\profile_hotpaths.py:453(raw_retention_prune)
+        3    0.001    0.000    0.133    0.044 C:\Users\medin\OneDrive\Desktop\LastPing\src\worker.py:1349(_maybe_prune_raw_data)
+       12    0.000    0.000    0.120    0.010 C:\Users\medin\OneDrive\Desktop\LastPing\src\worker.py:1248(_prune_raw_table_chunked)
+    99/39    0.000    0.000    0.064    0.002 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\orm\state_changes.py:93(_go)
+       15    0.000    0.000    0.063    0.004 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\orm\session.py:1994(commit)
+    18/15    0.000    0.000    0.063    0.004 <string>:1(commit)
+    18/15    0.001    0.000    0.063    0.004 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\orm\session.py:1304(commit)
+       15    0.000    0.000    0.057    0.004 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\engine\base.py:2623(commit)
+       15    0.000    0.000    0.057    0.004 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\engine\base.py:2740(_do_commit)
+       15    0.000    0.000    0.056    0.004 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\engine\base.py:2715(_connection_commit_impl)
+       15    0.000    0.000    0.056    0.004 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\engine\base.py:1132(_commit_impl)
+       15    0.000    0.000    0.056    0.004 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\engine\default.py:714(do_commit)
+       15    0.056    0.004    0.056    0.004 {method 'commit' of 'sqlite3.Connection' objects}
+       24    0.000    0.000    0.047    0.002 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlmodel\orm\session.py:54(exec)
+       24    0.000    0.000    0.047    0.002 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\orm\session.py:2291(execute)
+       24    0.000    0.000    0.047    0.002 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\orm\session.py:2136(_execute_internal)
+       27    0.000    0.000    0.044    0.002 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\engine\base.py:1375(execute)
+       27    0.000    0.000    0.044    0.002 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\sql\elements.py:518(_execute_on_connection)
+       27    0.000    0.000    0.044    0.002 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\engine\base.py:1591(_execute_clauseelement)
+       24    0.000    0.000    0.043    0.002 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\orm\context.py:296(orm_execute_statement)
+       27    0.000    0.000    0.041    0.002 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\engine\base.py:1791(_execute_context)
+       12    0.000    0.000    0.039    0.003 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\orm\bulk_persistence.py:2005(orm_execute_statement)
+       27    0.000    0.000    0.032    0.001 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\engine\base.py:1850(_exec_single_context)
+       27    0.000    0.000    0.031    0.001 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\engine\default.py:951(do_execute)
+       27    0.031    0.001    0.031    0.001 {method 'execute' of 'sqlite3.Cursor' objects}
 
 

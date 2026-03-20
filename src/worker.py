@@ -24,7 +24,7 @@ import socket
 from typing import Tuple, Optional
 
 from sqlmodel import Session, select
-from sqlalchemy import update, or_, func, delete
+from sqlalchemy import update, or_, and_, func, delete
 from sqlalchemy.exc import IntegrityError
 
 from .db import engine
@@ -47,6 +47,10 @@ _LAST_RAW_RETENTION_RUN: Optional[datetime] = None
 def _now() -> datetime:
     """Return current UTC datetime (extracted to ease testing)."""
     return datetime.utcnow()
+
+
+def _worker_session_cache(session: Session) -> dict:
+    return session.info.setdefault("worker_cache", {})
 
 
 def _session_has_pending_changes(session: Session) -> bool:
@@ -78,13 +82,28 @@ def _as_utc_naive(value: datetime) -> datetime:
 
 def _db_now(session: Session) -> datetime:
     """Return database-server UTC time when available (fallback to app clock)."""
+    cache_ttl_ms = max(0, int(os.environ.get("WORKER_DB_NOW_CACHE_MS", "250")))
+    cache = _worker_session_cache(session)
+    if cache_ttl_ms > 0:
+        cached = cache.get("db_now")
+        monotonic_now = time.monotonic()
+        if cached is not None:
+            cached_at, cached_value = cached
+            if (monotonic_now - cached_at) <= (cache_ttl_ms / 1000.0):
+                return cached_value
     try:
         value = session.exec(select(func.now())).first()
         if isinstance(value, datetime):
-            return _as_utc_naive(value)
+            normalized = _as_utc_naive(value)
+            if cache_ttl_ms > 0:
+                cache["db_now"] = (time.monotonic(), normalized)
+            return normalized
     except Exception:
         logger.exception("Failed to read DB server time; falling back to app clock")
-    return _as_utc_naive(_now())
+    fallback = _as_utc_naive(_now())
+    if cache_ttl_ms > 0:
+        cache["db_now"] = (time.monotonic(), fallback)
+    return fallback
 
 
 def _check_run_key(check: Check, now: datetime) -> str:
@@ -1055,6 +1074,9 @@ def _maybe_archive_quarterly_rollups(session: Session, now: datetime, project_id
 def _maybe_log_rollup_archive_health(session: Session, now: datetime, project_ids):
     if os.environ.get("ROLLUP_ARCHIVE_ALERTS_ENABLED", "1") != "1":
         return
+    project_ids = {int(pid) for pid in (project_ids or set()) if pid is not None}
+    if not project_ids:
+        return
     window_seconds = int(os.environ.get("ROLLUP_ARCHIVE_ALERT_WINDOW_SECONDS", "86400"))
     monthly_grace_days = int(os.environ.get("ROLLUP_ARCHIVE_GRACE_DAYS", "3"))
     quarterly_grace_days = int(os.environ.get("ROLLUP_QUARTERLY_GRACE_DAYS", "10"))
@@ -1073,68 +1095,89 @@ def _maybe_log_rollup_archive_health(session: Session, now: datetime, project_id
     quarter_period = f"{prev_quarter_start.year}-Q{qnum}"
     quarter_due = now >= (quarter_start + timedelta(days=quarterly_grace_days))
 
-    for pid in project_ids:
-        project = session.get(Project, pid)
-        if not project:
-            continue
+    if not month_due and not quarter_due:
+        return
 
-        if month_due:
-            exists = session.exec(
-                select(AvailabilityRollup).where(
-                    AvailabilityRollup.project_id == pid,
+    projects = {
+        project.id: project
+        for project in session.exec(select(Project).where(Project.id.in_(project_ids))).all()
+    }
+    if not projects:
+        return
+
+    recent_cutoff = now - timedelta(seconds=window_seconds)
+    recent_alert_projects = {
+        pid
+        for pid in session.exec(
+            select(AuditLog.target_id).where(
+                AuditLog.action == "rollup_archive_missing",
+                AuditLog.target_type == "project",
+                AuditLog.target_id.in_(projects.keys()),
+                AuditLog.created_at >= recent_cutoff,
+            )
+        ).all()
+        if pid is not None
+    }
+
+    month_projects_with_rollup = set()
+    if month_due:
+        month_projects_with_rollup = {
+            pid
+            for pid in session.exec(
+                select(AvailabilityRollup.project_id).where(
+                    AvailabilityRollup.project_id.in_(projects.keys()),
                     AvailabilityRollup.check_id == None,
                     AvailabilityRollup.period_type == "month",
                     AvailabilityRollup.period == month_period,
                 )
-            ).first()
-            if not exists:
-                cutoff = now - timedelta(seconds=window_seconds)
-                recent = session.exec(
-                    select(AuditLog).where(
-                        AuditLog.action == "rollup_archive_missing",
-                        AuditLog.target_type == "project",
-                        AuditLog.target_id == pid,
-                        AuditLog.created_at >= cutoff,
-                    )
-                ).first()
-                if not recent:
-                    details = json.dumps({"period_type": "month", "period": month_period})
-                    al = AuditLog(actor="worker", action="rollup_archive_missing", target_type="project", target_id=pid, details=details, actor_ip=None, user_agent=None)
-                    session.add(al)
-                    session.commit()
-                    if alert_to:
-                        subj = f"[LastPing] Rollup archive missing: {project.name} ({month_period})"
-                        body = f"Monthly rollup for {project.name} is missing for period {month_period}."
-                        send_email(subj, body, to=alert_to)
+            ).all()
+            if pid is not None
+        }
 
-        if quarter_due:
-            exists = session.exec(
-                select(AvailabilityRollup).where(
-                    AvailabilityRollup.project_id == pid,
+    quarter_projects_with_rollup = set()
+    if quarter_due:
+        quarter_projects_with_rollup = {
+            pid
+            for pid in session.exec(
+                select(AvailabilityRollup.project_id).where(
+                    AvailabilityRollup.project_id.in_(projects.keys()),
                     AvailabilityRollup.check_id == None,
                     AvailabilityRollup.period_type == "quarter",
                     AvailabilityRollup.period == quarter_period,
                 )
-            ).first()
-            if not exists:
-                cutoff = now - timedelta(seconds=window_seconds)
-                recent = session.exec(
-                    select(AuditLog).where(
-                        AuditLog.action == "rollup_archive_missing",
-                        AuditLog.target_type == "project",
-                        AuditLog.target_id == pid,
-                        AuditLog.created_at >= cutoff,
-                    )
-                ).first()
-                if not recent:
-                    details = json.dumps({"period_type": "quarter", "period": quarter_period})
-                    al = AuditLog(actor="worker", action="rollup_archive_missing", target_type="project", target_id=pid, details=details, actor_ip=None, user_agent=None)
-                    session.add(al)
-                    session.commit()
-                    if alert_to:
-                        subj = f"[LastPing] Rollup archive missing: {project.name} ({quarter_period})"
-                        body = f"Quarterly rollup for {project.name} is missing for period {quarter_period}."
-                        send_email(subj, body, to=alert_to)
+            ).all()
+            if pid is not None
+        }
+
+    for pid, project in projects.items():
+        if not project:
+            continue
+
+        if pid in recent_alert_projects:
+            continue
+
+        if month_due and pid not in month_projects_with_rollup:
+            details = json.dumps({"period_type": "month", "period": month_period})
+            al = AuditLog(actor="worker", action="rollup_archive_missing", target_type="project", target_id=pid, details=details, actor_ip=None, user_agent=None)
+            session.add(al)
+            session.commit()
+            recent_alert_projects.add(pid)
+            if alert_to:
+                subj = f"[LastPing] Rollup archive missing: {project.name} ({month_period})"
+                body = f"Monthly rollup for {project.name} is missing for period {month_period}."
+                send_email(subj, body, to=alert_to)
+            continue
+
+        if quarter_due and pid not in quarter_projects_with_rollup:
+            details = json.dumps({"period_type": "quarter", "period": quarter_period})
+            al = AuditLog(actor="worker", action="rollup_archive_missing", target_type="project", target_id=pid, details=details, actor_ip=None, user_agent=None)
+            session.add(al)
+            session.commit()
+            recent_alert_projects.add(pid)
+            if alert_to:
+                subj = f"[LastPing] Rollup archive missing: {project.name} ({quarter_period})"
+                body = f"Quarterly rollup for {project.name} is missing for period {quarter_period}."
+                send_email(subj, body, to=alert_to)
 
 
 def _retention_days(env_var: str, default_days: int) -> int:
@@ -1728,21 +1771,51 @@ def _compute_uptime_snapshots(session: Session, now: datetime):
     all_checks = session.exec(
         select(Check).where(Check.id.in_(sorted(candidate_ids)))
     ).all()
-    snapshots: list[UptimeSnapshot] = []
-    for c in all_checks:
-        ev_stmt = select(Event).where(
-            Event.project_id == c.project_id,
-            Event.check_id == c.id,
+    ordered_candidate_ids = sorted(candidate_ids)
+    recent_events = session.exec(
+        select(Event)
+        .where(
+            Event.check_id.in_(ordered_candidate_ids),
             Event.created_at >= window_start,
             Event.created_at <= window_end,
-        ).order_by(Event.created_at)
-        events = session.exec(ev_stmt).all()
-        prev_stmt = select(Event).where(
-            Event.project_id == c.project_id,
-            Event.check_id == c.id,
+        )
+        .order_by(Event.check_id, Event.created_at)
+    ).all()
+    recent_events_by_check = {}
+    for event in recent_events:
+        recent_events_by_check.setdefault(event.check_id, []).append(event)
+
+    prev_event_subquery = (
+        select(
+            Event.check_id.label("check_id"),
+            func.max(Event.created_at).label("max_created_at"),
+        )
+        .where(
+            Event.check_id.in_(ordered_candidate_ids),
             Event.created_at < window_start,
-        ).order_by(Event.created_at.desc())
-        prev = session.exec(prev_stmt).first()
+        )
+        .group_by(Event.check_id)
+        .subquery()
+    )
+    previous_events = session.exec(
+        select(Event)
+        .join(
+            prev_event_subquery,
+            and_(
+                Event.check_id == prev_event_subquery.c.check_id,
+                Event.created_at == prev_event_subquery.c.max_created_at,
+            ),
+        )
+        .order_by(Event.check_id, Event.created_at.desc(), Event.id.desc())
+    ).all()
+    prev_by_check = {}
+    for event in previous_events:
+        prev_by_check.setdefault(event.check_id, event)
+
+    snapshots: list[UptimeSnapshot] = []
+    for c in all_checks:
+        events = recent_events_by_check.get(c.id, [])
+        prev = prev_by_check.get(c.id)
         current_state = "up"
         if prev and prev.event_type in ("down", "http_failure"):
             current_state = "down"
@@ -1932,13 +2005,13 @@ def _lease_fence_allows_write(
     return lease_expires_at > (db_now - timedelta(seconds=skew_tolerance))
 
 
-def _acquire_lease(session: Session, check: Check, now: datetime) -> Optional[int]:
+def _acquire_lease(session: Session, check: Check, now: datetime, owner: Optional[str] = None) -> Optional[int]:
     if os.environ.get("WORKER_LEASES", "1") == "0":
         return 0
     lease_seconds = int(os.environ.get("WORKER_LEASE_SECONDS", "120"))
     skew_tolerance = max(0, int(os.environ.get("WORKER_CLOCK_SKEW_TOLERANCE_SECONDS", "5")))
     db_now = _db_now(session)
-    owner = _worker_id()
+    owner = owner or _worker_id()
     expires_at = db_now + timedelta(seconds=lease_seconds)
     expiration_cutoff = db_now - timedelta(seconds=skew_tolerance)
     try:
@@ -2404,17 +2477,17 @@ def scan_checks_once(session: Session):
     now = _now()
     processed_oncall = False
     processed_remediation = False
-    project_ids = set()
+    project_ids = {check.project_id for check in results}
     worker_region = os.environ.get("WORKER_REGION")
+    worker_owner = _worker_id()
     for check in results:
-        project_ids.add(check.project_id)
         if not _allow_region_or_failover(session, worker_region, check, now):
             continue
         project = session.get(Project, check.project_id)
         if not project:
             continue
-        lease_owner = _worker_id()
-        lease_fence = _acquire_lease(session, check, now)
+        lease_owner = worker_owner
+        lease_fence = _acquire_lease(session, check, now, owner=lease_owner)
         if lease_fence is None:
             continue
         if not _lease_fence_allows_write(session, check.id, lease_owner, lease_fence):

@@ -1,33 +1,33 @@
-         106383 function calls (102477 primitive calls) in 0.091 seconds
+         106746 function calls (102840 primitive calls) in 0.089 seconds
 
    Ordered by: cumulative time
    List reduced from 356 to 25 due to restriction <25>
 
    ncalls  tottime  percall  cumtime  percall filename:lineno(function)
-        3    0.000    0.000    0.092    0.031 C:\Users\medin\OneDrive\Desktop\LastPing\scripts\profile_hotpaths.py:392(availability_report_direct)
-        3    0.001    0.000    0.091    0.030 C:\Users\medin\OneDrive\Desktop\LastPing\src\routers\metrics.py:65(_compute_availability_report)
-       90    0.003    0.000    0.083    0.001 C:\Users\medin\OneDrive\Desktop\LastPing\src\routers\metrics.py:73(compute_for_check)
-      186    0.000    0.000    0.045    0.000 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\orm\session.py:2291(execute)
-      186    0.001    0.000    0.044    0.000 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\orm\session.py:2136(_execute_internal)
+        3    0.000    0.000    0.090    0.030 C:\Users\medin\OneDrive\Desktop\LastPing\scripts\profile_hotpaths.py:391(availability_report_direct)
+        3    0.001    0.000    0.090    0.030 C:\Users\medin\OneDrive\Desktop\LastPing\src\routers\metrics.py:65(_compute_availability_report)
+       90    0.003    0.000    0.082    0.001 C:\Users\medin\OneDrive\Desktop\LastPing\src\routers\metrics.py:73(compute_for_check)
+      186    0.000    0.000    0.044    0.000 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\orm\session.py:2291(execute)
+      186    0.001    0.000    0.043    0.000 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\orm\session.py:2136(_execute_internal)
       183    0.000    0.000    0.043    0.000 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlmodel\orm\session.py:54(exec)
       186    0.000    0.000    0.040    0.000 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\orm\context.py:296(orm_execute_statement)
-      186    0.000    0.000    0.032    0.000 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\engine\base.py:1375(execute)
-      186    0.000    0.000    0.032    0.000 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\sql\elements.py:518(_execute_on_connection)
+      186    0.000    0.000    0.031    0.000 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\engine\base.py:1375(execute)
+      186    0.000    0.000    0.031    0.000 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\sql\elements.py:518(_execute_on_connection)
       186    0.001    0.000    0.031    0.000 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\engine\base.py:1591(_execute_clauseelement)
       186    0.001    0.000    0.020    0.000 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\engine\base.py:1791(_execute_context)
-      186    0.001    0.000    0.017    0.000 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\engine\base.py:1850(_exec_single_context)
+      186    0.001    0.000    0.016    0.000 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\engine\base.py:1850(_exec_single_context)
        93    0.000    0.000    0.016    0.000 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\engine\result.py:1766(all)
        93    0.000    0.000    0.016    0.000 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\engine\result.py:543(_allrows)
-      372    0.000    0.000    0.016    0.000 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\orm\loading.py:208(chunks)
-       93    0.000    0.000    0.016    0.000 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\engine\result.py:1680(_fetchall_impl)
-       93    0.000    0.000    0.016    0.000 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\engine\result.py:2271(_fetchall_impl)
-      186    0.000    0.000    0.014    0.000 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\engine\default.py:951(do_execute)
-      186    0.014    0.000    0.014    0.000 {method 'execute' of 'sqlite3.Cursor' objects}
-      543    0.000    0.000    0.013    0.000 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\orm\attributes.py:450(operate)
+      372    0.000    0.000    0.015    0.000 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\orm\loading.py:208(chunks)
+       93    0.000    0.000    0.015    0.000 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\engine\result.py:1680(_fetchall_impl)
+       93    0.000    0.000    0.015    0.000 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\engine\result.py:2271(_fetchall_impl)
+      543    0.000    0.000    0.014    0.000 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\orm\attributes.py:450(operate)
+      186    0.000    0.000    0.013    0.000 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\engine\default.py:951(do_execute)
+      186    0.013    0.000    0.013    0.000 {method 'execute' of 'sqlite3.Cursor' objects}
       543    0.000    0.000    0.013    0.000 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\orm\properties.py:476(operate)
-      186    0.001    0.000    0.012    0.000 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\orm\loading.py:224(<listcomp>)
       543    0.000    0.000    0.012    0.000 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\sql\elements.py:1529(operate)
-     1893    0.004    0.000    0.011    0.000 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\orm\loading.py:1068(_instance)
+      186    0.001    0.000    0.012    0.000 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\orm\loading.py:224(<listcomp>)
       543    0.001    0.000    0.011    0.000 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\sql\type_api.py:202(operate)
+     1548    0.004    0.000    0.011    0.000 C:\Users\medin\OneDrive\Desktop\LastPing\.venv\Lib\site-packages\sqlalchemy\sql\coercions.py:314(expect)
 
 

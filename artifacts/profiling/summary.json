@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-03-20T20:47:55.703952",
+  "generated_at": "2026-03-20T21:05:10.241608",
   "database": "artifacts\\profiling\\profile.sqlite",
   "checks_seeded": 30,
   "events_per_check": 20,
@@ -9,24 +9,24 @@
     {
       "label": "raw_retention_prune_archive_direct",
       "repeat": 3,
-      "elapsed_seconds": 0.7314,
-      "avg_ms": 243.81,
+      "elapsed_seconds": 0.575,
+      "avg_ms": 191.68,
       "profile": "artifacts\\profiling\\raw_retention_prune_archive_direct.prof",
       "top_functions": "artifacts\\profiling\\raw_retention_prune_archive_direct.txt"
     },
     {
       "label": "worker_scan_once",
       "repeat": 3,
-      "elapsed_seconds": 0.4491,
-      "avg_ms": 149.7,
+      "elapsed_seconds": 0.3564,
+      "avg_ms": 118.81,
       "profile": "artifacts\\profiling\\worker_scan_once.prof",
       "top_functions": "artifacts\\profiling\\worker_scan_once.txt"
     },
     {
       "label": "metrics_availability",
       "repeat": 3,
-      "elapsed_seconds": 0.1476,
-      "avg_ms": 49.19,
+      "elapsed_seconds": 0.1536,
+      "avg_ms": 51.18,
       "profile": "artifacts\\profiling\\metrics_availability.prof",
       "top_functions": "artifacts\\profiling\\metrics_availability.txt"
     },
@@ -34,47 +34,47 @@
       "label": "raw_retention_prune_direct",
       "repeat": 3,
       "elapsed_seconds": 0.133,
-      "avg_ms": 44.33,
+      "avg_ms": 44.34,
       "profile": "artifacts\\profiling\\raw_retention_prune_direct.prof",
       "top_functions": "artifacts\\profiling\\raw_retention_prune_direct.txt"
     },
     {
       "label": "analytics_trends",
       "repeat": 3,
-      "elapsed_seconds": 0.109,
-      "avg_ms": 36.32,
+      "elapsed_seconds": 0.1158,
+      "avg_ms": 38.58,
       "profile": "artifacts\\profiling\\analytics_trends.prof",
       "top_functions": "artifacts\\profiling\\analytics_trends.txt"
     },
     {
       "label": "incidents_list",
       "repeat": 3,
-      "elapsed_seconds": 0.0949,
-      "avg_ms": 31.62,
+      "elapsed_seconds": 0.1057,
+      "avg_ms": 35.24,
       "profile": "artifacts\\profiling\\incidents_list.prof",
       "top_functions": "artifacts\\profiling\\incidents_list.txt"
     },
     {
       "label": "metrics_availability_direct",
       "repeat": 3,
-      "elapsed_seconds": 0.092,
-      "avg_ms": 30.67,
+      "elapsed_seconds": 0.0905,
+      "avg_ms": 30.16,
       "profile": "artifacts\\profiling\\metrics_availability_direct.prof",
       "top_functions": "artifacts\\profiling\\metrics_availability_direct.txt"
     },
     {
       "label": "ui_dashboard_health",
       "repeat": 3,
-      "elapsed_seconds": 0.0188,
-      "avg_ms": 6.28,
+      "elapsed_seconds": 0.0224,
+      "avg_ms": 7.46,
       "profile": "artifacts\\profiling\\ui_dashboard_health.prof",
       "top_functions": "artifacts\\profiling\\ui_dashboard_health.txt"
     },
     {
       "label": "analytics_trends_direct",
       "repeat": 3,
-      "elapsed_seconds": 0.0175,
-      "avg_ms": 5.85,
+      "elapsed_seconds": 0.0211,
+      "avg_ms": 7.03,
       "profile": "artifacts\\profiling\\analytics_trends_direct.prof",
       "top_functions": "artifacts\\profiling\\analytics_trends_direct.txt"
     }
@@ -83,25 +83,25 @@
     {
       "http_label": "metrics_availability",
       "direct_label": "metrics_availability_direct",
-      "http_avg_ms": 49.19,
-      "direct_avg_ms": 30.67,
-      "http_overhead_ms": 18.52
+      "http_avg_ms": 51.18,
+      "direct_avg_ms": 30.16,
+      "http_overhead_ms": 21.02
     },
     {
       "http_label": "analytics_trends",
       "direct_label": "analytics_trends_direct",
-      "http_avg_ms": 36.32,
-      "direct_avg_ms": 5.85,
-      "http_overhead_ms": 30.47
+      "http_avg_ms": 38.58,
+      "direct_avg_ms": 7.03,
+      "http_overhead_ms": 31.55
     }
   ],
   "retention_comparisons": [
     {
       "baseline_label": "raw_retention_prune_direct",
       "archive_label": "raw_retention_prune_archive_direct",
-      "baseline_avg_ms": 44.33,
-      "archive_avg_ms": 243.81,
-      "archive_overhead_ms": 199.48
+      "baseline_avg_ms": 44.34,
+      "archive_avg_ms": 191.68,
+      "archive_overhead_ms": 147.34
     }
   ]
 }
