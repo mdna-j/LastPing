@@ -1653,6 +1653,124 @@ def test_compute_uptime_snapshots_batches_commit_once(tmp_path, monkeypatch):
         assert commit_count["value"] == 1
 
 
+def test_compute_uptime_snapshots_skips_fresh_healthy_checks(tmp_path, monkeypatch):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_snapshot_subset.sqlite'}"
+    monkeypatch.setenv("UPTIME_SNAPSHOT_REFRESH_SECONDS", "3600")
+
+    from sqlmodel import Session, select
+    from src import db as dbmod
+    from src.models import Project, Check, CheckType, CheckStatus, Event, EventType, UptimeSnapshot
+    from src import worker
+
+    dbmod.create_db_and_tables()
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="proj_snapshot_subset")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        healthy = Check(
+            project_id=project.id,
+            name="healthy-fresh",
+            type=CheckType.HTTP,
+            url="http://example.invalid/healthy",
+            status=CheckStatus.UP,
+        )
+        recent_event = Check(
+            project_id=project.id,
+            name="recent-event",
+            type=CheckType.HTTP,
+            url="http://example.invalid/recent",
+            status=CheckStatus.UP,
+        )
+        active_down = Check(
+            project_id=project.id,
+            name="active-down",
+            type=CheckType.HTTP,
+            url="http://example.invalid/down",
+            status=CheckStatus.DOWN,
+        )
+        never_snapshotted = Check(
+            project_id=project.id,
+            name="never-snapshotted",
+            type=CheckType.HTTP,
+            url="http://example.invalid/new",
+            status=CheckStatus.UP,
+        )
+        session.add(healthy)
+        session.add(recent_event)
+        session.add(active_down)
+        session.add(never_snapshotted)
+        session.commit()
+        session.refresh(healthy)
+        session.refresh(recent_event)
+        session.refresh(active_down)
+        session.refresh(never_snapshotted)
+
+        now = datetime.utcnow()
+        fresh_snapshot_end = now - timedelta(minutes=5)
+        session.add(
+            UptimeSnapshot(
+                project_id=project.id,
+                check_id=healthy.id,
+                window_start=fresh_snapshot_end - timedelta(hours=24),
+                window_end=fresh_snapshot_end,
+                uptime_percent=100.0,
+                mttr_seconds=None,
+            )
+        )
+        session.add(
+            UptimeSnapshot(
+                project_id=project.id,
+                check_id=active_down.id,
+                window_start=fresh_snapshot_end - timedelta(hours=24),
+                window_end=fresh_snapshot_end,
+                uptime_percent=99.0,
+                mttr_seconds=120.0,
+            )
+        )
+        session.add(
+            Event(
+                check_id=recent_event.id,
+                project_id=project.id,
+                event_type=EventType.DOWN,
+                message="recent down",
+                created_at=now - timedelta(hours=2),
+            )
+        )
+        session.add(
+            Event(
+                check_id=recent_event.id,
+                project_id=project.id,
+                event_type=EventType.UP,
+                message="recent up",
+                created_at=now - timedelta(hours=1),
+            )
+        )
+        session.commit()
+
+        worker._compute_uptime_snapshots(session, now)
+
+        healthy_rows = session.exec(
+            select(UptimeSnapshot).where(UptimeSnapshot.check_id == healthy.id)
+        ).all()
+        recent_rows = session.exec(
+            select(UptimeSnapshot).where(UptimeSnapshot.check_id == recent_event.id)
+        ).all()
+        active_down_rows = session.exec(
+            select(UptimeSnapshot).where(UptimeSnapshot.check_id == active_down.id)
+        ).all()
+        new_rows = session.exec(
+            select(UptimeSnapshot).where(UptimeSnapshot.check_id == never_snapshotted.id)
+        ).all()
+
+        assert len(healthy_rows) == 1
+        assert len(recent_rows) == 1
+        assert len(active_down_rows) == 2
+        assert len(new_rows) == 1
+
+
 def test_raw_retention_prunes_old_events_results_anomalies_heartbeats(tmp_path, monkeypatch):
     os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_raw_retention.sqlite'}"
     monkeypatch.setenv("RAW_RETENTION_ENABLED", "1")

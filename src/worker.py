@@ -65,6 +65,10 @@ def _commit_pending(session: Session, *, context: str) -> bool:
         return False
 
 
+def _uptime_snapshot_refresh_seconds() -> int:
+    return max(60, int(os.environ.get("UPTIME_SNAPSHOT_REFRESH_SECONDS", "3600")))
+
+
 def _as_utc_naive(value: datetime) -> datetime:
     """Normalize datetime to UTC-naive for safe comparisons across DB drivers."""
     if value.tzinfo is None:
@@ -1680,8 +1684,50 @@ def _compute_uptime_snapshots(session: Session, now: datetime):
     """Compute and persist a short-term uptime/MTTR snapshot (last 24h) for each check."""
     window_end = now
     window_start = now - timedelta(hours=24)
-    stmt = select(Check)
-    all_checks = session.exec(stmt).all()
+    refresh_cutoff = window_end - timedelta(seconds=_uptime_snapshot_refresh_seconds())
+
+    checks = session.exec(select(Check.id, Check.status)).all()
+    if not checks:
+        return
+
+    candidate_ids = {
+        check_id
+        for check_id, status in checks
+        if status == CheckStatus.DOWN
+    }
+
+    recent_event_ids = session.exec(
+        select(Event.check_id)
+        .where(
+            Event.created_at >= window_start,
+            Event.created_at <= window_end,
+            Event.event_type.in_((EventType.DOWN, EventType.HTTP_FAILURE, EventType.UP)),
+        )
+        .distinct()
+    ).all()
+    candidate_ids.update(check_id for check_id in recent_event_ids if check_id is not None)
+
+    latest_snapshot_rows = session.exec(
+        select(UptimeSnapshot.check_id, func.max(UptimeSnapshot.window_end)).group_by(UptimeSnapshot.check_id)
+    ).all()
+    latest_snapshot_by_check = {
+        check_id: _as_utc_naive(window_end_value) if isinstance(window_end_value, datetime) else None
+        for check_id, window_end_value in latest_snapshot_rows
+    }
+
+    for check_id, _status in checks:
+        if check_id in candidate_ids:
+            continue
+        latest_snapshot = latest_snapshot_by_check.get(check_id)
+        if latest_snapshot is None or latest_snapshot <= refresh_cutoff:
+            candidate_ids.add(check_id)
+
+    if not candidate_ids:
+        return
+
+    all_checks = session.exec(
+        select(Check).where(Check.id.in_(sorted(candidate_ids)))
+    ).all()
     snapshots: list[UptimeSnapshot] = []
     for c in all_checks:
         ev_stmt = select(Event).where(
