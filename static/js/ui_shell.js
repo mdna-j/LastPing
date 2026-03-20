@@ -387,11 +387,13 @@
   window.LastPingShell = {
     localTime,
     formatDuration,
+    setHealthValue,
     regionSummaryFromChecks,
     checkCounts,
     setKpiState,
     setChartLoading,
     setChartEmpty,
+    renderHeroBanner: renderHero,
     hydratePageShell,
     renderShellKpis,
     createPerfTracker,

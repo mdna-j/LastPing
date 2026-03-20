@@ -1,4 +1,6 @@
 // /ui/dashboard client script
+const DashboardShell = window.LastPingShell;
+
 function dashHeaders(){
   const apiKey = document.getElementById("apiKey").value || null;
   const headers = {};
@@ -34,58 +36,6 @@ function statusBadge(status){
   const degraded = status.toLowerCase() === "degraded";
   const cls = up ? "status-up" : (down ? "status-down" : (degraded ? "status-degraded" : ""));
   return `<span class="badge ${cls}">${status}</span>`;
-}
-
-function setHealthValue(id, value){
-  const el = document.getElementById(id);
-  if(el) el.textContent = value;
-}
-
-function localTime(value){
-  if(!value) return "n/a";
-  const dt = new Date(value);
-  if(Number.isNaN(dt.getTime())) return "n/a";
-  return dt.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
-}
-
-function regionSummaryFromChecks(checks){
-  if(!checks || !checks.length) return "No checks";
-  const buckets = {};
-  for(const c of checks){
-    const raw = (c.region || "").trim();
-    let region = "global";
-    if(raw){
-      const lowered = raw.toLowerCase();
-      if(lowered === "*" || lowered === "all" || lowered === "any") region = "any";
-      else if(raw.includes(",") || raw.includes(" ")) region = "multi";
-      else region = raw;
-    }
-    if(!buckets[region]) buckets[region] = {down: 0, degraded: 0, total: 0};
-    buckets[region].total += 1;
-    const st = (c.status || "").toLowerCase();
-    if(st === "down") buckets[region].down += 1;
-    else if(st === "degraded") buckets[region].degraded += 1;
-  }
-  const names = Object.keys(buckets).sort();
-  return names.map((name)=>{
-    const b = buckets[name];
-    if(b.down > 0) return `${name}: ${b.down} down`;
-    if(b.degraded > 0) return `${name}: ${b.degraded} degraded`;
-    return `${name}: healthy`;
-  }).join(" | ");
-}
-
-function formatDuration(totalSeconds){
-  if(totalSeconds === null || totalSeconds === undefined || Number.isNaN(totalSeconds)) return "n/a";
-  const secs = Math.max(0, Math.floor(totalSeconds));
-  const days = Math.floor(secs / 86400);
-  const hours = Math.floor((secs % 86400) / 3600);
-  const mins = Math.floor((secs % 3600) / 60);
-  const rem = secs % 60;
-  if(days > 0) return `${days}d ${hours}h ${mins}m`;
-  if(hours > 0) return `${hours}h ${mins}m ${rem}s`;
-  if(mins > 0) return `${mins}m ${rem}s`;
-  return `${rem}s`;
 }
 
 function containsFlappingSignal(obj){
@@ -130,13 +80,6 @@ function mttrKpiState(mttrVal){
   return "kpi-healthy";
 }
 
-function setKpiState(cardId, stateClass){
-  const el = document.getElementById(cardId);
-  if(!el) return;
-  el.classList.remove("kpi-neutral", "kpi-healthy", "kpi-warning", "kpi-critical", "kpi-flapping");
-  el.classList.add(stateClass);
-}
-
 function setChartLoading(isLoading){
   ["uptimeChartCard", "trendChartCard"].forEach((id)=>{
     const card = document.getElementById(id);
@@ -145,10 +88,11 @@ function setChartLoading(isLoading){
 }
 
 function setChartEmpty(id, shouldShow, message){
-  const emptyEl = document.getElementById(id);
-  if(!emptyEl) return;
-  emptyEl.textContent = message || "No recent data";
-  emptyEl.classList.toggle("hidden", !shouldShow);
+  DashboardShell.setChartEmpty(id, shouldShow, message);
+}
+
+function measureRender(perf, label, fn){
+  return perf ? perf.measureRender(label, fn) : fn();
 }
 
 function goToCheckIncidents(pid, checkId){
@@ -207,45 +151,11 @@ function renderIntelligenceSummary({hasApiKey, predictive, anomalies, checks}){
   summaryEl.innerHTML = `<div class="intel-pill-row">${pills.join("")}</div><div class="muted">${footnote}</div>`;
 }
 
-function renderIncidentHero(healthData, checks){
-  const banner = document.getElementById("incidentHeroBanner");
-  const title = document.getElementById("incidentHeroTitle");
-  const sub = document.getElementById("incidentHeroSub");
-  if(!banner || !title || !sub) return;
-
-  const fallbackDown = (checks || []).filter((c)=> (c.status || "").toLowerCase() === "down");
-  const downCount = (healthData && healthData.down_checks_count !== undefined && healthData.down_checks_count !== null)
-    ? Number(healthData.down_checks_count)
-    : fallbackDown.length;
-
-  if(!downCount || downCount <= 0){
-    banner.classList.add("hero-banner-hidden");
-    title.textContent = "No active outages";
-    sub.textContent = "All checks currently healthy.";
-    return;
-  }
-
-  let primaryName = "check";
-  let primaryDuration = "n/a";
-  if(healthData && healthData.primary_down_check){
-    primaryName = healthData.primary_down_check.name || primaryName;
-    primaryDuration = formatDuration(healthData.primary_down_check.down_seconds);
-  }else if(fallbackDown.length){
-    primaryName = fallbackDown[0].name || primaryName;
-  }
-
-  const noun = downCount === 1 ? "Check Down" : "Checks Down";
-  title.textContent = `${downCount} ${noun} - ${primaryName} (${primaryDuration})`;
-  const impact = (healthData && healthData.region_health_summary) ? healthData.region_health_summary : regionSummaryFromChecks(checks || []);
-  sub.textContent = `Region impact: ${impact}`;
-  banner.classList.remove("hero-banner-hidden");
-}
-
 async function loadHealthStrip(pid, checks, perf){
-  setHealthValue("healthLastRefresh", localTime(new Date().toISOString()));
-  setHealthValue("healthActiveIncidents", "...");
-  setHealthValue("healthWorkersOnline", "...");
-  setHealthValue("healthRegionHealth", regionSummaryFromChecks(checks));
+  DashboardShell.setHealthValue("healthLastRefresh", DashboardShell.localTime(new Date().toISOString()));
+  DashboardShell.setHealthValue("healthActiveIncidents", "...");
+  DashboardShell.setHealthValue("healthWorkersOnline", "...");
+  DashboardShell.setHealthValue("healthRegionHealth", DashboardShell.regionSummaryFromChecks(checks));
 
   try{
     let data = null;
@@ -258,14 +168,14 @@ async function loadHealthStrip(pid, checks, perf){
       if(!res.ok) throw new Error(`health ${res.status}`);
       data = await res.json();
     }
-    setHealthValue("healthLastRefresh", localTime(data.last_refresh));
-    setHealthValue("healthActiveIncidents", String(data.active_incidents ?? "n/a"));
-    setHealthValue("healthWorkersOnline", String(data.workers_online ?? "n/a"));
-    setHealthValue("healthRegionHealth", data.region_health_summary || regionSummaryFromChecks(checks));
+    DashboardShell.setHealthValue("healthLastRefresh", DashboardShell.localTime(data.last_refresh));
+    DashboardShell.setHealthValue("healthActiveIncidents", String(data.active_incidents ?? "n/a"));
+    DashboardShell.setHealthValue("healthWorkersOnline", String(data.workers_online ?? "n/a"));
+    DashboardShell.setHealthValue("healthRegionHealth", data.region_health_summary || DashboardShell.regionSummaryFromChecks(checks));
     return data;
   }catch(_e){
-    setHealthValue("healthActiveIncidents", "n/a");
-    setHealthValue("healthWorkersOnline", "n/a");
+    DashboardShell.setHealthValue("healthActiveIncidents", "n/a");
+    DashboardShell.setHealthValue("healthWorkersOnline", "n/a");
     return null;
   }
 }
@@ -328,7 +238,7 @@ async function loadDashboard(){
   setChartEmpty("trendChartEmpty", false, "");
 
   const healthData = await loadHealthStrip(pid, checks, perf);
-  renderIncidentHero(healthData, checks);
+  DashboardShell.renderHeroBanner(healthData, checks);
 
   // metrics (requires API key)
   let uptime = null;
@@ -379,7 +289,7 @@ async function loadDashboard(){
     if(incRes.ok){
       const incs = incRes.data || [];
       if(incCountEl) incCountEl.innerText = String(incs.length);
-      setHealthValue("healthActiveIncidents", String(incs.length));
+      DashboardShell.setHealthValue("healthActiveIncidents", String(incs.length));
       openIncidentCardState = incs.length > 0 ? "kpi-critical" : "kpi-healthy";
       if(!incs.length){
         incidentsEl.innerHTML = '<div class="muted">No open incidents.</div>';
@@ -468,7 +378,7 @@ async function loadDashboard(){
     html += `<article id="openIncidentsCard" class="card kpi-card ${openIncidentCardState}"><div class="metric-label">Open incidents</div><div class="metric-value" id="openIncidentsCount">${headers.Authorization ? "..." : "locked"}</div><div class="metric-sub">API key required</div></article>`;
     html += '<article id="availabilityKpiCard" class="card kpi-card kpi-neutral"><div class="metric-label">Availability CSV</div><div><button id="exportAvailabilityCsvBtn" class="btn btn-secondary">Export</button></div><div class="metric-sub">Uses selected range</div></article>';
     cards.innerHTML = html;
-    setKpiState("openIncidentsCard", openIncidentCardState);
+    DashboardShell.setKpiState("openIncidentsCard", openIncidentCardState);
     const exportBtn = document.getElementById("exportAvailabilityCsvBtn");
     if(exportBtn) exportBtn.onclick = exportAvailabilityCsv;
 
@@ -483,8 +393,7 @@ async function loadDashboard(){
       wireChecksTableAffordance(pid);
     }
   };
-  if(perf) perf.measureRender("dashboard-dom", renderDashboardDom);
-  else renderDashboardDom();
+  measureRender(perf, "dashboard-dom", renderDashboardDom);
 
   // charts
   try{
@@ -496,7 +405,7 @@ async function loadDashboard(){
       if(window._uptimeChart){ try{ window._uptimeChart.destroy(); }catch(_e){} }
       if(window._trendChart){ try{ window._trendChart.destroy(); }catch(_e){} }
 
-      (perf ? perf.measureRender("dashboard-charts", ()=> {
+      measureRender(perf, "dashboard-charts", ()=> {
         const uptimeLabels = (snaps || []).map((s)=> s.window_end).reverse();
         const uptimeData = (snaps || []).map((s)=> s.uptime_percent).reverse();
         const hasUptimeData = uptimeLabels.length > 0 && uptimeData.some((v)=> v !== null && v !== undefined);
@@ -551,62 +460,7 @@ async function loadDashboard(){
           }
         });
         setChartEmpty("trendChartEmpty", !hasTrendData, "No recent data for selected range.");
-      }) : (()=> {
-        const uptimeLabels = (snaps || []).map((s)=> s.window_end).reverse();
-        const uptimeData = (snaps || []).map((s)=> s.uptime_percent).reverse();
-        const hasUptimeData = uptimeLabels.length > 0 && uptimeData.some((v)=> v !== null && v !== undefined);
-        const uctx = document.getElementById("uptimeChart").getContext("2d");
-        window._uptimeChart = new Chart(uctx, {
-          type: "line",
-          data: { labels: uptimeLabels, datasets: [{ label: "Uptime %", data: uptimeData, borderColor: "rgba(96, 157, 255, 0.95)", backgroundColor: "rgba(71, 131, 229, 0.16)", tension: 0.22, fill: true, pointRadius: 2.5 }] },
-          options: {
-            maintainAspectRatio: false,
-            scales: {
-              x: {
-                grid: {color: chartGridColor},
-                ticks: {color: chartTickColor, maxTicksLimit: 6},
-                title: {display: true, text: "Time", color: chartTitleColor}
-              },
-              y: {
-                beginAtZero: true,
-                suggestedMax: 100,
-                grid: {color: chartGridColor},
-                ticks: {color: chartTickColor},
-                title: {display: true, text: "Uptime %", color: chartTitleColor}
-              }
-            },
-            plugins: { legend: { display: true, labels: {color: "#d9e8ff"} } }
-          }
-        });
-        setChartEmpty("uptimeChartEmpty", !hasUptimeData, "No recent data for selected range.");
-
-        const tlabels = (trends && trends.series) ? trends.series.map((s)=> s.bucket_start) : [];
-        const tdata = (trends && trends.series) ? trends.series.map((s)=> s.down_events) : [];
-        const hasTrendData = tlabels.length > 0;
-        const tctx = document.getElementById("trendChart").getContext("2d");
-        window._trendChart = new Chart(tctx, {
-          type: "bar",
-          data: { labels: tlabels, datasets: [{ label: "Down events", data: tdata, backgroundColor: "rgba(232, 108, 132, 0.72)", borderRadius: 6, maxBarThickness: 24 }] },
-          options: {
-            maintainAspectRatio: false,
-            scales: {
-              x: {
-                grid: {color: chartGridColor},
-                ticks: {color: chartTickColor, maxTicksLimit: 7},
-                title: {display: true, text: "Day", color: chartTitleColor}
-              },
-              y: {
-                beginAtZero: true,
-                grid: {color: chartGridColor},
-                ticks: {color: chartTickColor},
-                title: {display: true, text: "Down events", color: chartTitleColor}
-              }
-            },
-            plugins: { legend: { display: true, labels: {color: "#d9e8ff"} } }
-          }
-        });
-        setChartEmpty("trendChartEmpty", !hasTrendData, "No recent data for selected range.");
-      })());
+      });
     }else{
       setChartEmpty("uptimeChartEmpty", true, "Chart library not available.");
       setChartEmpty("trendChartEmpty", true, "Chart library not available.");
