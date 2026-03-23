@@ -122,6 +122,46 @@ def test_worker_http_check_failure(tmp_path, monkeypatch):
         assert 'conn refused' in called['down']
 
 
+def test_burn_rate_alert_logs_and_dedupes(tmp_path, monkeypatch):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_burn_rate.sqlite'}"
+
+    from sqlmodel import Session, select
+    from src import alerts, db as dbmod
+    from src.models import AuditLog, Check, Event, Project
+    from src import worker
+
+    dbmod.create_db_and_tables()
+    worker._LAST_BURN_RATE_RUN = None
+
+    notified = []
+    monkeypatch.setattr(alerts, "notify_escalation", lambda project, reason, check=None: notified.append((project.id, reason)) or True)
+
+    now = datetime.utcnow()
+    with Session(dbmod.engine) as session:
+        project = Project(name="burn-rate-proj", slo_target=99.0, sla_target=99.0)
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        check = Check(project_id=project.id, name="burn-rate-check")
+        session.add(check)
+        session.commit()
+        session.refresh(check)
+
+        session.add(Event(check_id=check.id, project_id=project.id, event_type="down", created_at=now - timedelta(days=20)))
+        session.add(Event(check_id=check.id, project_id=project.id, event_type="up", created_at=now - timedelta(days=19)))
+        session.add(Event(check_id=check.id, project_id=project.id, event_type="down", created_at=now - timedelta(hours=6)))
+        session.commit()
+
+        worker._maybe_check_burn_rate_alerts(session, now, {project.id})
+        worker._maybe_check_burn_rate_alerts(session, now + timedelta(minutes=16), {project.id})
+
+        logs = session.exec(select(AuditLog).where(AuditLog.action == "burn_rate_alert")).all()
+        assert len(logs) == 1
+        assert len(notified) == 1
+        assert "burn-rate alert" in notified[0][1]
+
+
 def test_check_result_stores_canonical_evidence_fields(tmp_path, monkeypatch):
     os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_evidence.sqlite'}"
 

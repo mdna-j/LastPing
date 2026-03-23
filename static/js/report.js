@@ -76,6 +76,62 @@ function renderReportCards(checks, health, series){
   ].join("");
 }
 
+function formatBudgetSeconds(seconds){
+  if(seconds === null || seconds === undefined) return "n/a";
+  const total = Math.max(0, Math.round(Number(seconds)));
+  const days = Math.floor(total / 86400);
+  const hours = Math.floor((total % 86400) / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  if(days > 0) return `${days}d ${hours}h`;
+  if(hours > 0) return `${hours}h ${minutes}m`;
+  return `${minutes}m`;
+}
+
+function burnState(errorBudget){
+  if(!errorBudget) return "kpi-neutral";
+  if(errorBudget.alert && errorBudget.alert.triggered) return "kpi-critical";
+  const remaining = errorBudget.remaining_percent;
+  if(remaining === null || remaining === undefined) return "kpi-neutral";
+  if(Number(remaining) <= 25) return "kpi-warning";
+  return "kpi-healthy";
+}
+
+function renderBurnRateCards(errorBudget){
+  const root = document.getElementById("burnRateCards");
+  if(!root) return;
+
+  if(!errorBudget){
+    root.innerHTML = '<article class="card kpi-card kpi-neutral"><div class="metric-label">Error budget</div><div class="metric-value">n/a</div><div class="metric-sub">Unable to load burn-rate data.</div></article>';
+    return;
+  }
+
+  const windows = errorBudget.burn_rate_windows || [];
+  const shortWindow = windows[0] || null;
+  const longWindow = windows[1] || null;
+  const overallState = burnState(errorBudget);
+  const shortState = shortWindow && shortWindow.burn_rate !== null && shortWindow.burn_rate !== undefined
+    ? (Number(shortWindow.burn_rate) >= Number(shortWindow.threshold || 0) ? "kpi-critical" : (Number(shortWindow.burn_rate) >= 1 ? "kpi-warning" : "kpi-healthy"))
+    : "kpi-neutral";
+  const longState = longWindow && longWindow.burn_rate !== null && longWindow.burn_rate !== undefined
+    ? (Number(longWindow.burn_rate) >= Number(longWindow.threshold || 0) ? "kpi-critical" : (Number(longWindow.burn_rate) >= 1 ? "kpi-warning" : "kpi-healthy"))
+    : "kpi-neutral";
+  const offender = (errorBudget.top_offenders || [])[0] || null;
+
+  root.innerHTML = [
+    `<article class="card kpi-card ${overallState}"><div class="metric-label">Budget remaining</div><div class="metric-value">${errorBudget.remaining_percent !== null && errorBudget.remaining_percent !== undefined ? Number(errorBudget.remaining_percent).toFixed(1) + "%" : "n/a"}</div><div class="metric-sub">${formatBudgetSeconds(errorBudget.remaining_seconds)} remaining in selected window</div></article>`,
+    `<article class="card kpi-card ${overallState}"><div class="metric-label">Budget consumed</div><div class="metric-value">${errorBudget.consumed_percent !== null && errorBudget.consumed_percent !== undefined ? Number(errorBudget.consumed_percent).toFixed(1) + "%" : "n/a"}</div><div class="metric-sub">SLO target ${(errorBudget.slo_target ?? 0).toFixed ? Number(errorBudget.slo_target).toFixed(2) : errorBudget.slo_target}%</div></article>`,
+    `<article class="card kpi-card ${shortState}"><div class="metric-label">${shortWindow ? shortWindow.label : "Short"} burn</div><div class="metric-value">${shortWindow && shortWindow.burn_rate !== null && shortWindow.burn_rate !== undefined ? Number(shortWindow.burn_rate).toFixed(2) + "x" : "n/a"}</div><div class="metric-sub">Threshold ${shortWindow ? shortWindow.threshold : "n/a"}x</div></article>`,
+    `<article class="card kpi-card ${longState}"><div class="metric-label">${longWindow ? longWindow.label : "Long"} burn</div><div class="metric-value">${longWindow && longWindow.burn_rate !== null && longWindow.burn_rate !== undefined ? Number(longWindow.burn_rate).toFixed(2) + "x" : "n/a"}</div><div class="metric-sub">${offender ? `Lowest uptime: ${offender.name} (${Number(offender.uptime_percent).toFixed(2)}%)` : "No recent offenders"}</div></article>`,
+  ].join("");
+
+  if(errorBudget.alert && errorBudget.alert.triggered){
+    root.insertAdjacentHTML(
+      "beforeend",
+      `<article class="card kpi-card kpi-critical"><div class="metric-label">Alert state</div><div class="metric-value">Triggered</div><div class="metric-sub">${errorBudget.alert.reason}</div></article>`
+    );
+  }
+}
+
 function renderReportTable(series, rollup){
   const tbody = document.querySelector("#reportTable tbody");
   const head = document.querySelector("#reportTable thead th");
@@ -181,23 +237,28 @@ async function loadReport(){
       url = `/projects/${pid}/metrics/availability/rollup?${params.toString()}`;
     }
 
-    const [checksRes, reportRes] = await Promise.all([
+    const [checksRes, reportRes, errorBudgetRes] = await Promise.all([
       perf && window.LastPingShell
         ? perf.fetchJson("checks", `/projects/${pid}/checks`)
         : fetch(`/projects/${pid}/checks`).then(async (res)=> ({ok: res.ok, status: res.status, data: res.ok ? await res.json() : null})),
       perf && window.LastPingShell
         ? perf.fetchJson("availability-report", url, {headers})
         : fetch(url, {headers}).then(async (res)=> ({ok: res.ok, status: res.status, data: res.ok ? await res.json() : null})),
+      perf && window.LastPingShell
+        ? perf.fetchJson("error-budget", `/projects/${pid}/metrics/error-budget?${params.toString()}`, {headers})
+        : fetch(`/projects/${pid}/metrics/error-budget?${params.toString()}`, {headers}).then(async (res)=> ({ok: res.ok, status: res.status, data: res.ok ? await res.json() : null})),
     ]);
     const checks = checksRes.ok ? (checksRes.data || []) : [];
     const shellPromise = window.LastPingShell
       ? window.LastPingShell.hydratePageShell(pid, checks, {perf})
       : Promise.resolve({checks, health: null});
+    const errorBudget = errorBudgetRes.ok ? (errorBudgetRes.data || null) : null;
 
     if(!reportRes.ok){
       alert("Failed to load report");
       const shellData = await shellPromise;
       renderReportCards(shellData.checks, shellData.health, []);
+      renderBurnRateCards(errorBudget);
       renderReportTable([], rollup);
       return;
     }
@@ -208,16 +269,19 @@ async function loadReport(){
     if(perf){
       perf.measureRender("reports-render", ()=>{
         renderReportCards(shellData.checks, shellData.health, series);
+        renderBurnRateCards(errorBudget);
         renderReportTable(series, rollup);
         renderReportChart(series, rollup);
       });
     }else{
       renderReportCards(shellData.checks, shellData.health, series);
+      renderBurnRateCards(errorBudget);
       renderReportTable(series, rollup);
       renderReportChart(series, rollup);
     }
   }catch(_e){
     alert("Failed to load report");
+    renderBurnRateCards(null);
     renderReportTable([], getRange().rollup);
     if(window.LastPingShell){
       window.LastPingShell.setChartEmpty("reportChartEmpty", true, "Unable to render chart.");

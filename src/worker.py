@@ -42,6 +42,7 @@ _LAST_PREDICTIVE_RUN: Optional[datetime] = None
 _LAST_ARCHIVE_RUN: Optional[datetime] = None
 _LAST_QUARTERLY_RUN: Optional[datetime] = None
 _LAST_RAW_RETENTION_RUN: Optional[datetime] = None
+_LAST_BURN_RATE_RUN: Optional[datetime] = None
 
 
 def _now() -> datetime:
@@ -1749,6 +1750,88 @@ def _maybe_log_predictive_warnings(session: Session, now: datetime, project_ids)
                 logger.exception("Failed to log predictive warning for check %s", check_id)
 
 
+def _maybe_check_burn_rate_alerts(session: Session, now: datetime, project_ids):
+    if os.environ.get("BURN_RATE_ALERTS_ENABLED", "1") != "1":
+        return
+
+    global _LAST_BURN_RATE_RUN
+    interval = int(os.environ.get("BURN_RATE_RUN_INTERVAL_SECONDS", "900"))
+    if _LAST_BURN_RATE_RUN and (now - _LAST_BURN_RATE_RUN).total_seconds() < interval:
+        return
+    _LAST_BURN_RATE_RUN = now
+
+    lookback_days = int(os.environ.get("ERROR_BUDGET_WINDOW_DAYS", "30"))
+    short_window_minutes = int(os.environ.get("BURN_RATE_SHORT_WINDOW_MINUTES", "60"))
+    long_window_minutes = int(os.environ.get("BURN_RATE_LONG_WINDOW_MINUTES", "360"))
+    short_threshold = float(os.environ.get("BURN_RATE_SHORT_THRESHOLD", "14.4"))
+    long_threshold = float(os.environ.get("BURN_RATE_LONG_THRESHOLD", "6.0"))
+    alert_window_seconds = int(os.environ.get("BURN_RATE_ALERT_WINDOW_SECONDS", "3600"))
+    start_dt = now - timedelta(days=max(1, lookback_days))
+    cutoff = now - timedelta(seconds=max(60, alert_window_seconds))
+
+    try:
+        from .alerts import notify_escalation
+        from .routers.metrics import _compute_error_budget_status
+    except Exception:
+        logger.exception("Failed to load burn-rate helpers")
+        return
+
+    for pid in project_ids:
+        project = session.get(Project, pid)
+        if not project or getattr(project, "slo_target", None) is None:
+            continue
+        try:
+            status = _compute_error_budget_status(
+                session,
+                pid,
+                start_dt,
+                now,
+                short_window_minutes=short_window_minutes,
+                long_window_minutes=long_window_minutes,
+                short_burn_threshold=short_threshold,
+                long_burn_threshold=long_threshold,
+            )
+        except Exception:
+            logger.exception("Failed to compute burn rate status for project %s", pid)
+            continue
+
+        if not status.get("alert", {}).get("triggered"):
+            continue
+
+        existing = session.exec(
+            select(AuditLog).where(
+                AuditLog.action == "burn_rate_alert",
+                AuditLog.target_type == "project",
+                AuditLog.target_id == pid,
+                AuditLog.created_at >= cutoff,
+            )
+        ).first()
+        if existing:
+            continue
+
+        try:
+            al = AuditLog(
+                actor="worker",
+                action="burn_rate_alert",
+                target_type="project",
+                target_id=pid,
+                details=json.dumps(status),
+                actor_ip=None,
+                user_agent=None,
+            )
+            session.add(al)
+            session.commit()
+        except Exception:
+            session.rollback()
+            logger.exception("Failed to record burn rate alert for project %s", pid)
+            continue
+
+        try:
+            notify_escalation(project, status["alert"]["reason"])
+        except Exception:
+            logger.exception("Failed to send burn rate alert for project %s", pid)
+
+
 def _compute_uptime_snapshots(session: Session, now: datetime):
     """Compute and persist a short-term uptime/MTTR snapshot (last 24h) for each check."""
     window_end = now
@@ -3176,6 +3259,10 @@ def scan_checks_once(session: Session):
         _maybe_log_predictive_warnings(session, now, project_ids)
     except Exception:
         logger.exception("Error computing predictive warnings")
+    try:
+        _maybe_check_burn_rate_alerts(session, now, project_ids)
+    except Exception:
+        logger.exception("Error checking burn rate alerts")
     try:
         _maybe_log_early_warnings(session, now, project_ids)
     except Exception:

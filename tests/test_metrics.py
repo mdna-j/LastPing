@@ -129,3 +129,46 @@ def test_availability_rollup_monthly(tmp_path):
     series = data.get("series", [])
     assert any(row["period"].endswith("-01") for row in series)
     assert any(row["period"].endswith("-02") for row in series)
+
+
+def test_error_budget_endpoint_reports_burn_rate(tmp_path):
+    os.environ['DATABASE_URL'] = f"sqlite:///{tmp_path / 'error_budget.db'}"
+    from sqlmodel import Session
+    from src import db as dbmod
+    from src.models import Project, Check, Event
+    from src.main import app
+    from fastapi.testclient import TestClient
+
+    dbmod.create_db_and_tables()
+    client = TestClient(app)
+
+    now = datetime.utcnow()
+    with Session(dbmod.engine) as s:
+        from src.security import hash_api_key
+        plain = 'budgetkey'
+        p = Project(name='budget-proj', api_key_hash=hash_api_key(plain), slo_target=99.0, sla_target=99.0)
+        s.add(p)
+        s.commit()
+        s.refresh(p)
+        c = Check(project_id=p.id, name='budget-check')
+        s.add(c)
+        s.commit()
+        s.refresh(c)
+
+        s.add(Event(check_id=c.id, project_id=p.id, event_type='down', created_at=now - timedelta(days=20)))
+        s.add(Event(check_id=c.id, project_id=p.id, event_type='up', created_at=now - timedelta(days=19)))
+        s.add(Event(check_id=c.id, project_id=p.id, event_type='down', created_at=now - timedelta(hours=6)))
+        s.commit()
+        pid = p.id
+
+    headers = {"Authorization": f"Bearer {plain}"}
+    resp = client.get(f"/projects/{pid}/metrics/error-budget?start={(now - timedelta(days=30)).isoformat()}&end={now.isoformat()}&short_window_minutes=60&long_window_minutes=360", headers=headers)
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["project_id"] == pid
+    assert payload["error_budget_percent"] == 1.0
+    assert payload["consumed_percent"] is not None and payload["consumed_percent"] > 100
+    assert payload["remaining_percent"] == 0.0
+    assert payload["alert"]["triggered"] is True
+    assert len(payload["burn_rate_windows"]) == 2
+    assert payload["burn_rate_windows"][0]["burn_rate"] >= payload["burn_rate_windows"][0]["threshold"]

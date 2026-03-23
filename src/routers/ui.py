@@ -1049,6 +1049,14 @@ def reports_page():
 
         <section id="reportCards" class="kpi-grid"></section>
 
+        <section class="card">
+          <div class="section-head">
+            <h3>Error Budget / Burn Rate</h3>
+            <div class="muted">SRE-style budget consumption and multi-window burn-rate detection.</div>
+          </div>
+          <div id="burnRateCards" class="kpi-grid"></div>
+        </section>
+
         <section id="reportChartCard" class="card chart-card">
           <div class="section-head">
             <h3>Project Availability</h3>
