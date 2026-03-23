@@ -1,14 +1,179 @@
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
 from fastapi.responses import HTMLResponse
 from sqlmodel import Session, select
+from pydantic import AnyHttpUrl, EmailStr, ValidationError, parse_obj_as, validator
 
 from ..db import get_session
-from ..models import Project, Check, Event, Incident, CheckLease
+from ..models import Project, Check, Event, Incident, CheckLease, StatusSubscription
 from ..deps import limit_public_requests
+from ..schemas import StrictBaseModel
 
 router = APIRouter(prefix="/ui", tags=["ui"], dependencies=[Depends(limit_public_requests)])
+
+
+class StatusSubscriptionCreate(StrictBaseModel):
+    channel: str
+    target: str
+
+    @validator("channel")
+    def validate_channel(cls, value: str) -> str:
+        normalized = value.lower()
+        if normalized not in {"email", "webhook"}:
+            raise ValueError("channel must be email or webhook")
+        return normalized
+
+    @validator("target")
+    def validate_target(cls, value: str, values) -> str:
+        channel = values.get("channel")
+        if channel == "email":
+            return str(parse_obj_as(EmailStr, value)).lower()
+        if channel == "webhook":
+            return str(parse_obj_as(AnyHttpUrl, value))
+        return value
+
+
+def _public_status_overall(checks: list[Check]) -> str:
+    statuses = {(check.status or "").upper() for check in checks}
+    if "DOWN" in statuses:
+        return "major_outage"
+    if "DEGRADED" in statuses:
+        return "degraded"
+    if statuses:
+        return "operational"
+    return "unknown"
+
+
+def _serialize_public_incident(incident: Incident, *, check_name: str, latest_event: Event | None, now: datetime) -> dict:
+    ended_at = incident.resolved_at or now
+    duration_seconds = max(0, int((ended_at - incident.started_at).total_seconds()))
+    return {
+        "id": incident.id,
+        "check_id": incident.check_id,
+        "check_name": check_name,
+        "started_at": incident.started_at.isoformat(),
+        "resolved_at": incident.resolved_at.isoformat() if incident.resolved_at else None,
+        "status": incident.status,
+        "duration_seconds": duration_seconds,
+        "latest_event": {
+            "type": latest_event.event_type,
+            "message": latest_event.message,
+            "created_at": latest_event.created_at.isoformat(),
+        } if latest_event else None,
+    }
+
+
+def _build_public_status_payload(session: Session, project_id: int) -> dict:
+    project = session.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    now = datetime.utcnow()
+    checks = session.exec(
+        select(Check).where(Check.project_id == project_id).order_by(Check.name.asc())
+    ).all()
+    incidents = session.exec(
+        select(Incident).where(
+            Incident.project_id == project_id,
+            Incident.merged_into == None,
+        ).order_by(Incident.started_at.desc())
+    ).all()
+
+    check_ids = [check.id for check in checks if check.id is not None]
+    event_by_check: dict[int, Event] = {}
+    event_by_incident: dict[int, Event] = {}
+
+    if check_ids:
+        recent_events = session.exec(
+            select(Event).where(
+                Event.project_id == project_id,
+                Event.check_id.in_(check_ids),
+            ).order_by(Event.created_at.desc())
+        ).all()
+        for event in recent_events:
+            if event.check_id not in event_by_check:
+                event_by_check[event.check_id] = event
+
+        incident_ids = [incident.id for incident in incidents[:16] if incident.id is not None]
+        if incident_ids:
+            incident_events = session.exec(
+                select(Event).where(
+                    Event.project_id == project_id,
+                    Event.incident_id.in_(incident_ids),
+                ).order_by(Event.created_at.desc())
+            ).all()
+            for event in incident_events:
+                if event.incident_id is not None and event.incident_id not in event_by_incident:
+                    event_by_incident[event.incident_id] = event
+
+    check_name_by_id = {check.id: check.name for check in checks}
+    open_incident_by_check = {
+        incident.check_id: incident
+        for incident in incidents
+        if incident.resolved_at is None
+    }
+
+    components = []
+    for check in checks:
+        last_event = event_by_check.get(check.id)
+        active_incident = open_incident_by_check.get(check.id)
+        components.append({
+            "id": check.id,
+            "name": check.name,
+            "type": check.type,
+            "status": check.status,
+            "region": check.region,
+            "last_ping": check.last_ping.isoformat() if check.last_ping else None,
+            "incident_open": active_incident is not None,
+            "incident_id": active_incident.id if active_incident else None,
+            "last_event": {
+                "type": last_event.event_type,
+                "message": last_event.message,
+                "created_at": last_event.created_at.isoformat(),
+            } if last_event else None,
+        })
+
+    open_incidents = [
+        _serialize_public_incident(
+            incident,
+            check_name=check_name_by_id.get(incident.check_id, f"Check {incident.check_id}"),
+            latest_event=event_by_incident.get(incident.id),
+            now=now,
+        )
+        for incident in incidents
+        if incident.resolved_at is None
+    ]
+    incident_history = [
+        _serialize_public_incident(
+            incident,
+            check_name=check_name_by_id.get(incident.check_id, f"Check {incident.check_id}"),
+            latest_event=event_by_incident.get(incident.id),
+            now=now,
+        )
+        for incident in incidents[:12]
+    ]
+
+    down_count = sum(1 for check in checks if (check.status or "").upper() == "DOWN")
+    degraded_count = sum(1 for check in checks if (check.status or "").upper() == "DEGRADED")
+    up_count = sum(1 for check in checks if (check.status or "").upper() == "UP")
+
+    return {
+        "project": {"id": project.id, "name": project.name},
+        "summary": {
+            "overall_status": _public_status_overall(checks),
+            "component_count": len(checks),
+            "up_count": up_count,
+            "down_count": down_count,
+            "degraded_count": degraded_count,
+            "open_incident_count": len(open_incidents),
+            "generated_at": now.isoformat(),
+        },
+        "components": components,
+        "checks": components,
+        "open_incidents": open_incidents,
+        "incident_history": incident_history,
+    }
 
 
 @router.get("/incidents", response_class=HTMLResponse)
@@ -1392,13 +1557,22 @@ def public_status_page(project_id: int = Path(..., ge=1)):
     return f"""
     <html>
     <head>
-      <title>Project Status</title>
+      <title>System Status</title>
       <meta name="viewport" content="width=device-width,initial-scale=1" />
       <link rel="stylesheet" href="/static/css/ui.css" />
     </head>
-    <body>
-    <h1>Project Status</h1>
-    <div id="statusRoot" data-project-id="{project_id}"></div>
+    <body class="page-status-public">
+    <main class="public-status-shell">
+      <header class="public-status-header">
+        <div class="public-status-brand">LP</div>
+        <div>
+          <div class="public-status-kicker">Public status</div>
+          <h1>System Status</h1>
+          <div class="muted">Live component health, incident history, and subscription updates.</div>
+        </div>
+      </header>
+      <div id="statusRoot" class="status-public-root" data-project-id="{project_id}"></div>
+    </main>
     <script src="/static/js/status.js"></script>
     </body>
     </html>
@@ -1407,43 +1581,57 @@ def public_status_page(project_id: int = Path(..., ge=1)):
 
 @router.get("/status/{project_id}/data")
 def public_status_data(project_id: int = Path(..., ge=1), session: Session = Depends(get_session)):
+    return _build_public_status_payload(session, project_id)
+
+
+@router.post("/status/{project_id}/subscribe")
+def public_status_subscribe(
+    project_id: int = Path(..., ge=1),
+    payload: StatusSubscriptionCreate = Body(...),
+    session: Session = Depends(get_session),
+):
     project = session.get(Project, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    checks = session.exec(select(Check).where(Check.project_id == project_id)).all()
-    open_incidents = session.exec(select(Incident).where(Incident.project_id == project_id, Incident.resolved_at == None)).all()
+    existing = session.exec(
+        select(StatusSubscription).where(
+            StatusSubscription.project_id == project_id,
+            StatusSubscription.channel == payload.channel,
+            StatusSubscription.target == payload.target,
+        )
+    ).first()
 
-    out_checks = []
-    for c in checks:
-        last_event = session.exec(
-            select(Event).where(Event.project_id == project_id, Event.check_id == c.id).order_by(Event.created_at.desc())
-        ).first()
-        out_checks.append({
-            "id": c.id,
-            "name": c.name,
-            "type": c.type,
-            "status": c.status,
-            "last_ping": c.last_ping.isoformat() if c.last_ping else None,
-            "last_event": {
-                "type": last_event.event_type,
-                "message": last_event.message,
-                "created_at": last_event.created_at.isoformat(),
-            } if last_event else None,
-        })
+    if existing is None:
+        subscription = StatusSubscription(
+            project_id=project_id,
+            channel=payload.channel,
+            target=payload.target,
+            active=True,
+        )
+        session.add(subscription)
+        message = "Subscription created."
+    else:
+        existing.active = True
+        subscription = existing
+        message = "Subscription already existed; it has been reactivated."
 
-    incidents_out = []
-    for inc in open_incidents:
-        incidents_out.append({
-            "id": inc.id,
-            "check_id": inc.check_id,
-            "started_at": inc.started_at.isoformat(),
-            "status": inc.status,
-        })
+    try:
+        session.commit()
+    except ValidationError as exc:
+        session.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    session.refresh(subscription)
 
     return {
-        "project": {"id": project.id, "name": project.name},
-        "checks": out_checks,
-        "open_incidents": incidents_out,
+        "message": message,
+        "subscription": {
+            "id": subscription.id,
+            "project_id": subscription.project_id,
+            "channel": subscription.channel,
+            "target": subscription.target,
+            "active": subscription.active,
+            "created_at": subscription.created_at.isoformat(),
+        },
     }
 

@@ -29,7 +29,7 @@ from sqlalchemy.exc import IntegrityError
 
 from .db import engine
 from .models import Check, CheckType, CheckStatus, Event, EventType, Project, Incident, CheckResult
-from .alerts import notify_down, notify_recovery, notify_degraded, send_email, send_sms
+from .alerts import notify_down, notify_recovery, notify_degraded, notify_status_subscribers, send_email, send_sms
 from .models import UptimeSnapshot, AvailabilityRollup, CheckLease, RemediationHook, RemediationLog, RemediationApproval, OnCallAlert, OnCallEscalation, OnCallRotation, OnCallMember, AuditLog, Anomaly, Heartbeat
 from .analytics_ml import find_similar_incidents
 
@@ -310,6 +310,21 @@ def _incident_notifications_silenced(incident: Optional[Incident], now: datetime
     if not isinstance(silenced_until, datetime):
         return False
     return _as_utc_naive(silenced_until) > _as_utc_naive(now)
+
+
+def _notify_public_status(session: Session, project: Project, check: Check, incident: Optional[Incident], *, event: str) -> None:
+    if incident is None:
+        return
+    try:
+        notify_status_subscribers(session, project, check, incident, event=event)
+    except Exception:
+        logger.exception(
+            "Failed public status notification for project=%s check=%s incident=%s event=%s",
+            getattr(project, "id", None),
+            getattr(check, "id", None),
+            getattr(incident, "id", None),
+            event,
+        )
 
 
 def _event_state(event_type: Optional[str]) -> Optional[str]:
@@ -2545,6 +2560,7 @@ def scan_checks_once(session: Session):
                         continue
                     if created_incident:
                         _log_similar_incidents(session, project, open_inc.id, reason)
+                        _notify_public_status(session, project, check, open_inc, event="opened")
                     event_message = reason
                     if maintenance:
                         event_message = f"{reason} (suppressed due to maintenance)"
@@ -2684,7 +2700,9 @@ def scan_checks_once(session: Session):
                     check.consecutive_failures = 0
                     # close open incident if present
                     open_inc = _get_open_incident(session, check.id)
-                    _resolve_open_incident(session, open_inc, now=now, run_key=run_key)
+                    resolved = _resolve_open_incident(session, open_inc, now=now, run_key=run_key)
+                    if resolved:
+                        _notify_public_status(session, project, check, open_inc, event="resolved")
                     _record_event(
                         session,
                         check,
@@ -2797,7 +2815,9 @@ def scan_checks_once(session: Session):
                     if check.status != CheckStatus.DEGRADED:
                         # close open incident if exists
                         open_inc = _get_open_incident(session, check.id)
-                        _resolve_open_incident(session, open_inc, now=now, run_key=run_key)
+                        resolved = _resolve_open_incident(session, open_inc, now=now, run_key=run_key)
+                        if resolved:
+                            _notify_public_status(session, project, check, open_inc, event="resolved")
                         check.status = CheckStatus.DEGRADED
                         check.consecutive_failures = 0
                         event_message = f"latency_ms={latency_ms:.1f}" if latency_ms is not None else "degraded"
@@ -2895,7 +2915,9 @@ def scan_checks_once(session: Session):
                         check.consecutive_failures = 0
                         open_inc = _get_open_incident(session, check.id)
                         evidence_incident_id = open_inc.id if open_inc else None
-                        _resolve_open_incident(session, open_inc, now=now, run_key=run_key)
+                        resolved = _resolve_open_incident(session, open_inc, now=now, run_key=run_key)
+                        if resolved:
+                            _notify_public_status(session, project, check, open_inc, event="resolved")
                         _record_event(
                             session,
                             check,
@@ -2984,6 +3006,7 @@ def scan_checks_once(session: Session):
                         created_incident = False
                     if created_incident:
                         _log_similar_incidents(session, project, open_inc.id, reason)
+                        _notify_public_status(session, project, check, open_inc, event="opened")
                     event_message = f"{reason}"
                     if maintenance:
                         event_message = f"{event_message} (suppressed due to maintenance)"

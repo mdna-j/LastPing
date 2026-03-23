@@ -18,6 +18,9 @@ import base64
 from email.message import EmailMessage
 from typing import Optional
 from datetime import datetime
+from sqlmodel import Session, select
+
+from .models import StatusSubscription
 
 logger = logging.getLogger("lastping.alerts")
 
@@ -585,4 +588,79 @@ def notify_escalation(project, reason: str, check=None):
     if not sent:
         logger.debug("No escalation channels configured")
     return sent
-    
+
+
+def notify_status_subscribers(session: Session, project, check, incident, *, event: str) -> bool:
+    """Send public status notifications to email/webhook subscribers."""
+    if project is None or check is None or incident is None:
+        return False
+
+    subscriptions = session.exec(
+        select(StatusSubscription).where(
+            StatusSubscription.project_id == getattr(project, "id", None),
+            StatusSubscription.active == True,
+        )
+    ).all()
+    if not subscriptions:
+        return False
+
+    event = (event or "").lower()
+    if event not in {"opened", "resolved"}:
+        raise ValueError("event must be opened or resolved")
+
+    status_url = None
+    base_url = (os.environ.get("BASE_URL") or "").rstrip("/")
+    if base_url and getattr(project, "id", None):
+        status_url = f"{base_url}/ui/status/{project.id}"
+
+    incident_state = "investigating" if event == "opened" else "resolved"
+    subject = (
+        f"[LastPing Status] {project.name}: {check.name} incident opened"
+        if event == "opened"
+        else f"[LastPing Status] {project.name}: {check.name} incident resolved"
+    )
+    body_lines = [
+        f"Project: {project.name}",
+        f"Component: {check.name}",
+        f"Incident: #{incident.id}",
+        f"State: {incident_state}",
+        f"Started: {incident.started_at.isoformat()}",
+    ]
+    if getattr(incident, "resolved_at", None):
+        body_lines.append(f"Resolved: {incident.resolved_at.isoformat()}")
+    if status_url:
+        body_lines.append(f"Status page: {status_url}")
+
+    payload = {
+        "event": f"incident_{event}",
+        "project": {"id": getattr(project, "id", None), "name": getattr(project, "name", None)},
+        "component": {
+            "id": getattr(check, "id", None),
+            "name": getattr(check, "name", None),
+            "status": getattr(check, "status", None),
+            "type": getattr(check, "type", None),
+        },
+        "incident": {
+            "id": getattr(incident, "id", None),
+            "status": getattr(incident, "status", None),
+            "started_at": incident.started_at.isoformat() if getattr(incident, "started_at", None) else None,
+            "resolved_at": incident.resolved_at.isoformat() if getattr(incident, "resolved_at", None) else None,
+        },
+        "status_url": status_url,
+        "sent_at": datetime.utcnow().isoformat() + "Z",
+    }
+
+    sent = False
+    for subscription in subscriptions:
+        try:
+            if subscription.channel == "email":
+                sent = send_email(subject, "\n".join(body_lines), to=subscription.target) or sent
+            elif subscription.channel == "webhook":
+                sent = send_generic_webhook(subscription.target, payload) or sent
+        except Exception:
+            logger.exception(
+                "Failed public status notification for project=%s subscription=%s",
+                getattr(project, "id", None),
+                getattr(subscription, "id", None),
+            )
+    return sent

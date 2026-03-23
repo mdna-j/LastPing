@@ -378,6 +378,16 @@ class IncidentNote(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
 
 
+class StatusSubscription(SQLModel, table=True):
+    __tablename__ = "status_subscription"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    channel: str = Field(index=True, description="notification channel: email or webhook")
+    target: str = Field(index=True, description="email address or webhook URL")
+    active: bool = Field(default=True, index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+
+
 class AuditLog(SQLModel, table=True):
     __tablename__ = "audit_log"
     id: Optional[int] = Field(default=None, primary_key=True)
