@@ -105,3 +105,165 @@ def test_incident_endpoints_require_valid_project_api_key_and_support_share_flow
     public_payload = public.json()
     assert public_payload["incident"]["id"] == incident_id
     assert len(public_payload["events"]) == 1
+
+
+def test_incident_lifecycle_management_with_owner_token_and_viewer_read_access(tmp_path):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_incident_lifecycle.sqlite'}"
+
+    from secrets import token_urlsafe
+
+    from sqlmodel import Session
+    from src import db as dbmod
+    from src.main import app
+    from src.models import (
+        Check,
+        CheckStatus,
+        CheckType,
+        Event,
+        EventType,
+        Incident,
+        Project,
+        ProjectMembership,
+        User,
+        UserToken,
+    )
+    from src.security import hash_api_key, hash_password
+
+    dbmod.create_db_and_tables()
+    client = TestClient(app)
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="incident-lifecycle-project", api_key_hash=hash_api_key("project-key"))
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        check = Check(
+            project_id=project.id,
+            name="incident-owner-check",
+            type=CheckType.HEARTBEAT,
+            status=CheckStatus.DOWN,
+            expected_interval=60,
+            grace_period=10,
+            last_ping=datetime.utcnow() - timedelta(minutes=12),
+        )
+        session.add(check)
+        session.commit()
+        session.refresh(check)
+
+        incident = Incident(
+            project_id=project.id,
+            check_id=check.id,
+            started_at=datetime.utcnow() - timedelta(minutes=8),
+            status="open",
+        )
+        session.add(incident)
+        session.commit()
+        session.refresh(incident)
+
+        session.add(
+            Event(
+                check_id=check.id,
+                project_id=project.id,
+                incident_id=incident.id,
+                event_type=EventType.DOWN,
+                message="heartbeat overdue",
+                created_at=datetime.utcnow() - timedelta(minutes=8),
+            )
+        )
+
+        owner = User(email="owner@example.com", hashed_password=hash_password("pw"))
+        viewer = User(email="viewer@example.com", hashed_password=hash_password("pw"))
+        session.add(owner)
+        session.add(viewer)
+        session.commit()
+        session.refresh(owner)
+        session.refresh(viewer)
+
+        session.add(ProjectMembership(user_id=owner.id, project_id=project.id, role="owner"))
+        session.add(ProjectMembership(user_id=viewer.id, project_id=project.id, role="viewer"))
+
+        owner_token = token_urlsafe(16)
+        viewer_token = token_urlsafe(16)
+        session.add(UserToken(user_id=owner.id, token=owner_token, expires_at=datetime.utcnow() + timedelta(hours=1)))
+        session.add(UserToken(user_id=viewer.id, token=viewer_token, expires_at=datetime.utcnow() + timedelta(hours=1)))
+        session.commit()
+
+        project_id = project.id
+        incident_id = incident.id
+
+    owner_headers = {"Authorization": f"Bearer {owner_token}"}
+    viewer_headers = {"Authorization": f"Bearer {viewer_token}"}
+
+    viewer_list = client.get(f"/projects/{project_id}/incidents", headers=viewer_headers)
+    assert viewer_list.status_code == 200
+    assert viewer_list.json()[0]["note_count"] == 0
+
+    assign = client.post(
+        f"/projects/{project_id}/incidents/{incident_id}/assign",
+        json={"owner": "alice"},
+        headers=owner_headers,
+    )
+    assert assign.status_code == 200
+    assert assign.json()["incident"]["owner"] == "alice"
+
+    viewer_assign = client.post(
+        f"/projects/{project_id}/incidents/{incident_id}/assign",
+        json={"owner": "bob"},
+        headers=viewer_headers,
+    )
+    assert viewer_assign.status_code == 403
+
+    ack = client.post(
+        f"/projects/{project_id}/incidents/{incident_id}/ack",
+        json={"acknowledged": True},
+        headers=owner_headers,
+    )
+    assert ack.status_code == 200
+    assert ack.json()["incident"]["acknowledged_at"] is not None
+    assert ack.json()["incident"]["acknowledged_by"].startswith("user:")
+
+    silence_until = (datetime.utcnow() + timedelta(minutes=30)).isoformat()
+    silence = client.post(
+        f"/projects/{project_id}/incidents/{incident_id}/silence",
+        json={"until": silence_until},
+        headers=owner_headers,
+    )
+    assert silence.status_code == 200
+    assert silence.json()["incident"]["silenced_until"] is not None
+
+    note = client.post(
+        f"/projects/{project_id}/incidents/{incident_id}/notes",
+        json={"body": "Investigating heartbeat backlog."},
+        headers=owner_headers,
+    )
+    assert note.status_code == 200
+    assert note.json()["note"]["body"] == "Investigating heartbeat backlog."
+    assert note.json()["note"]["author"].startswith("user:")
+
+    detail = client.get(
+        f"/projects/{project_id}/incidents/{incident_id}",
+        headers=owner_headers,
+    )
+    assert detail.status_code == 200
+    detail_payload = detail.json()
+    assert detail_payload["incident"]["owner"] == "alice"
+    assert detail_payload["incident"]["note_count"] == 1
+    assert len(detail_payload["notes"]) == 1
+    assert detail_payload["notes"][0]["body"] == "Investigating heartbeat backlog."
+
+    clear_ack = client.post(
+        f"/projects/{project_id}/incidents/{incident_id}/ack",
+        json={"acknowledged": False},
+        headers=owner_headers,
+    )
+    assert clear_ack.status_code == 200
+    assert clear_ack.json()["incident"]["acknowledged_at"] is None
+
+    clear_silence = client.post(
+        f"/projects/{project_id}/incidents/{incident_id}/silence",
+        json={"clear": True},
+        headers=owner_headers,
+    )
+    assert clear_silence.status_code == 200
+    assert clear_silence.json()["incident"]["silenced_until"] is None

@@ -37,7 +37,7 @@ def incidents_page():
         <header class="topbar">
           <div>
             <h1>Incidents</h1>
-            <div class="muted">Review open incidents and merge related failures into a single thread.</div>
+            <div class="muted">Acknowledge, assign, silence, and collaborate on active incidents.</div>
           </div>
         </header>
 
@@ -72,6 +72,7 @@ def incidents_page():
           <div class="row dashboard-controls-row">
             <div class="dashboard-inputs">
               <label>Project: <input id="projectId" value="1" style="width:80px"/></label>
+              <label>API Key: <input id="apiKey" type="password" autocomplete="off" placeholder="optional" style="width:220px"/></label>
               <label>User token: <input id="userToken" type="password" autocomplete="off" placeholder="optional" style="width:220px"/></label>
               <label>Admin token: <input id="adminToken" type="password" autocomplete="off" placeholder="optional" style="width:220px"/></label>
             </div>
@@ -326,17 +327,88 @@ def incident_detail_page(incident_id: int = Path(..., ge=1)):
       <meta name="viewport" content="width=device-width,initial-scale=1" />
       <link rel="stylesheet" href="/static/css/ui.css" />
     </head>
-    <body>
-    <h1>Incident <span id="iid"></span></h1>
-    <div class="row">
-      <label>Project: <input id="projectId" value="1" style="width:80px"/></label>
-      <label>API Key: <input id="apiKey" type="password" autocomplete="off" placeholder="required" style="width:240px"/></label>
+    <body class="page-incidents">
+    <div class="app-shell">
+      <aside class="nav-rail">
+        <div class="rail-brand">LP</div>
+        <nav class="rail-links">
+          <a class="rail-link" href="/ui/dashboard">Dashboard</a>
+          <a class="rail-link" href="/ui/snapshots">Snapshots</a>
+          <a class="rail-link" href="/ui/reports">Reports</a>
+          <a class="rail-link active" href="/ui/incidents">Incidents</a>
+          <a class="rail-link" href="/ui/projects/1/settings">Settings</a>
+        </nav>
+      </aside>
+
+      <main class="main-stage">
+        <header class="topbar">
+          <div>
+            <h1>Incident Detail</h1>
+            <div class="muted">Investigate history, collaborate with notes, and manage the current response owner.</div>
+          </div>
+        </header>
+
+        <section class="card controls-card">
+          <div class="row dashboard-controls-row">
+            <div class="dashboard-inputs">
+              <label>Project: <input id="projectId" value="1" style="width:80px"/></label>
+              <label>API Key: <input id="apiKey" type="password" autocomplete="off" placeholder="optional" style="width:220px"/></label>
+              <label>User token: <input id="userToken" type="password" autocomplete="off" placeholder="optional" style="width:220px"/></label>
+              <label>Admin token: <input id="adminToken" type="password" autocomplete="off" placeholder="optional" style="width:220px"/></label>
+            </div>
+            <div class="dashboard-actions">
+              <button id="reloadIncidentBtn" class="btn">Refresh</button>
+              <button id="shareBtn" class="btn btn-secondary">Create Share Link</button>
+              <a class="btn btn-secondary" href="/ui/incidents">Back To Incidents</a>
+            </div>
+          </div>
+          <div id="shareInfo" class="muted"></div>
+        </section>
+
+        <section id="incidentLifecycleCard" class="card">
+          <div class="section-head">
+            <h3>Response Workflow</h3>
+            <div class="muted">Owner, acknowledgement, silence, and current state for this incident.</div>
+          </div>
+          <div id="incidentSummary" class="muted">Provide a project API key, user token, or admin token to load incident details.</div>
+          <div id="incidentActions" class="row hidden">
+            <button id="assignOwnerBtn" class="btn btn-secondary">Assign Owner</button>
+            <button id="ackIncidentBtn" class="btn btn-secondary">Acknowledge</button>
+            <button id="silenceIncidentBtn" class="btn btn-secondary">Snooze</button>
+            <button id="clearSilenceBtn" class="btn btn-secondary">Clear Silence</button>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="section-head">
+            <h3>Notes</h3>
+            <div class="muted">Capture investigation context, handoffs, and remediation steps.</div>
+          </div>
+          <div id="notesList" class="muted">No notes yet.</div>
+          <div class="row">
+            <textarea id="incidentNoteBody" rows="4" placeholder="Add an incident note..." style="width:min(720px,100%)"></textarea>
+            <button id="addNoteBtn" class="btn">Add Note</button>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="section-head">
+            <h3>Events</h3>
+            <div class="muted">Split selected events into a new incident when needed.</div>
+          </div>
+          <div id="detail">Loading...</div>
+        </section>
+
+        <section class="card">
+          <div class="section-head">
+            <h3>Similar Incidents</h3>
+            <div class="muted">Match against historical failures for faster investigation.</div>
+          </div>
+          <div id="similarIncidents" class="muted">Provide an API key or token to load similar incidents.</div>
+        </section>
+      </main>
     </div>
-    <div style="margin-top:12px"><button id="shareBtn" class="btn">Create Share Link</button> <span id="shareInfo" class="muted"></span></div>
-    <h2>Events</h2>
-    <div id="detail">Loading...</div>
-    <h2>Similar Incidents</h2>
-    <div id="similarIncidents" class="muted">Provide API key to load similar incidents.</div>
+    <script src="/static/js/ui_shell.js"></script>
     <script src="/static/js/incident_detail.js"></script>
     </body>
     </html>

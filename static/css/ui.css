@@ -74,7 +74,8 @@ a:hover {
 
 input,
 button,
-select {
+select,
+textarea {
   min-height: 38px;
   padding: 8px 10px;
   border: 1px solid var(--border);
@@ -86,13 +87,18 @@ select {
 }
 
 input:focus,
-select:focus {
+select:focus,
+textarea:focus {
   outline: none;
   border-color: #4e7cc7;
   box-shadow: 0 0 0 3px rgba(79, 140, 255, 0.2);
 }
 
 input::placeholder {
+  color: #7f95b4;
+}
+
+textarea::placeholder {
   color: #7f95b4;
 }
 
@@ -199,6 +205,51 @@ tbody tr:hover {
   outline: 2px solid rgba(108, 162, 255, 0.65);
   outline-offset: -2px;
   background: rgba(92, 153, 255, 0.18);
+}
+
+.incident-feed-card,
+.incident-note-card,
+.incident-child-card {
+  transition: transform 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.incident-feed-card:hover,
+.incident-note-card:hover,
+.incident-child-card:hover {
+  transform: translateY(-1px);
+  border-color: rgba(109, 152, 227, 0.42);
+}
+
+.incident-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.incident-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px 14px;
+  margin: 12px 0;
+}
+
+.incident-action-row {
+  align-items: stretch;
+  gap: 10px;
+}
+
+.incident-child-stack {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(63, 84, 113, 0.56);
+}
+
+.incident-child-card {
+  margin-top: 8px;
+  background: linear-gradient(180deg, rgba(14, 24, 40, 0.9) 0%, rgba(10, 17, 29, 0.96) 100%);
 }
 
 .hidden {

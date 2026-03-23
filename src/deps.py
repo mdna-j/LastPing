@@ -233,6 +233,36 @@ def require_admin_or_project_api_key(project_id: int, x_admin_token: Optional[st
     return require_project_api_key(project_id, authorization=authorization, x_api_key=x_api_key, session=session)
 
 
+def require_project_access(project_id: int, x_admin_token: Optional[str] = Header(None), authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), session: Session = Depends(get_session)) -> Project:
+    """Allow read access via admin token, project API key, or project membership."""
+    admin_token = os.environ.get('ADMIN_TOKEN')
+    project = _get_cached_project(session, project_id)
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    if admin_token and x_admin_token and x_admin_token == admin_token:
+        return project
+
+    key = _extract_api_key(authorization, x_api_key)
+    if key:
+        matched, project_primary = _match_project_api_key(session, project_id, key)
+        if matched or project_primary:
+            return project
+
+        token = _extract_bearer_token(authorization)
+        if token:
+            ut = _get_cached_user_token(session, token)
+            if ut and (not ut.expires_at or ut.expires_at >= datetime.utcnow()):
+                pm = _get_cached_membership(session, ut.user_id, project_id)
+                if pm:
+                    return project
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not a project member")
+
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API key or token")
+
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing credentials")
+
+
 def _extract_api_key(authorization: Optional[str], x_api_key: Optional[str]) -> Optional[str]:
     """Extract API key from common header locations.
 

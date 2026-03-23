@@ -1,94 +1,326 @@
-// /ui/incidents/{id} client script
-function apiHeaders(){
-  const apiKey = document.getElementById('apiKey') ? document.getElementById('apiKey').value : '';
+function incidentIdFromPath(){
+  const parts = location.pathname.split("/");
+  return parts[parts.length - 1];
+}
+
+function incidentProjectId(){
+  return document.getElementById("projectId").value || "1";
+}
+
+function escapeHtml(value){
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function readHeaders(){
   const headers = {};
-  if(apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+  const apiKey = document.getElementById("apiKey") ? document.getElementById("apiKey").value.trim() : "";
+  const userToken = document.getElementById("userToken") ? document.getElementById("userToken").value.trim() : "";
+  const adminToken = document.getElementById("adminToken") ? document.getElementById("adminToken").value.trim() : "";
+  if(apiKey) headers["X-API-KEY"] = apiKey;
+  if(userToken) headers.Authorization = `Bearer ${userToken}`;
+  if(adminToken) headers["X-ADMIN-TOKEN"] = adminToken;
   return headers;
 }
 
-async function loadIncidentDetail(){
-  const parts = location.pathname.split('/');
-  const iid = parts[parts.length-1];
-  const pid = document.getElementById('projectId').value || '1';
-  const el = document.getElementById('detail');
-  if(!document.getElementById('apiKey') || !document.getElementById('apiKey').value){
-    el.innerText = 'Provide API key to load incident details.';
+function manageHeaders(){
+  return {...readHeaders(), "Content-Type": "application/json"};
+}
+
+function formatTimestamp(value){
+  if(!value) return "n/a";
+  try{
+    return new Date(value).toLocaleString();
+  }catch(_e){
+    return value;
+  }
+}
+
+function renderNotes(notes){
+  const notesEl = document.getElementById("notesList");
+  if(!notesEl) return;
+  if(!notes || !notes.length){
+    notesEl.innerHTML = `<div class="muted">No notes yet.</div>`;
     return;
   }
-  const resp = await fetch(`/projects/${pid}/incidents/${iid}`, {headers: apiHeaders()});
-  if(!resp.ok){ el.innerText = 'Failed to load'; return }
+  notesEl.innerHTML = notes.map((note)=> `
+    <div class="card incident-note-card">
+      <div class="incident-card-head">
+        <strong>${escapeHtml(note.author || "unknown")}</strong>
+        <span class="muted">${formatTimestamp(note.created_at)}</span>
+      </div>
+      <div>${escapeHtml(note.body)}</div>
+    </div>
+  `).join("");
+}
+
+function renderIncidentSummary(incident){
+  const summaryEl = document.getElementById("incidentSummary");
+  const actionsEl = document.getElementById("incidentActions");
+  if(!summaryEl) return;
+  const owner = incident.owner ? escapeHtml(incident.owner) : "unassigned";
+  const ack = incident.acknowledged_at
+    ? `${formatTimestamp(incident.acknowledged_at)} by ${escapeHtml(incident.acknowledged_by || "unknown")}`
+    : "not acknowledged";
+  const silence = incident.silenced_until
+    ? `${formatTimestamp(incident.silenced_until)} by ${escapeHtml(incident.silenced_by || "unknown")}`
+    : "not silenced";
+  summaryEl.innerHTML = `
+    <div class="incident-meta-grid">
+      <div><span class="muted">Incident</span><div>${incident.id}</div></div>
+      <div><span class="muted">Check</span><div>${incident.check_id}</div></div>
+      <div><span class="muted">Status</span><div>${escapeHtml(incident.status || "unknown")}</div></div>
+      <div><span class="muted">Started</span><div>${formatTimestamp(incident.started_at)}</div></div>
+      <div><span class="muted">Owner</span><div>${owner}</div></div>
+      <div><span class="muted">Acknowledged</span><div>${ack}</div></div>
+      <div><span class="muted">Silenced</span><div>${silence}</div></div>
+      <div><span class="muted">Notes</span><div>${incident.note_count || 0}</div></div>
+    </div>
+  `;
+  if(actionsEl){
+    actionsEl.classList.remove("hidden");
+    const ackBtn = document.getElementById("ackIncidentBtn");
+    const silenceBtn = document.getElementById("silenceIncidentBtn");
+    if(ackBtn){
+      ackBtn.textContent = incident.acknowledged_at ? "Clear Ack" : "Acknowledge";
+      ackBtn.dataset.acknowledged = incident.acknowledged_at ? "false" : "true";
+    }
+    if(silenceBtn){
+      silenceBtn.textContent = incident.silenced_until ? "Extend Snooze" : "Snooze";
+    }
+  }
+}
+
+function renderEvents(json){
+  const el = document.getElementById("detail");
+  if(!el) return;
+  const events = (json.events || []).map((event)=> `
+    <div class="card">
+      <label>
+        <input type="checkbox" data-eid="${event.id}"/>
+        <strong>${escapeHtml(event.type)}</strong>
+        <span class="muted">${formatTimestamp(event.ts)}</span>
+      </label>
+      <div>${escapeHtml(event.message || "")}</div>
+    </div>
+  `).join("");
+  el.innerHTML = `${events}<div style="margin-top:8px"><button id="splitBtn" class="btn btn-secondary">Split Selected</button></div>`;
+}
+
+async function loadIncidentDetail(){
+  const iid = incidentIdFromPath();
+  const pid = incidentProjectId();
+  const detailEl = document.getElementById("detail");
+  if(detailEl) detailEl.innerText = "Loading...";
+  const resp = await fetch(`/projects/${pid}/incidents/${iid}`, {headers: readHeaders()});
+  if(!resp.ok){
+    if(detailEl) detailEl.innerText = "Failed to load";
+    return null;
+  }
   const json = await resp.json();
-  const events = json.events.map(e => `<div class="card"><label><input type="checkbox" data-eid="${e.id}"/> <strong>${e.type}</strong> <span class="muted">${e.ts}</span></label><div>${e.message||''}</div></div>`).join('');
-  el.innerHTML = `<div><strong>Incident</strong> ${json.incident.id} (check ${json.incident.check_id})</div><div class="muted">started ${json.incident.started_at} ${json.incident.resolved_at? ' | resolved '+json.incident.resolved_at : ''} ${json.incident.group_id? ' | group:'+json.incident.group_id : ''} ${json.incident.merged_into? ' | merged_into:'+json.incident.merged_into : ''}</div>${events}<div style="margin-top:8px"><button id="splitBtn" class="btn btn-secondary">Split Selected</button></div>`;
-  if(json.incident.share_token) document.getElementById('shareInfo').innerText = 'Public: ' + location.origin + '/incidents/public/' + json.incident.share_token;
+  renderIncidentSummary(json.incident);
+  renderEvents(json);
+  renderNotes(json.notes || []);
+  const shareInfo = document.getElementById("shareInfo");
+  if(shareInfo){
+    shareInfo.innerText = json.incident.share_token
+      ? `Public: ${location.origin}/incidents/public/${json.incident.share_token}`
+      : "";
+  }
+  return json;
 }
 
 async function loadSimilarIncidents(){
-  const el = document.getElementById('similarIncidents');
-  if(!el){ return; }
-  const parts = location.pathname.split('/');
-  const iid = parts[parts.length-1];
-  const pid = document.getElementById('projectId').value || '1';
-  if(!document.getElementById('apiKey') || !document.getElementById('apiKey').value){
-    el.innerText = 'Provide API key to load similar incidents.';
-    return;
-  }
-  el.innerText = 'Loading...';
+  const el = document.getElementById("similarIncidents");
+  if(!el) return;
+  const iid = incidentIdFromPath();
+  const pid = incidentProjectId();
+  el.innerText = "Loading...";
   try{
-    const resp = await fetch(`/projects/${pid}/analytics/incident-similarity?incident_id=${iid}`, {headers: apiHeaders()});
-    if(!resp.ok){ el.innerText = 'Failed to load similar incidents'; return }
+    const resp = await fetch(`/projects/${pid}/analytics/incident-similarity?incident_id=${iid}`, {headers: readHeaders()});
+    if(!resp.ok){
+      el.innerText = "Failed to load similar incidents";
+      return;
+    }
     const json = await resp.json();
     const matches = json.matches || [];
     if(!matches.length){
-      el.innerHTML = '<div class="muted">No similar incidents found.</div>';
+      el.innerHTML = `<div class="muted">No similar incidents found.</div>`;
       return;
     }
-    const rows = matches.map(m => {
-      return `<div class="card"><div><strong>Incident ${m.incident_id}</strong> (check ${m.check_id})</div><div class="muted">score ${m.score} • started ${m.started_at}</div><div style="margin-top:6px"><a class="btn btn-secondary" href="/ui/incidents/${m.incident_id}">Open</a></div></div>`;
-    }).join('');
-    el.innerHTML = rows;
-  }catch(e){
-    el.innerText = 'Failed to load similar incidents';
+    el.innerHTML = matches.map((match)=> `
+      <div class="card">
+        <div><strong>Incident ${match.incident_id}</strong> (check ${match.check_id})</div>
+        <div class="muted">score ${match.score} | started ${formatTimestamp(match.started_at)}</div>
+        <div style="margin-top:6px"><a class="btn btn-secondary" href="/ui/incidents/${match.incident_id}?project=${pid}">Open</a></div>
+      </div>
+    `).join("");
+  }catch(_e){
+    el.innerText = "Failed to load similar incidents";
   }
 }
-function headersManage(){ const at=document.getElementById('adminToken')?document.getElementById('adminToken').value:''; const ut=document.getElementById('userToken')?document.getElementById('userToken').value:null; const h={'Content-Type':'application/json'}; if(at) h['X-ADMIN-TOKEN']=at; if(ut) h['Authorization']='Bearer '+ut; return h; }
-document.addEventListener('DOMContentLoaded', ()=>{
-  const btn = document.getElementById('shareBtn');
-  if(btn) btn.addEventListener('click', async ()=>{
-    const parts = location.pathname.split('/');
-    const iid = parts[parts.length-1];
-    const pid = document.getElementById('projectId').value || '1';
-    const resp = await fetch(`/projects/${pid}/incidents/${iid}/share`, {method:'POST'});
-    const j = await resp.json();
-    document.getElementById('shareInfo').innerText = 'Public: ' + location.origin + '/incidents/public/' + j.share_token;
-  });
-  loadIncidentDetail();
-  loadSimilarIncidents();
-  const apiKeyEl = document.getElementById('apiKey');
-  if(apiKeyEl){
-    apiKeyEl.addEventListener('change', ()=>{
-      loadIncidentDetail();
-      loadSimilarIncidents();
-    });
+
+async function createShare(){
+  const iid = incidentIdFromPath();
+  const pid = incidentProjectId();
+  const resp = await fetch(`/projects/${pid}/incidents/${iid}/share`, {method: "POST", headers: readHeaders()});
+  if(!resp.ok){
+    alert("Failed to create share link.");
+    return;
   }
-  document.addEventListener('click', async (ev)=>{
-    if(ev.target && ev.target.id === 'splitBtn'){
-      const parts = location.pathname.split('/');
-      const iid = parts[parts.length-1];
-      const pid = document.getElementById('projectId').value || '1';
-      const checks = Array.from(document.querySelectorAll('#detail input[type=checkbox]:checked')).map(i => parseInt(i.getAttribute('data-eid')));
-      if(!checks.length){ alert('No events selected'); return }
-      if(!confirm('Split selected events into a new incident?')) return;
-      const btn = ev.target;
+  const json = await resp.json();
+  const shareInfo = document.getElementById("shareInfo");
+  if(shareInfo){
+    shareInfo.innerText = `Public: ${location.origin}/incidents/public/${json.share_token}`;
+  }
+}
+
+async function assignOwner(){
+  const iid = incidentIdFromPath();
+  const pid = incidentProjectId();
+  const owner = prompt(`Assign owner for incident ${iid} (leave blank to clear):`, "");
+  if(owner === null) return;
+  const resp = await fetch(`/projects/${pid}/incidents/${iid}/assign`, {
+    method: "POST",
+    headers: manageHeaders(),
+    body: JSON.stringify({owner: owner.trim() ? owner.trim() : null}),
+  });
+  if(!resp.ok){
+    alert("Failed to update owner.");
+    return;
+  }
+  await refreshIncidentPage();
+}
+
+async function updateAck(){
+  const iid = incidentIdFromPath();
+  const pid = incidentProjectId();
+  const ackBtn = document.getElementById("ackIncidentBtn");
+  const acknowledged = ackBtn && ackBtn.dataset.acknowledged === "true";
+  const resp = await fetch(`/projects/${pid}/incidents/${iid}/ack`, {
+    method: "POST",
+    headers: manageHeaders(),
+    body: JSON.stringify({acknowledged}),
+  });
+  if(!resp.ok){
+    alert("Failed to update acknowledgement.");
+    return;
+  }
+  await refreshIncidentPage();
+}
+
+async function silenceIncident(clearSilence){
+  const iid = incidentIdFromPath();
+  const pid = incidentProjectId();
+  let payload = {clear: true};
+  if(!clearSilence){
+    const minutesRaw = prompt(`Silence incident ${iid} for how many minutes?`, "60");
+    if(!minutesRaw) return;
+    const minutes = parseInt(minutesRaw, 10);
+    if(Number.isNaN(minutes) || minutes <= 0){
+      alert("Enter a positive number of minutes.");
+      return;
+    }
+    payload = {until: new Date(Date.now() + minutes * 60 * 1000).toISOString()};
+  }
+  const resp = await fetch(`/projects/${pid}/incidents/${iid}/silence`, {
+    method: "POST",
+    headers: manageHeaders(),
+    body: JSON.stringify(payload),
+  });
+  if(!resp.ok){
+    alert("Failed to update incident silence.");
+    return;
+  }
+  await refreshIncidentPage();
+}
+
+async function addIncidentNote(){
+  const iid = incidentIdFromPath();
+  const pid = incidentProjectId();
+  const bodyEl = document.getElementById("incidentNoteBody");
+  const body = bodyEl ? bodyEl.value.trim() : "";
+  if(!body){
+    alert("Enter a note first.");
+    return;
+  }
+  const resp = await fetch(`/projects/${pid}/incidents/${iid}/notes`, {
+    method: "POST",
+    headers: manageHeaders(),
+    body: JSON.stringify({body}),
+  });
+  if(!resp.ok){
+    alert("Failed to add note.");
+    return;
+  }
+  if(bodyEl) bodyEl.value = "";
+  await refreshIncidentPage();
+}
+
+async function refreshIncidentPage(){
+  await loadIncidentDetail();
+  await loadSimilarIncidents();
+}
+
+function applyQueryParams(){
+  const params = new URLSearchParams(window.location.search);
+  const project = params.get("project");
+  if(project && document.getElementById("projectId")){
+    document.getElementById("projectId").value = project;
+  }
+}
+
+document.addEventListener("DOMContentLoaded", ()=>{
+  applyQueryParams();
+  const shareBtn = document.getElementById("shareBtn");
+  const refreshBtn = document.getElementById("reloadIncidentBtn");
+  const assignBtn = document.getElementById("assignOwnerBtn");
+  const ackBtn = document.getElementById("ackIncidentBtn");
+  const silenceBtn = document.getElementById("silenceIncidentBtn");
+  const clearSilenceBtn = document.getElementById("clearSilenceBtn");
+  const addNoteBtn = document.getElementById("addNoteBtn");
+  if(shareBtn) shareBtn.addEventListener("click", createShare);
+  if(refreshBtn) refreshBtn.addEventListener("click", refreshIncidentPage);
+  if(assignBtn) assignBtn.addEventListener("click", assignOwner);
+  if(ackBtn) ackBtn.addEventListener("click", updateAck);
+  if(silenceBtn) silenceBtn.addEventListener("click", ()=> silenceIncident(false));
+  if(clearSilenceBtn) clearSilenceBtn.addEventListener("click", ()=> silenceIncident(true));
+  if(addNoteBtn) addNoteBtn.addEventListener("click", addIncidentNote);
+  refreshIncidentPage();
+
+  document.addEventListener("click", async (event)=>{
+    if(event.target && event.target.id === "splitBtn"){
+      const iid = incidentIdFromPath();
+      const pid = incidentProjectId();
+      const checked = Array.from(document.querySelectorAll('#detail input[type="checkbox"]:checked'))
+        .map((input)=> parseInt(input.getAttribute("data-eid"), 10));
+      if(!checked.length){
+        alert("No events selected.");
+        return;
+      }
+      if(!confirm("Split selected events into a new incident?")) return;
+      const btn = event.target;
       btn.disabled = true;
       try{
-        const resp = await fetch(`/projects/${pid}/incidents/${iid}/split`, {method:'POST', headers: headersManage(), body: JSON.stringify({event_ids: checks})});
-        if(!resp.ok){ alert('Split failed'); return }
-        const j = await resp.json();
-        alert('Split into incident '+j.split_into);
-        loadIncidentDetail();
-        loadSimilarIncidents();
-      }finally{ btn.disabled = false }
+        const resp = await fetch(`/projects/${pid}/incidents/${iid}/split`, {
+          method: "POST",
+          headers: manageHeaders(),
+          body: JSON.stringify({event_ids: checked}),
+        });
+        if(!resp.ok){
+          alert("Split failed.");
+          return;
+        }
+        const json = await resp.json();
+        alert(`Split into incident ${json.split_into}`);
+        await refreshIncidentPage();
+      }finally{
+        btn.disabled = false;
+      }
     }
   });
 });

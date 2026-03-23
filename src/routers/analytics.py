@@ -18,7 +18,7 @@ from ..predictive_models import (
     predictive_warnings_from_models,
     train_seasonal_hourly_models,
 )
-from ..deps import require_project_api_key
+from ..deps import require_project_access, require_project_api_key
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["analytics"])
 
@@ -254,7 +254,7 @@ def incident_similarity(
     limit: int = Query(5, ge=1, le=50),
     threshold: float = Query(0.35, ge=0.0, le=1.0),
     session: Session = Depends(get_session),
-    _proj: Project = Depends(require_project_api_key),
+    _proj: Project = Depends(require_project_access),
 ):
     """Return ML-style similarity scores for incidents based on TF-IDF token overlap."""
     inc = session.get(Incident, incident_id)

@@ -19,4 +19,5 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    SQLModel.metadata.drop_all(engine)
+    bind = op.get_bind()
+    SQLModel.metadata.drop_all(bind)

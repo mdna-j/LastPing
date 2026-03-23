@@ -303,6 +303,15 @@ def _resolve_open_incident(session: Session, incident: Optional[Incident], *, no
         return False
 
 
+def _incident_notifications_silenced(incident: Optional[Incident], now: datetime) -> bool:
+    if incident is None:
+        return False
+    silenced_until = getattr(incident, "silenced_until", None)
+    if not isinstance(silenced_until, datetime):
+        return False
+    return _as_utc_naive(silenced_until) > _as_utc_naive(now)
+
+
 def _event_state(event_type: Optional[str]) -> Optional[str]:
     if event_type in (EventType.DOWN, EventType.HTTP_FAILURE):
         return CheckStatus.DOWN
@@ -835,6 +844,8 @@ def _trigger_escalation(session: Session, project: Project, now: datetime, reaso
 
 def _check_escalation_due(check: Check, open_inc: Optional[Incident], now: datetime) -> bool:
     if open_inc is None:
+        return False
+    if _incident_notifications_silenced(open_inc, now):
         return False
     after_min = getattr(check, "escalation_after_minutes", None)
     if not after_min:
@@ -2388,6 +2399,8 @@ def _send_oncall_target(session: Session, project: Project, check: Check, alert:
 def _ensure_oncall_alert(session: Session, project: Project, check: Check, event_type: str, message: Optional[str], now: datetime):
     if not _oncall_enabled_for_check(project, check):
         return
+    if _incident_notifications_silenced(_get_open_incident(session, check.id), now):
+        return
     if _should_suppress_alert_due_to_flapping(session, project, check, now, event_type, reason=message):
         return
     escs = _load_oncall_escalations(session, project, check, event_type)
@@ -2435,6 +2448,13 @@ def _process_oncall_alerts(session: Session, now: datetime):
             continue
         if _in_maintenance(check, project, now):
             alert.next_escalation_at = now + timedelta(minutes=5)
+            session.add(alert)
+            session.commit()
+            continue
+        open_inc = _get_open_incident(session, check.id)
+        if _incident_notifications_silenced(open_inc, now):
+            silenced_until = _as_utc_naive(open_inc.silenced_until)
+            alert.next_escalation_at = max(now + timedelta(minutes=1), silenced_until)
             session.add(alert)
             session.commit()
             continue
@@ -2556,6 +2576,7 @@ def scan_checks_once(session: Session):
                         _ensure_oncall_alert(session, project, check, EventType.DOWN, reason, now)
                     # alerting: only send if enabled and threshold reached and cooldown passed
                     should_alert = check.alert_enabled and (check.consecutive_failures >= (check.alert_after or 1))
+                    silenced = _incident_notifications_silenced(open_inc, now)
                     flapping_suppressed = False
                     if should_alert and not maintenance:
                         flapping_suppressed = _should_suppress_alert_due_to_flapping(
@@ -2567,7 +2588,7 @@ def scan_checks_once(session: Session):
                             reason=reason,
                         )
                     if should_alert:
-                        if maintenance or flapping_suppressed:
+                        if maintenance or flapping_suppressed or silenced:
                             session.add(check)
                             session.commit()
                             continue
@@ -2615,6 +2636,7 @@ def scan_checks_once(session: Session):
                     )
                     # still down: allow re-alerts after cooldown if threshold met
                     should_alert = check.alert_enabled and (check.consecutive_failures >= (check.alert_after or 1))
+                    silenced = _incident_notifications_silenced(open_inc, now)
                     flapping_suppressed = False
                     if should_alert and not maintenance:
                         flapping_suppressed = _should_suppress_alert_due_to_flapping(
@@ -2626,7 +2648,7 @@ def scan_checks_once(session: Session):
                             reason="still down (missed heartbeat)",
                         )
                     if should_alert:
-                        if maintenance or flapping_suppressed:
+                        if maintenance or flapping_suppressed or silenced:
                             session.add(check)
                             session.commit()
                             continue
@@ -2993,6 +3015,7 @@ def scan_checks_once(session: Session):
                         _trigger_remediation(session, project, check, rem_event, reason, now)
                         _ensure_oncall_alert(session, project, check, rem_event, reason, now)
                     should_alert = check.alert_enabled and (check.consecutive_failures >= (check.alert_after or 1))
+                    silenced = _incident_notifications_silenced(open_inc, now)
                     flapping_suppressed = False
                     if should_alert and not maintenance:
                         flapping_suppressed = _should_suppress_alert_due_to_flapping(
@@ -3004,7 +3027,7 @@ def scan_checks_once(session: Session):
                             reason=reason,
                         )
                     if should_alert:
-                        if maintenance or flapping_suppressed:
+                        if maintenance or flapping_suppressed or silenced:
                             session.add(check)
                             session.commit()
                         else:
@@ -3045,6 +3068,7 @@ def scan_checks_once(session: Session):
                         lease_fence=lease_fence,
                     )
                     should_alert = check.alert_enabled and (check.consecutive_failures >= (check.alert_after or 1))
+                    silenced = _incident_notifications_silenced(open_inc, now)
                     flapping_suppressed = False
                     if should_alert and not maintenance:
                         flapping_suppressed = _should_suppress_alert_due_to_flapping(
@@ -3056,7 +3080,7 @@ def scan_checks_once(session: Session):
                             reason="still down",
                         )
                     if should_alert:
-                        if maintenance or flapping_suppressed:
+                        if maintenance or flapping_suppressed or silenced:
                             session.add(check)
                             session.commit()
                         else:

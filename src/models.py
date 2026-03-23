@@ -355,12 +355,27 @@ class Incident(SQLModel, table=True):
     group_id: Optional[int] = Field(default=None, foreign_key="incident.id", index=True)
     # If an incident was merged into another, track the target here.
     merged_into: Optional[int] = Field(default=None, foreign_key="incident.id", index=True)
+    owner: Optional[str] = Field(default=None, description="incident owner or responder handle")
+    acknowledged_at: Optional[datetime] = Field(default=None, description="when the incident was acknowledged")
+    acknowledged_by: Optional[str] = Field(default=None, description="actor who acknowledged the incident")
+    silenced_until: Optional[datetime] = Field(default=None, description="suppress notifications until this time")
+    silenced_by: Optional[str] = Field(default=None, description="actor who silenced the incident")
     open_run_key: Optional[str] = Field(default=None, index=True, description="idempotency key for incident creation run")
     resolve_run_key: Optional[str] = Field(default=None, index=True, description="idempotency key for incident resolution run")
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
     # relationships
     # events relationship is available via Event.incident_id
+
+
+class IncidentNote(SQLModel, table=True):
+    __tablename__ = "incident_note"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    incident_id: int = Field(foreign_key="incident.id", index=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    author: Optional[str] = Field(default=None, description="actor who created the note")
+    body: str
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
 
 
 class AuditLog(SQLModel, table=True):

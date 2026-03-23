@@ -319,6 +319,80 @@ def test_alert_suppression(tmp_path, monkeypatch):
         assert calls['n'] == 1
 
 
+def test_incident_silence_suppresses_realerts_and_oncall(tmp_path, monkeypatch):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_incident_silence.sqlite'}"
+
+    from sqlmodel import Session, select
+    from src import db as dbmod
+    from src.models import (
+        Check,
+        CheckStatus,
+        CheckType,
+        Incident,
+        OnCallAlert,
+        OnCallEscalation,
+        Project,
+    )
+    from src import worker
+
+    dbmod.create_db_and_tables()
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="proj_incident_silence", oncall_enabled=True)
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        check = Check(
+            project_id=project.id,
+            name="hb_silenced",
+            type=CheckType.HEARTBEAT,
+            expected_interval=60,
+            grace_period=10,
+            last_ping=datetime.utcnow() - timedelta(hours=2),
+            status=CheckStatus.UP,
+            alert_enabled=True,
+            alert_after=1,
+            alert_cooldown=0,
+        )
+        session.add(check)
+        session.commit()
+        session.refresh(check)
+
+        session.add(
+            Incident(
+                project_id=project.id,
+                check_id=check.id,
+                started_at=datetime.utcnow() - timedelta(minutes=15),
+                status="open",
+                silenced_until=datetime.utcnow() + timedelta(minutes=30),
+                silenced_by="user:1",
+            )
+        )
+        session.add(
+            OnCallEscalation(
+                project_id=project.id,
+                check_id=check.id,
+                level=0,
+                delay_minutes=1,
+                target_type="email",
+                target_value="ops@example.com",
+                enabled=True,
+            )
+        )
+        session.commit()
+
+        calls = []
+        monkeypatch.setattr(worker, "notify_down", lambda chk, proj, reason=None: calls.append(reason))
+        monkeypatch.setattr(worker, "send_email", lambda *args, **kwargs: True)
+
+        worker.scan_checks_once(session)
+
+        alerts = session.exec(select(OnCallAlert).where(OnCallAlert.check_id == check.id)).all()
+        assert calls == []
+        assert alerts == []
+
+
 def test_realert_still_down(tmp_path, monkeypatch):
     os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_realert.sqlite'}"
 
