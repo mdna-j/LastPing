@@ -326,7 +326,12 @@ def limit_by_api_key(project_id: int, authorization: Optional[str] = Header(None
         # If no API key matched, allow bearer user tokens and apply per-user rate limits.
         token = _extract_bearer_token(authorization)
         if token:
-            ut = _get_valid_user_token(session, authorization)
+            try:
+                ut = _get_valid_user_token(session, authorization)
+            except HTTPException as exc:
+                if exc.status_code == status.HTTP_401_UNAUTHORIZED:
+                    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API key") from exc
+                raise
 
             # Rate limit per-user (configurable via env var USER_RATE_LIMIT_PER_MINUTE)
             limit = int(os.environ.get('USER_RATE_LIMIT_PER_MINUTE', '60'))

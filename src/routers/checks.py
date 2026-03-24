@@ -37,6 +37,36 @@ def _diff_details(before: dict, after: dict) -> Optional[str]:
         return str(changes)
 
 
+def _require_check_write_access(
+    project_id: int,
+    *,
+    x_admin_token: Optional[str],
+    authorization: Optional[str],
+    x_api_key: Optional[str],
+    session: Session,
+) -> Project:
+    """Allow admin/project API key auth, or fall back to owner user auth without masking API-key failures."""
+    try:
+        return require_admin_or_project_api_key(
+            project_id,
+            x_admin_token=x_admin_token,
+            authorization=authorization,
+            x_api_key=x_api_key,
+            session=session,
+        )
+    except HTTPException as original_exc:
+        try:
+            user = get_current_user(authorization=authorization, session=session)
+            require_project_role(project_id, "owner", current_user=user, session=session)
+        except HTTPException:
+            raise original_exc
+
+        project = session.get(Project, project_id)
+        if not project:
+            raise original_exc
+        return project
+
+
 class CheckCreate(StrictBaseModel):
     name: constr(min_length=1, max_length=120)
     type: Optional[Literal["heartbeat", "http", "tcp", "dns", "script"]] = CheckType.HEARTBEAT
@@ -179,12 +209,13 @@ def create_check(project_id: int = Path(..., ge=1), payload: CheckCreate = Body(
     endpoint on first use as well.
     """
     # allow either admin/project API key OR a user with owner role
-    try:
-        project = require_admin_or_project_api_key(project_id, x_admin_token=x_admin_token, authorization=authorization, x_api_key=x_api_key, session=session)
-    except HTTPException:
-        # fallback to user token + project membership (owner)
-        user = get_current_user(authorization=authorization, session=session)
-        require_project_role(project_id, 'owner', current_user=user, session=session)
+    project = _require_check_write_access(
+        project_id,
+        x_admin_token=x_admin_token,
+        authorization=authorization,
+        x_api_key=x_api_key,
+        session=session,
+    )
 
     # ensure name uniqueness within project
     existing = session.exec(select(CheckModel).where(CheckModel.project_id == project_id, CheckModel.name == payload.name)).first()
@@ -283,11 +314,13 @@ class CheckUpdate(StrictBaseModel):
 @router.put("/{check_id}", response_model=CheckRead)
 def update_check(project_id: int = Path(..., ge=1), check_id: int = Path(..., ge=1), payload: CheckUpdate = Body(...), request: Request = None, x_admin_token: Optional[str] = Header(None), authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), session: Session = Depends(get_session)):
     # require owner/admin/api-key
-    try:
-        project = require_admin_or_project_api_key(project_id, x_admin_token=x_admin_token, authorization=authorization, x_api_key=x_api_key, session=session)
-    except HTTPException:
-        user = get_current_user(authorization=authorization, session=session)
-        require_project_role(project_id, 'owner', current_user=user, session=session)
+    project = _require_check_write_access(
+        project_id,
+        x_admin_token=x_admin_token,
+        authorization=authorization,
+        x_api_key=x_api_key,
+        session=session,
+    )
     check = session.get(CheckModel, check_id)
     if not check or check.project_id != project_id:
         raise HTTPException(status_code=404, detail="Check not found")
@@ -443,11 +476,13 @@ def update_check(project_id: int = Path(..., ge=1), check_id: int = Path(..., ge
 
 @router.delete("/{check_id}")
 def delete_check(project_id: int = Path(..., ge=1), check_id: int = Path(..., ge=1), request: Request = None, x_admin_token: Optional[str] = Header(None), authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), session: Session = Depends(get_session)):
-    try:
-        project = require_admin_or_project_api_key(project_id, x_admin_token=x_admin_token, authorization=authorization, x_api_key=x_api_key, session=session)
-    except HTTPException:
-        user = get_current_user(authorization=authorization, session=session)
-        require_project_role(project_id, 'owner', current_user=user, session=session)
+    project = _require_check_write_access(
+        project_id,
+        x_admin_token=x_admin_token,
+        authorization=authorization,
+        x_api_key=x_api_key,
+        session=session,
+    )
     check = session.get(CheckModel, check_id)
     if not check or check.project_id != project_id:
         raise HTTPException(status_code=404, detail="Check not found")
@@ -501,11 +536,13 @@ def get_check_maintenance(project_id: int = Path(..., ge=1), check_id: int = Pat
 
 @router.post("/{check_id}/maintenance", response_model=MaintenanceWindow)
 def set_check_maintenance(project_id: int = Path(..., ge=1), check_id: int = Path(..., ge=1), payload: MaintenanceWindow = Body(...), request: Request = None, x_admin_token: Optional[str] = Header(None), authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), session: Session = Depends(get_session)):
-    try:
-        project = require_admin_or_project_api_key(project_id, x_admin_token=x_admin_token, authorization=authorization, x_api_key=x_api_key, session=session)
-    except HTTPException:
-        user = get_current_user(authorization=authorization, session=session)
-        require_project_role(project_id, 'owner', current_user=user, session=session)
+    project = _require_check_write_access(
+        project_id,
+        x_admin_token=x_admin_token,
+        authorization=authorization,
+        x_api_key=x_api_key,
+        session=session,
+    )
     check = session.get(CheckModel, check_id)
     if not check or check.project_id != project_id:
         raise HTTPException(status_code=404, detail="Check not found")
