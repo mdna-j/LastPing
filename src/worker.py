@@ -4,6 +4,7 @@ import logging
 import json
 import re
 import math
+import fnmatch
 import subprocess
 import sys
 import signal
@@ -34,6 +35,7 @@ from .models import UptimeSnapshot, AvailabilityRollup, CheckLease, RemediationH
 from .analytics_ml import find_similar_incidents
 
 logger = logging.getLogger("lastping.worker")
+_BROWSER_ENV_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)\}")
 
 # Window (seconds) in which separate failures may be grouped into a single incident
 GROUP_WINDOW = int(os.environ.get("INCIDENT_GROUP_WINDOW", "600"))
@@ -824,6 +826,182 @@ def _script_check(check: Check, project: Project, timeout: int, retries: int) ->
             detail = err_t or out_t or "error"
             last_reason = f"exit={rc} {detail}".strip()
         # brief backoff between attempts
+        if attempt < max(1, int(retries or 1)) - 1:
+            time.sleep(0.5)
+
+    return False, last_reason, None
+
+
+def _parse_browser_steps(steps_json: Optional[str]) -> list[dict]:
+    """Parse Check.browser_steps JSON safely."""
+    if not steps_json:
+        return []
+    if isinstance(steps_json, list):
+        return [step for step in steps_json if isinstance(step, dict)]
+    if not isinstance(steps_json, str):
+        return []
+    try:
+        parsed = json.loads(steps_json)
+        if isinstance(parsed, list):
+            return [step for step in parsed if isinstance(step, dict)]
+    except Exception:
+        return []
+    return []
+
+
+def _expand_browser_template(value: Optional[str]) -> Optional[str]:
+    if value is None or not isinstance(value, str):
+        return value
+
+    def _replace(match: re.Match[str]) -> str:
+        env_name = match.group(1)
+        if not env_name.startswith("LASTPING_BROWSER_"):
+            raise ValueError(f"browser_env_prefix_required:{env_name}")
+        env_value = os.environ.get(env_name)
+        if env_value is None:
+            raise ValueError(f"missing_browser_env:{env_name}")
+        return env_value
+
+    return _BROWSER_ENV_PATTERN.sub(_replace, value)
+
+
+def _browser_default_timeout_ms(timeout_seconds: int) -> int:
+    return max(1000, int(timeout_seconds or 5) * 1000)
+
+
+def _browser_step_timeout_ms(step: dict, default_timeout_ms: int) -> int:
+    raw = step.get("timeout_ms")
+    if raw is None:
+        return default_timeout_ms
+    try:
+        return max(250, int(raw))
+    except Exception:
+        return default_timeout_ms
+
+
+def _browser_artifact_dir(project: Project, check: Check) -> Path:
+    base = Path(os.environ.get("BROWSER_CHECK_ARTIFACT_DIR") or os.path.join(os.getcwd(), "artifacts", "browser_checks"))
+    path = base / f"project-{getattr(project, 'id', 'unknown')}" / f"check-{getattr(check, 'id', 'unknown')}"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _capture_browser_failure_screenshot(page, project: Project, check: Check) -> Optional[str]:
+    try:
+        artifact_dir = _browser_artifact_dir(project, check)
+        stamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S%f")
+        target = artifact_dir / f"{stamp}.png"
+        page.screenshot(path=str(target), full_page=True)
+        return str(target)
+    except Exception:
+        logger.exception("Failed to capture browser screenshot for check_id=%s", getattr(check, "id", None))
+        return None
+
+
+def _run_browser_step(page, step: dict, *, default_timeout_ms: int) -> None:
+    action = str(step.get("action") or "").strip().lower()
+    selector = step.get("selector")
+    value = _expand_browser_template(step.get("value"))
+    timeout_ms = _browser_step_timeout_ms(step, default_timeout_ms)
+
+    if action == "goto":
+        page.goto(value, wait_until="domcontentloaded", timeout=timeout_ms)
+        return
+    if action == "click":
+        page.locator(selector).first.click(timeout=timeout_ms)
+        return
+    if action == "fill":
+        page.locator(selector).first.fill(value, timeout=timeout_ms)
+        return
+    if action == "wait_for_selector":
+        page.locator(selector).first.wait_for(state="visible", timeout=timeout_ms)
+        return
+    if action == "wait_for_url":
+        page.wait_for_url(value, timeout=timeout_ms)
+        return
+    if action == "expect_text":
+        text = page.locator(selector).first.text_content(timeout=timeout_ms) or ""
+        if value not in text:
+            raise AssertionError(f"expected_text_missing:{value}")
+        return
+    if action == "expect_url":
+        current = page.url or ""
+        if current != value and not fnmatch.fnmatch(current, value):
+            raise AssertionError(f"expected_url_mismatch:{current}")
+        return
+    if action == "press":
+        page.locator(selector).first.press(value, timeout=timeout_ms)
+        return
+    raise ValueError(f"unsupported_browser_action:{action}")
+
+
+def _browser_check(check: Check, project: Project, timeout: int, retries: int) -> Tuple[bool, str, Optional[float]]:
+    """Execute a Playwright browser scenario and capture screenshots on failure."""
+    steps = _parse_browser_steps(getattr(check, "browser_steps", None))
+    if not getattr(check, "url", None):
+        return False, "browser_url_missing", None
+    if not steps:
+        return False, "browser_steps_missing", None
+
+    try:
+        start_url = _expand_browser_template(check.url)
+    except ValueError as exc:
+        return False, str(exc), None
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:
+        return False, "playwright_not_available:install 'playwright' and run 'playwright install chromium'", None
+
+    default_timeout_ms = _browser_default_timeout_ms(timeout)
+    headless = (os.environ.get("PLAYWRIGHT_HEADLESS", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
+    ignore_https_errors = (os.environ.get("BROWSER_CHECK_IGNORE_HTTPS_ERRORS", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
+    capture_screenshot = bool(getattr(check, "browser_capture_screenshot", True))
+    last_reason = "browser_check_failed"
+
+    for attempt in range(max(1, int(retries or 1))):
+        browser = None
+        context = None
+        page = None
+        playwright = None
+        step_index = -1
+        step_action = "goto"
+        try:
+            start = time.time()
+            playwright = sync_playwright().start()
+            browser = playwright.chromium.launch(headless=headless)
+            context = browser.new_context(ignore_https_errors=ignore_https_errors)
+            page = context.new_page()
+            page.set_default_timeout(default_timeout_ms)
+            page.goto(start_url, wait_until="domcontentloaded", timeout=default_timeout_ms)
+            for step_index, step in enumerate(steps):
+                step_action = str(step.get("action") or "unknown")
+                _run_browser_step(page, step, default_timeout_ms=default_timeout_ms)
+            latency_ms = (time.time() - start) * 1000.0
+            return True, "browser_ok", latency_ms
+        except Exception as exc:
+            last_reason = f"browser_step_failed:{step_index}:{step_action}:{_truncate(str(exc), 300)}"
+            if capture_screenshot and page is not None:
+                screenshot_path = _capture_browser_failure_screenshot(page, project, check)
+                if screenshot_path:
+                    last_reason = f"{last_reason} screenshot={screenshot_path}"
+        finally:
+            try:
+                if context is not None:
+                    context.close()
+            except Exception:
+                pass
+            try:
+                if browser is not None:
+                    browser.close()
+            except Exception:
+                pass
+            try:
+                if playwright is not None:
+                    playwright.stop()
+            except Exception:
+                pass
+
         if attempt < max(1, int(retries or 1)) - 1:
             time.sleep(0.5)
 
@@ -2853,8 +3031,8 @@ def scan_checks_once(session: Session):
                         lease_fence=lease_fence,
                     )
 
-        # HTTP/TCP/DNS/SCRIPT checks are actively polled according to `interval` and `next_run`.
-        elif check.type in (CheckType.HTTP, CheckType.TCP, CheckType.DNS, CheckType.SCRIPT):
+        # HTTP/TCP/DNS/SCRIPT/BROWSER checks are actively polled according to `interval` and `next_run`.
+        elif check.type in (CheckType.HTTP, CheckType.TCP, CheckType.DNS, CheckType.SCRIPT, CheckType.BROWSER):
             timeout = check.timeout or 5
             retries = check.retries or 1
             interval = getattr(check, "interval", None) or 60
@@ -2882,6 +3060,8 @@ def scan_checks_once(session: Session):
                 ok, reason, latency_ms = _dns_check(check.host, check.dns_record_type)
             elif check.type == CheckType.SCRIPT:
                 ok, reason, latency_ms = _script_check(check, project, timeout, retries)
+            elif check.type == CheckType.BROWSER:
+                ok, reason, latency_ms = _browser_check(check, project, timeout, retries)
 
             if ok:
                 check.last_ping = now

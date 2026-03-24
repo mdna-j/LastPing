@@ -46,6 +46,21 @@ function numOrNull(id) {
   return isNaN(n) ? null : n;
 }
 
+function parseBrowserStepsManage() {
+  const el = document.getElementById('browserSteps');
+  if (!el) return undefined;
+  const raw = (el.value || '').trim();
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) throw new Error('Browser steps JSON must be an array');
+    return parsed;
+  } catch (err) {
+    alert(err.message || 'Invalid browser steps JSON');
+    throw err;
+  }
+}
+
 async function loadManage() {
   const CHECK_ID = getCheckId();
   const pid = document.getElementById('projectId').value || '1';
@@ -64,11 +79,14 @@ async function loadManage() {
     return;
   }
   const js = await resp.json();
+  document.getElementById('status').dataset.checkType = js.type || '';
   document.getElementById('name').value = js.name;
   document.getElementById('url').value = js.url || '';
   document.getElementById('host').value = js.host || '';
   document.getElementById('port').value = js.port || '';
   document.getElementById('dnsRecordType').value = js.dns_record_type || '';
+  document.getElementById('browserSteps').value = js.browser_steps ? JSON.stringify(js.browser_steps, null, 2) : '';
+  document.getElementById('browserCaptureScreenshot').checked = js.browser_capture_screenshot !== false;
   document.getElementById('interval').value = js.interval || '';
   document.getElementById('expectedInterval').value = js.expected_interval || '';
   document.getElementById('gracePeriod').value = js.grace_period || '';
@@ -100,12 +118,20 @@ async function loadManage() {
 async function updateManage() {
   const CHECK_ID = getCheckId();
   const pid = document.getElementById('projectId').value || '1';
+  const checkType = document.getElementById('status').dataset.checkType || '';
+  let browserSteps;
+  const browserStepsEl = document.getElementById('browserSteps');
+  if (checkType === 'browser' && browserStepsEl && (browserStepsEl.value || '').trim()) {
+    browserSteps = parseBrowserStepsManage();
+  }
   const body = {
     name: document.getElementById('name').value,
     url: document.getElementById('url').value,
     host: valOrNull('host'),
     port: numOrNull('port'),
     dns_record_type: valOrNull('dnsRecordType'),
+    browser_steps: checkType === 'browser' ? browserSteps : undefined,
+    browser_capture_screenshot: checkType === 'browser' ? document.getElementById('browserCaptureScreenshot').checked : undefined,
     interval: numOrNull('interval'),
     expected_interval: numOrNull('expectedInterval'),
     grace_period: numOrNull('gracePeriod'),

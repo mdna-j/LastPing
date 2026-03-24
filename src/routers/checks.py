@@ -22,6 +22,17 @@ from ..schemas import StrictBaseModel
 
 router = APIRouter(prefix="/projects/{project_id}/checks", tags=["checks"])
 
+_BROWSER_ACTIONS = {
+    "goto",
+    "click",
+    "fill",
+    "wait_for_selector",
+    "wait_for_url",
+    "expect_text",
+    "expect_url",
+    "press",
+}
+
 
 def _diff_details(before: dict, after: dict) -> Optional[str]:
     changes = {}
@@ -69,7 +80,7 @@ def _require_check_write_access(
 
 class CheckCreate(StrictBaseModel):
     name: constr(min_length=1, max_length=120)
-    type: Optional[Literal["heartbeat", "http", "tcp", "dns", "script"]] = CheckType.HEARTBEAT
+    type: Optional[Literal["heartbeat", "http", "tcp", "dns", "script", "browser"]] = CheckType.HEARTBEAT
     expected_interval: Optional[conint(ge=1, le=86400)] = 600
     grace_period: Optional[conint(ge=0, le=86400)] = 600
     url: Optional[AnyHttpUrl] = None
@@ -80,6 +91,8 @@ class CheckCreate(StrictBaseModel):
     dns_record_type: Optional[constr(regex=r"^[A-Za-z0-9_-]{1,10}$")] = None
     script_path: Optional[constr(min_length=1, max_length=200, regex=r"^[A-Za-z0-9._\\/-]+$")] = None
     script_args: Optional[List[constr(min_length=1, max_length=200)]] = None
+    browser_steps: Optional[List["BrowserStep"]] = None
+    browser_capture_screenshot: Optional[bool] = None
     interval: Optional[conint(ge=1, le=86400)] = 60
     latency_threshold_ms: Optional[conint(ge=1, le=600000)] = None
     region: Optional[constr(regex=r"^[A-Za-z0-9._-]{1,32}$")] = None
@@ -109,6 +122,14 @@ class CheckCreate(StrictBaseModel):
             raise ValueError("script_args may have at most 20 entries")
         return v
 
+    @validator("browser_steps")
+    def _validate_browser_steps(cls, v):
+        if v is None:
+            return v
+        if len(v) > 50:
+            raise ValueError("browser_steps may have at most 50 entries")
+        return v
+
     @root_validator
     def _validate_by_type(cls, values):
         ctype = values.get("type") or CheckType.HEARTBEAT
@@ -136,12 +157,48 @@ class CheckCreate(StrictBaseModel):
             parts = [p for p in sp.replace("\\", "/").split("/") if p]
             if any(p == ".." for p in parts):
                 raise ValueError("script_path must not contain '..'")
+        if ctype == "browser":
+            if not values.get("url"):
+                raise ValueError("url is required for browser checks")
+            if not values.get("browser_steps"):
+                raise ValueError("browser_steps is required for browser checks")
         else:
             if values.get("script_path") is not None:
                 raise ValueError("script_path is only valid for script checks")
             if values.get("script_args") is not None:
                 raise ValueError("script_args is only valid for script checks")
+            if values.get("browser_steps") is not None:
+                raise ValueError("browser_steps is only valid for browser checks")
+            if values.get("browser_capture_screenshot") is not None:
+                raise ValueError("browser_capture_screenshot is only valid for browser checks")
         return values
+
+
+class BrowserStep(StrictBaseModel):
+    action: Literal["goto", "click", "fill", "wait_for_selector", "wait_for_url", "expect_text", "expect_url", "press"]
+    selector: Optional[constr(min_length=1, max_length=500)] = None
+    value: Optional[constr(min_length=1, max_length=4000)] = None
+    timeout_ms: Optional[conint(ge=1, le=120000)] = None
+
+    @root_validator
+    def _validate_step(cls, values):
+        action = values.get("action")
+        selector = values.get("selector")
+        value = values.get("value")
+
+        if action in {"click", "wait_for_selector"} and not selector:
+            raise ValueError(f"selector is required for browser action '{action}'")
+        if action in {"fill", "expect_text", "press"}:
+            if not selector:
+                raise ValueError(f"selector is required for browser action '{action}'")
+            if not value:
+                raise ValueError(f"value is required for browser action '{action}'")
+        if action in {"goto", "wait_for_url", "expect_url"} and not value:
+            raise ValueError(f"value is required for browser action '{action}'")
+        return values
+
+
+CheckCreate.update_forward_refs(BrowserStep=BrowserStep)
 
 
 class CheckRead(BaseModel):
@@ -159,6 +216,8 @@ class CheckRead(BaseModel):
     dns_record_type: Optional[str] = None
     script_path: Optional[str] = None
     script_args: Optional[List[str]] = None
+    browser_steps: Optional[List[dict]] = None
+    browser_capture_screenshot: Optional[bool] = None
     interval: Optional[int] = None
     latency_threshold_ms: Optional[int] = None
     last_latency_ms: Optional[float] = None
@@ -192,6 +251,21 @@ class CheckRead(BaseModel):
                 parsed = json.loads(v)
                 if isinstance(parsed, list):
                     return [str(x) for x in parsed]
+            except Exception:
+                return None
+        return None
+
+    @validator("browser_steps", pre=True)
+    def _parse_browser_steps(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, list):
+            return v
+        if isinstance(v, str):
+            try:
+                parsed = json.loads(v)
+                if isinstance(parsed, list):
+                    return parsed
             except Exception:
                 return None
         return None
@@ -234,6 +308,8 @@ def create_check(project_id: int = Path(..., ge=1), payload: CheckCreate = Body(
         dns_record_type=payload.dns_record_type,
         script_path=payload.script_path,
         script_args=(json.dumps(payload.script_args) if payload.script_args is not None else None),
+        browser_steps=(json.dumps([step.dict(exclude_none=True) for step in payload.browser_steps]) if payload.browser_steps is not None else None),
+        browser_capture_screenshot=(payload.browser_capture_screenshot if payload.browser_capture_screenshot is not None else True),
         timeout=payload.timeout,
         retries=payload.retries,
         interval=payload.interval,
@@ -282,6 +358,8 @@ class CheckUpdate(StrictBaseModel):
     dns_record_type: Optional[constr(regex=r"^[A-Za-z0-9_-]{1,10}$")] = None
     script_path: Optional[constr(min_length=1, max_length=200, regex=r"^[A-Za-z0-9._\\/-]+$")] = None
     script_args: Optional[List[constr(min_length=1, max_length=200)]] = None
+    browser_steps: Optional[List[BrowserStep]] = None
+    browser_capture_screenshot: Optional[bool] = None
     latency_threshold_ms: Optional[conint(ge=1, le=600000)] = None
     region: Optional[constr(regex=r"^[A-Za-z0-9._-]{1,32}$")] = None
     alert_enabled: Optional[bool] = None
@@ -308,6 +386,14 @@ class CheckUpdate(StrictBaseModel):
             return v
         if len(v) > 20:
             raise ValueError("script_args may have at most 20 entries")
+        return v
+
+    @validator("browser_steps")
+    def _validate_browser_steps(cls, v):
+        if v is None:
+            return v
+        if len(v) > 50:
+            raise ValueError("browser_steps may have at most 50 entries")
         return v
 
 
@@ -337,6 +423,10 @@ def update_check(project_id: int = Path(..., ge=1), check_id: int = Path(..., ge
         parts = [p for p in sp.replace("\\", "/").split("/") if p]
         if any(p == ".." for p in parts):
             raise HTTPException(status_code=400, detail="script_path must not contain '..'")
+    if check.type != CheckType.BROWSER and (payload.browser_steps is not None or payload.browser_capture_screenshot is not None):
+        raise HTTPException(status_code=400, detail="browser_steps/browser_capture_screenshot are only valid for browser checks")
+    if check.type == CheckType.BROWSER and payload.browser_steps is not None and not payload.browser_steps:
+        raise HTTPException(status_code=400, detail="browser_steps must not be empty for browser checks")
     before = {
         "name": check.name,
         "url": check.url,
@@ -348,6 +438,8 @@ def update_check(project_id: int = Path(..., ge=1), check_id: int = Path(..., ge
         "dns_record_type": check.dns_record_type,
         "script_path": getattr(check, "script_path", None),
         "script_args": getattr(check, "script_args", None),
+        "browser_steps": getattr(check, "browser_steps", None),
+        "browser_capture_screenshot": getattr(check, "browser_capture_screenshot", True),
         "latency_threshold_ms": check.latency_threshold_ms,
         "region": check.region,
         "alert_enabled": check.alert_enabled,
@@ -392,6 +484,10 @@ def update_check(project_id: int = Path(..., ge=1), check_id: int = Path(..., ge
         check.script_path = payload.script_path
     if payload.script_args is not None:
         check.script_args = json.dumps(payload.script_args)
+    if payload.browser_steps is not None:
+        check.browser_steps = json.dumps([step.dict(exclude_none=True) for step in payload.browser_steps])
+    if payload.browser_capture_screenshot is not None:
+        check.browser_capture_screenshot = payload.browser_capture_screenshot
     if payload.latency_threshold_ms is not None:
         check.latency_threshold_ms = payload.latency_threshold_ms
     if payload.region is not None:
@@ -446,6 +542,8 @@ def update_check(project_id: int = Path(..., ge=1), check_id: int = Path(..., ge
             "dns_record_type": check.dns_record_type,
             "script_path": getattr(check, "script_path", None),
             "script_args": getattr(check, "script_args", None),
+            "browser_steps": getattr(check, "browser_steps", None),
+            "browser_capture_screenshot": getattr(check, "browser_capture_screenshot", True),
             "latency_threshold_ms": check.latency_threshold_ms,
             "region": check.region,
             "alert_enabled": check.alert_enabled,

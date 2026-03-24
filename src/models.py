@@ -63,6 +63,7 @@ class CheckType(str):
     TCP = "tcp"
     DNS = "dns"
     SCRIPT = "script"
+    BROWSER = "browser"
 
 
 class CheckStatus(str):
@@ -128,6 +129,14 @@ class Check(SQLModel, table=True):
     script_args: Optional[str] = Field(
         default=None,
         description="JSON list of args for script checks",
+    )
+    browser_steps: Optional[str] = Field(
+        default=None,
+        description="JSON list of Playwright browser automation steps",
+    )
+    browser_capture_screenshot: bool = Field(
+        default=True,
+        description="capture a screenshot on browser check failure",
     )
     # scheduling for HTTP checks
     interval: Optional[int] = Field(default=60, description="interval in seconds for HTTP checks")

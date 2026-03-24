@@ -287,8 +287,8 @@ def checks_page():
     <h2>Create Check</h2>
     <div>
       <input id="name" placeholder="Name" />
-      <select id="type"><option value="heartbeat">heartbeat</option><option value="http">http</option><option value="tcp">tcp</option><option value="dns">dns</option></select>
-      <input id="url" placeholder="URL (for http)" style="width:320px" />
+      <select id="type"><option value="heartbeat">heartbeat</option><option value="http">http</option><option value="tcp">tcp</option><option value="dns">dns</option><option value="browser">browser</option></select>
+      <input id="url" placeholder="URL (for http/browser)" style="width:320px" />
       <input id="host" placeholder="Host (for tcp/dns)" style="width:200px" />
       <input id="port" placeholder="Port (tcp)" style="width:100px" />
       <input id="dnsRecordType" placeholder="DNS type (A/AAAA)" style="width:140px" />
@@ -301,6 +301,12 @@ def checks_page():
       <input id="alertAfter" placeholder="Alert after" style="width:120px" />
       <input id="alertCooldown" placeholder="Cooldown (s)" style="width:140px" />
       <button id="createBtn" onclick="createCheck()">Create</button>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <textarea id="browserSteps" placeholder='Browser steps JSON, e.g. [{"action":"fill","selector":"#email","value":"${LASTPING_BROWSER_USER}"}]' style="width:720px;height:120px"></textarea>
+    </div>
+    <div class="row">
+      <label><input type="checkbox" id="browserCaptureScreenshot" checked /> Capture screenshot on browser failure</label>
     </div>
     <h3>Alert Routing (Per-check Overrides)</h3>
     <div class="muted">Use inherit to fall back to project settings. Disabled prevents alerts for that channel even if project settings exist.</div>
@@ -404,6 +410,12 @@ def checks_manage_page(check_id: int = Path(..., ge=1)):
       <input id="alertCooldown" placeholder="Cooldown (s)" style="width:140px" />
       <button id="saveBtn">Save</button>
       <button id="delBtn" style="margin-left:8px;display:none">Delete</button>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <textarea id="browserSteps" placeholder='Browser steps JSON, e.g. [{"action":"click","selector":"button[type=submit]"}]' style="width:720px;height:120px"></textarea>
+    </div>
+    <div class="row">
+      <label><input type="checkbox" id="browserCaptureScreenshot" checked /> Capture screenshot on browser failure</label>
     </div>
     <h2>Alert Routing (Per-check Overrides)</h2>
     <div class="muted">Use inherit to fall back to project settings. Disabled prevents alerts for that channel even if project settings exist.</div>

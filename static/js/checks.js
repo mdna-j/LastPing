@@ -20,6 +20,20 @@ function valOrNull(id){
   const v = (el.value || '').trim();
   return v ? v : null;
 }
+function parseBrowserSteps(){
+  const el = document.getElementById('browserSteps');
+  if(!el) return undefined;
+  const raw = (el.value || '').trim();
+  if(!raw) return undefined;
+  try{
+    const parsed = JSON.parse(raw);
+    if(!Array.isArray(parsed)) throw new Error('Browser steps JSON must be an array');
+    return parsed;
+  }catch(err){
+    alert(err.message || 'Invalid browser steps JSON');
+    throw err;
+  }
+}
 async function loadChecks(){
   const pid = document.getElementById('projectId').value || '1';
   let isOwner = false;
@@ -38,13 +52,20 @@ async function loadChecks(){
 }
 async function createCheck(){
   const pid = document.getElementById('projectId').value || '1';
+  const type = document.getElementById('type').value;
+  let browserSteps;
+  if(type === 'browser'){
+    browserSteps = parseBrowserSteps();
+  }
   const body = {
     name: document.getElementById('name').value,
-    type: document.getElementById('type').value,
+    type,
     url: document.getElementById('url').value,
     host: valOrNull('host'),
     port: parseInt(document.getElementById('port').value || '0') || null,
     dns_record_type: valOrNull('dnsRecordType'),
+    browser_steps: type === 'browser' ? browserSteps : undefined,
+    browser_capture_screenshot: type === 'browser' ? !!document.getElementById('browserCaptureScreenshot').checked : undefined,
     interval: parseInt(document.getElementById('interval').value || '0') || null,
     expected_interval: parseInt(document.getElementById('expectedInterval').value || '0') || null,
     grace_period: parseInt(document.getElementById('gracePeriod').value || '0') || null,
