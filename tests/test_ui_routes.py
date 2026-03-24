@@ -1,4 +1,5 @@
 import os
+import json
 from datetime import datetime, timedelta
 
 from fastapi.testclient import TestClient
@@ -36,9 +37,24 @@ def test_dashboard_health_returns_expected_summary_fields(tmp_path):
     from sqlmodel import Session
     from src import db as dbmod
     from src.main import app
-    from src.models import Project, Check, CheckType, CheckStatus, Incident, CheckLease
+    from src.models import (
+        AuditLog,
+        Check,
+        CheckLease,
+        CheckStatus,
+        CheckType,
+        Incident,
+        OnCallAlert,
+        PredictiveModel,
+        PredictiveModelQuality,
+        Project,
+        RemediationApproval,
+        RemediationHook,
+    )
+    from src.runtime_metrics import reset_request_metrics
 
     dbmod.create_db_and_tables()
+    reset_request_metrics()
     client = TestClient(app)
 
     with Session(dbmod.engine) as session:
@@ -64,6 +80,8 @@ def test_dashboard_health_returns_expected_summary_fields(tmp_path):
             status=CheckStatus.UP,
             region="us-west-2",
             url="https://example.com/health",
+            interval=60,
+            next_run=datetime.utcnow() - timedelta(minutes=9),
         )
         session.add(down_check)
         session.add(up_check)
@@ -87,10 +105,88 @@ def test_dashboard_health_returns_expected_summary_fields(tmp_path):
                 lease_fence=1,
             )
         )
+        hook = RemediationHook(
+            project_id=project.id,
+            check_id=down_check.id,
+            event_type="down",
+            url="https://example.com/remediate",
+        )
+        session.add(hook)
+        session.commit()
+        session.refresh(hook)
+
+        session.add(
+            OnCallAlert(
+                project_id=project.id,
+                check_id=down_check.id,
+                event_type="down",
+                status="open",
+                created_at=datetime.utcnow() - timedelta(minutes=20),
+            )
+        )
+        session.add(
+            RemediationApproval(
+                hook_id=hook.id,
+                project_id=project.id,
+                check_id=down_check.id,
+                event_type="down",
+                status="pending",
+                requested_at=datetime.utcnow() - timedelta(minutes=12),
+                expires_at=datetime.utcnow() + timedelta(minutes=30),
+            )
+        )
+        session.add(
+            AuditLog(
+                actor="worker",
+                action="raw_retention_pruned",
+                target_type="system",
+                details=json.dumps(
+                    {
+                        "truncated_tables": ["events"],
+                        "ran_at": (datetime.utcnow() - timedelta(hours=2)).isoformat(),
+                    }
+                ),
+                created_at=datetime.utcnow() - timedelta(hours=2),
+            )
+        )
+        session.add(
+            AuditLog(
+                actor="alerts",
+                action="notification_failed",
+                target_type="project",
+                target_id=project.id,
+                details=json.dumps({"channel": "slack", "event": "down"}),
+                created_at=datetime.utcnow() - timedelta(minutes=5),
+            )
+        )
+        model = PredictiveModel(
+            project_id=project.id,
+            check_id=down_check.id,
+            active=True,
+        )
+        session.add(model)
+        session.commit()
+        session.refresh(model)
+        session.add(
+            PredictiveModelQuality(
+                predictive_model_id=model.id,
+                project_id=project.id,
+                check_id=down_check.id,
+                window_start=datetime.utcnow() - timedelta(days=2),
+                window_end=datetime.utcnow() - timedelta(days=1),
+                sample_count=42,
+                drift_ratio=2.4,
+                status="drift",
+                created_at=datetime.utcnow() - timedelta(hours=6),
+            )
+        )
         session.commit()
 
         project_id = project.id
         down_check_id = down_check.id
+
+    health_resp = client.get("/health")
+    assert health_resp.status_code == 200
 
     resp = client.get(f"/ui/dashboard/health?project_id={project_id}")
     assert resp.status_code == 200
@@ -102,3 +198,10 @@ def test_dashboard_health_returns_expected_summary_fields(tmp_path):
     assert body["primary_down_check"]["id"] == down_check_id
     assert "us-east-1: 1 down" in body["region_health_summary"]
     assert any(region["name"] == "us-west-2" and region["up"] == 1 for region in body["regions"])
+    assert body["platform"]["worker_lag"]["overdue_checks"] == 1
+    assert body["platform"]["queue_health"]["open_oncall_alerts"] == 1
+    assert body["platform"]["queue_health"]["pending_approvals"] == 1
+    assert body["platform"]["retention"]["truncated_tables"] == ["events"]
+    assert body["platform"]["failed_notifications"]["failures_24h"] == 1
+    assert body["platform"]["model_ops"]["drifted_models"] == 1
+    assert body["platform"]["api_latency"]["request_count"] >= 1

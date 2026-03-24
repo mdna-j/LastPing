@@ -1,5 +1,7 @@
 import os
+import json
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 def test_send_email_monkeypatch(monkeypatch):
     sent = {}
@@ -103,3 +105,63 @@ def test_notify_escalation_uses_project_webhooks(monkeypatch):
     ok = alerts.notify_escalation(DummyProject(), "threshold exceeded")
     assert ok
     assert calls
+
+
+def test_notification_failures_are_persisted_to_audit_log(tmp_path, monkeypatch):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_alert_failures.sqlite'}"
+
+    from sqlmodel import Session, select
+    from src import alerts
+    from src import db as dbmod
+    from src.models import AuditLog, Check, CheckType, Project
+
+    dbmod.create_db_and_tables()
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="proj-failures", discord_webhook_url="https://discord.example/webhook")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        check = Check(project_id=project.id, name="api", type=CheckType.HTTP, url="https://example.com")
+        session.add(check)
+        session.commit()
+        session.refresh(check)
+        project_payload = SimpleNamespace(id=project.id, name=project.name, discord_webhook_url=project.discord_webhook_url)
+        check_payload = SimpleNamespace(
+            id=check.id,
+            name=check.name,
+            last_ping=check.last_ping,
+            expected_interval=check.expected_interval,
+            interval=check.interval,
+            grace_period=check.grace_period,
+            consecutive_failures=check.consecutive_failures,
+            alert_discord_enabled=check.alert_discord_enabled,
+            alert_slack_enabled=check.alert_slack_enabled,
+            alert_pagerduty_enabled=check.alert_pagerduty_enabled,
+            alert_webhook_enabled=check.alert_webhook_enabled,
+            alert_sms_enabled=check.alert_sms_enabled,
+            alert_oncall_enabled=check.alert_oncall_enabled,
+            alert_sms_to=check.alert_sms_to,
+            alert_oncall_email=check.alert_oncall_email,
+            alert_slack_webhook_url=check.alert_slack_webhook_url,
+            alert_discord_webhook_url=check.alert_discord_webhook_url,
+            alert_pagerduty_integration_key=check.alert_pagerduty_integration_key,
+            alert_generic_webhook_url=check.alert_generic_webhook_url,
+        )
+
+    monkeypatch.setattr(alerts, "_post_json", lambda url, payload, timeout=10: False)
+    monkeypatch.setattr(alerts, "send_discord_message", lambda content: True)
+    monkeypatch.setattr(alerts, "send_slack_message", lambda content: True)
+
+    alerts.notify_down(check_payload, project_payload, reason="timeout")
+
+    with Session(dbmod.engine) as session:
+        rows = session.exec(
+            select(AuditLog).where(AuditLog.action == "notification_failed").order_by(AuditLog.created_at.desc())
+        ).all()
+        assert rows
+        details = json.loads(rows[0].details)
+        assert details["channel"] == "discord"
+        assert details["event"] == "down"
+        assert details["project_id"] == project_payload.id

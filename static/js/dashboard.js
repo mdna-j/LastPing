@@ -151,6 +151,92 @@ function renderIntelligenceSummary({hasApiKey, predictive, anomalies, checks}){
   summaryEl.innerHTML = `<div class="intel-pill-row">${pills.join("")}</div><div class="muted">${footnote}</div>`;
 }
 
+function platformStateClass(state){
+  if(state === "healthy") return "kpi-healthy";
+  if(state === "warning") return "kpi-warning";
+  if(state === "critical") return "kpi-critical";
+  if(state === "flapping") return "kpi-flapping";
+  return "kpi-neutral";
+}
+
+function renderPlatformCards(platform){
+  const root = document.getElementById("platformCards");
+  if(!root) return;
+  if(!platform){
+    root.innerHTML = '<article class="card kpi-card kpi-neutral"><div class="metric-label">Platform telemetry</div><div class="metric-value">n/a</div><div class="metric-sub">Observability data unavailable.</div></article>';
+    return;
+  }
+
+  const cards = [];
+  const worker = platform.worker_lag || {};
+  const workerValue = `${worker.overdue_checks || 0} overdue`;
+  const workerSub = (worker.overdue_checks || 0) > 0
+    ? `Max lag ${DashboardShell.formatDuration(worker.max_overdue_seconds)} across ${worker.scheduled_checks || 0} scheduled checks`
+    : `${worker.scheduled_checks || 0} scheduled checks in cadence`;
+  const workerMeta = Array.isArray(worker.top_overdue) && worker.top_overdue.length
+    ? worker.top_overdue.map((row)=> `${row.name} ${DashboardShell.formatDuration(row.overdue_seconds)}`).join(" | ")
+    : "No worker lag detected.";
+  cards.push(`<article class="card kpi-card ${platformStateClass(worker.state)}"><div class="metric-label">Worker lag</div><div class="metric-value">${workerValue}</div><div class="metric-sub">${workerSub}</div><div class="muted">${workerMeta}</div></article>`);
+
+  const queue = platform.queue_health || {};
+  const queueTotal = (queue.open_oncall_alerts || 0) + (queue.pending_approvals || 0);
+  const queueValue = queueTotal > 0 ? `${queueTotal} queued` : "clear";
+  const queueSub = `${queue.open_oncall_alerts || 0} on-call | ${queue.pending_approvals || 0} approvals`;
+  const queueMeta = queue.oldest_open_seconds
+    ? `Oldest queued item ${DashboardShell.formatDuration(queue.oldest_open_seconds)}`
+    : "No queued alerts or approvals.";
+  cards.push(`<article class="card kpi-card ${platformStateClass(queue.state)}"><div class="metric-label">Queue health</div><div class="metric-value">${queueValue}</div><div class="metric-sub">${queueSub}</div><div class="muted">${queueMeta}</div></article>`);
+
+  const retention = platform.retention || {};
+  const retentionValue = retention.lag_seconds !== null && retention.lag_seconds !== undefined
+    ? DashboardShell.formatDuration(retention.lag_seconds)
+    : "no run";
+  const retentionSub = retention.last_pruned_at
+    ? `Last prune ${DashboardShell.localTime(retention.last_pruned_at)}`
+    : "No retention prune audit recorded yet.";
+  const retentionMeta = Array.isArray(retention.truncated_tables) && retention.truncated_tables.length
+    ? `Batch-capped: ${retention.truncated_tables.join(", ")}`
+    : `Interval ${DashboardShell.formatDuration(retention.interval_seconds || 0)}`;
+  cards.push(`<article class="card kpi-card ${platformStateClass(retention.state)}"><div class="metric-label">Retention lag</div><div class="metric-value">${retentionValue}</div><div class="metric-sub">${retentionSub}</div><div class="muted">${retentionMeta}</div></article>`);
+
+  const failed = platform.failed_notifications || {};
+  const channelParts = failed.channels ? Object.entries(failed.channels).map(([channel, count])=> `${channel} ${count}`) : [];
+  const failedValue = `${failed.failures_24h || 0} / 24h`;
+  const failedSub = failed.latest_failure_at
+    ? `Last failure ${DashboardShell.localTime(failed.latest_failure_at)}`
+    : "No recent delivery failures.";
+  const failedMeta = channelParts.length ? channelParts.join(" | ") : "All delivery channels healthy.";
+  cards.push(`<article class="card kpi-card ${platformStateClass(failed.state)}"><div class="metric-label">Failed notifications</div><div class="metric-value">${failedValue}</div><div class="metric-sub">${failedSub}</div><div class="muted">${failedMeta}</div></article>`);
+
+  const modelOps = platform.model_ops || {};
+  const modelValue = modelOps.active_models ? `${modelOps.active_models} active` : "inactive";
+  const modelSub = modelOps.active_models
+    ? `${modelOps.drifted_models || 0} drift | ${modelOps.insufficient_models || 0} insufficient`
+    : "No active predictive models.";
+  const modelMeta = modelOps.latest_quality_at
+    ? `Last quality ${DashboardShell.localTime(modelOps.latest_quality_at)}${modelOps.stale ? " | stale" : ""}`
+    : "No recent quality run.";
+  cards.push(`<article class="card kpi-card ${platformStateClass(modelOps.state)}"><div class="metric-label">Model ops</div><div class="metric-value">${modelValue}</div><div class="metric-sub">${modelSub}</div><div class="muted">${modelMeta}</div></article>`);
+
+  const apiLatency = platform.api_latency || {};
+  const apiValue = apiLatency.request_count
+    ? `${DashboardShell.formatPerfMs(apiLatency.p95_ms)} p95`
+    : "n/a";
+  const errorRate = apiLatency.error_rate !== null && apiLatency.error_rate !== undefined
+    ? `${(Number(apiLatency.error_rate) * 100).toFixed(1)}% 5xx`
+    : "0.0% 5xx";
+  const apiSub = apiLatency.request_count
+    ? `avg ${DashboardShell.formatPerfMs(apiLatency.avg_ms)} | ${errorRate}`
+    : "No recent API traffic.";
+  const pathParts = Array.isArray(apiLatency.paths) ? apiLatency.paths.map((row)=> `${row.path} ${row.count}`) : [];
+  const apiMeta = apiLatency.request_count
+    ? `${apiLatency.request_count} req / ${DashboardShell.formatDuration(apiLatency.window_seconds || 0)}${pathParts.length ? ` | ${pathParts.join(" | ")}` : ""}`
+    : "Request window is currently empty.";
+  cards.push(`<article class="card kpi-card ${platformStateClass(apiLatency.state)}"><div class="metric-label">API latency</div><div class="metric-value">${apiValue}</div><div class="metric-sub">${apiSub}</div><div class="muted">${apiMeta}</div></article>`);
+
+  root.innerHTML = cards.join("");
+}
+
 async function loadHealthStrip(pid, checks, perf){
   DashboardShell.setHealthValue("healthLastRefresh", DashboardShell.localTime(new Date().toISOString()));
   DashboardShell.setHealthValue("healthActiveIncidents", "...");
@@ -365,6 +451,7 @@ async function loadDashboard(){
   const mttrVal = mttr && mttr.mttr_seconds !== undefined ? mttr.mttr_seconds : null;
   const flappingCount = countFlappingSignals(predictive, anomalies);
   const renderDashboardDom = ()=>{
+    renderPlatformCards(healthData && healthData.platform ? healthData.platform : null);
     const checksStateClass = downCount > 0
       ? "kpi-critical"
       : (flappingCount > 0 ? "kpi-flapping" : (degradedCount > 0 ? "kpi-warning" : "kpi-healthy"));

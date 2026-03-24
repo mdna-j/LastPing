@@ -818,6 +818,14 @@ tbody tr:hover {
   margin-bottom: 14px;
 }
 
+.platform-shell {
+  margin-bottom: 14px;
+}
+
+.platform-shell .kpi-grid {
+  margin-bottom: 0;
+}
+
 .intelligence-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

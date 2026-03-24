@@ -1,4 +1,6 @@
-from datetime import datetime
+import json
+import os
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
 from fastapi.responses import HTMLResponse
@@ -6,8 +8,22 @@ from sqlmodel import Session, select
 from pydantic import AnyHttpUrl, EmailStr, ValidationError, parse_obj_as, validator
 
 from ..db import get_session
-from ..models import Project, Check, Event, Incident, CheckLease, StatusSubscription
+from ..models import (
+    AuditLog,
+    Check,
+    CheckLease,
+    CheckType,
+    Event,
+    Incident,
+    OnCallAlert,
+    PredictiveModel,
+    PredictiveModelQuality,
+    Project,
+    RemediationApproval,
+    StatusSubscription,
+)
 from ..deps import limit_public_requests
+from ..runtime_metrics import snapshot_request_metrics
 from ..schemas import StrictBaseModel
 
 router = APIRouter(prefix="/ui", tags=["ui"], dependencies=[Depends(limit_public_requests)])
@@ -173,6 +189,217 @@ def _build_public_status_payload(session: Session, project_id: int) -> dict:
         "checks": components,
         "open_incidents": open_incidents,
         "incident_history": incident_history,
+    }
+
+
+def _parse_json_details(raw: str | None) -> dict:
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except Exception:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except Exception:
+        value = default
+    return max(value, minimum)
+
+
+def _overdue_check_seconds(check: Check, now: datetime) -> int | None:
+    if (check.type or "").lower() == CheckType.HEARTBEAT:
+        return None
+    interval = int(getattr(check, "interval", None) or getattr(check, "expected_interval", None) or 60)
+    interval = max(interval, 1)
+    due_at = check.next_run
+    if due_at is None:
+        anchor = check.last_ping or check.created_at
+        if anchor is None:
+            return None
+        due_at = anchor + timedelta(seconds=interval)
+    tolerance = max(15, min(interval, 60))
+    if due_at + timedelta(seconds=tolerance) >= now:
+        return None
+    return max(int((now - due_at).total_seconds()), 0)
+
+
+def _build_platform_observability(session: Session, project_id: int, checks: list[Check], now: datetime) -> dict:
+    polling_checks = [check for check in checks if (check.type or "").lower() != CheckType.HEARTBEAT]
+    overdue_checks = []
+    for check in polling_checks:
+        overdue_seconds = _overdue_check_seconds(check, now)
+        if overdue_seconds is None:
+            continue
+        overdue_checks.append(
+            {
+                "check_id": check.id,
+                "name": check.name,
+                "region": check.region,
+                "overdue_seconds": overdue_seconds,
+            }
+        )
+    overdue_checks.sort(key=lambda row: row["overdue_seconds"], reverse=True)
+    max_overdue_seconds = overdue_checks[0]["overdue_seconds"] if overdue_checks else None
+    worker_lag_state = "healthy"
+    if overdue_checks:
+        worker_lag_state = "critical" if (max_overdue_seconds or 0) >= 300 or len(overdue_checks) >= 3 else "warning"
+    elif not polling_checks:
+        worker_lag_state = "neutral"
+
+    open_oncall_alerts = session.exec(
+        select(OnCallAlert).where(
+            OnCallAlert.project_id == project_id,
+            OnCallAlert.status == "open",
+        )
+    ).all()
+    pending_approvals = session.exec(
+        select(RemediationApproval).where(
+            RemediationApproval.project_id == project_id,
+            RemediationApproval.status == "pending",
+        )
+    ).all()
+    queue_timestamps = [row.created_at for row in open_oncall_alerts if row.created_at] + [
+        row.requested_at for row in pending_approvals if row.requested_at
+    ]
+    oldest_queue_seconds = None
+    if queue_timestamps:
+        oldest_queue_seconds = max(int((now - min(queue_timestamps)).total_seconds()), 0)
+    queue_total = len(open_oncall_alerts) + len(pending_approvals)
+    queue_state = "healthy"
+    if queue_total > 0:
+        queue_state = "critical" if queue_total >= 5 or (oldest_queue_seconds or 0) >= 1800 else "warning"
+
+    retention_interval_seconds = _env_int("RAW_RETENTION_INTERVAL_SECONDS", 86400, minimum=0)
+    latest_retention = session.exec(
+        select(AuditLog).where(AuditLog.action == "raw_retention_pruned").order_by(AuditLog.created_at.desc())
+    ).first()
+    retention_details = _parse_json_details(latest_retention.details if latest_retention else None)
+    retention_lag_seconds = None
+    truncated_tables = []
+    if latest_retention and latest_retention.created_at:
+        retention_lag_seconds = max(int((now - latest_retention.created_at).total_seconds()), 0)
+    if retention_details.get("truncated_tables") and isinstance(retention_details["truncated_tables"], list):
+        truncated_tables = [str(item) for item in retention_details["truncated_tables"]]
+    retention_state = "healthy"
+    if latest_retention is None:
+        retention_state = "warning"
+    if retention_lag_seconds is not None and retention_interval_seconds > 0:
+        if retention_lag_seconds > retention_interval_seconds * 2:
+            retention_state = "critical"
+        elif retention_lag_seconds > int(retention_interval_seconds * 1.25) or truncated_tables:
+            retention_state = "warning"
+    elif truncated_tables:
+        retention_state = "warning"
+
+    notification_cutoff = now - timedelta(hours=24)
+    notification_failures = session.exec(
+        select(AuditLog).where(
+            AuditLog.action == "notification_failed",
+            AuditLog.target_id == project_id,
+            AuditLog.created_at >= notification_cutoff,
+        ).order_by(AuditLog.created_at.desc())
+    ).all()
+    failure_channels = {}
+    latest_failure_at = notification_failures[0].created_at.isoformat() if notification_failures else None
+    for row in notification_failures:
+        details = _parse_json_details(row.details)
+        channel = str(details.get("channel") or "unknown")
+        failure_channels[channel] = failure_channels.get(channel, 0) + 1
+    failed_notification_state = "healthy"
+    if notification_failures:
+        failed_notification_state = "critical" if len(notification_failures) >= 5 else "warning"
+
+    active_models = session.exec(
+        select(PredictiveModel).where(
+            PredictiveModel.project_id == project_id,
+            PredictiveModel.active == True,
+        )
+    ).all()
+    latest_quality_rows = []
+    if active_models:
+        active_model_ids = [model.id for model in active_models if model.id is not None]
+        quality_rows = session.exec(
+            select(PredictiveModelQuality).where(
+                PredictiveModelQuality.predictive_model_id.in_(active_model_ids)
+            ).order_by(PredictiveModelQuality.created_at.desc())
+        ).all()
+        seen_model_ids = set()
+        for row in quality_rows:
+            if row.predictive_model_id in seen_model_ids:
+                continue
+            latest_quality_rows.append(row)
+            seen_model_ids.add(row.predictive_model_id)
+    latest_quality_at = None
+    if latest_quality_rows:
+        latest_quality_at = max(row.created_at for row in latest_quality_rows if row.created_at)
+    drifted_models = sum(1 for row in latest_quality_rows if (row.status or "").lower() == "drift")
+    insufficient_models = sum(1 for row in latest_quality_rows if (row.status or "").lower() == "insufficient_data")
+    model_ops_state = "neutral"
+    stale_models = False
+    if active_models:
+        stale_models = latest_quality_at is None or (now - latest_quality_at).total_seconds() > 172800
+        if drifted_models > 0:
+            model_ops_state = "critical"
+        elif stale_models or insufficient_models > 0:
+            model_ops_state = "warning"
+        else:
+            model_ops_state = "healthy"
+
+    api_latency = snapshot_request_metrics()
+    api_latency_state = "neutral"
+    if api_latency["request_count"] > 0:
+        p95_ms = float(api_latency["p95_ms"] or 0.0)
+        error_rate = float(api_latency["error_rate"] or 0.0)
+        if error_rate >= 0.05 or p95_ms >= 750:
+            api_latency_state = "critical"
+        elif error_rate > 0 or p95_ms >= 300:
+            api_latency_state = "warning"
+        else:
+            api_latency_state = "healthy"
+
+    return {
+        "worker_lag": {
+            "state": worker_lag_state,
+            "scheduled_checks": len(polling_checks),
+            "overdue_checks": len(overdue_checks),
+            "max_overdue_seconds": max_overdue_seconds,
+            "top_overdue": overdue_checks[:3],
+        },
+        "queue_health": {
+            "state": queue_state,
+            "open_oncall_alerts": len(open_oncall_alerts),
+            "pending_approvals": len(pending_approvals),
+            "oldest_open_seconds": oldest_queue_seconds,
+        },
+        "retention": {
+            "state": retention_state,
+            "last_pruned_at": latest_retention.created_at.isoformat() if latest_retention and latest_retention.created_at else None,
+            "lag_seconds": retention_lag_seconds,
+            "truncated_tables": truncated_tables,
+            "interval_seconds": retention_interval_seconds,
+        },
+        "failed_notifications": {
+            "state": failed_notification_state,
+            "failures_24h": len(notification_failures),
+            "latest_failure_at": latest_failure_at,
+            "channels": failure_channels,
+        },
+        "model_ops": {
+            "state": model_ops_state,
+            "active_models": len(active_models),
+            "latest_quality_at": latest_quality_at.isoformat() if latest_quality_at else None,
+            "drifted_models": drifted_models,
+            "insufficient_models": insufficient_models,
+            "stale": stale_models,
+        },
+        "api_latency": {
+            "state": api_latency_state,
+            **api_latency,
+        },
     }
 
 
@@ -783,6 +1010,14 @@ def dashboard_page():
 
         <section id="cards" class="kpi-grid"></section>
 
+        <section class="card platform-shell">
+          <div class="section-head">
+            <h3>LastPing Platform</h3>
+            <div class="muted">Worker lag, queue health, retention, notifications, model ops, and API latency.</div>
+          </div>
+          <div id="platformCards" class="kpi-grid"></div>
+        </section>
+
         <section class="intelligence-grid">
           <article class="card intelligence-card intelligence-summary-card">
             <div class="section-head">
@@ -967,6 +1202,7 @@ def dashboard_health(project_id: int = Query(1, ge=1), session: Session = Depend
         "down_checks": down_checks[:5],
         "region_health_summary": " | ".join(summary_parts) if summary_parts else "No checks",
         "regions": region_items,
+        "platform": _build_platform_observability(session, project_id, checks, now),
     }
 
 

@@ -1,8 +1,11 @@
-from fastapi import FastAPI, Depends
+import time
+
+from fastapi import FastAPI, Depends, Request
 from fastapi.staticfiles import StaticFiles
 
 from . import db as dbmod
 from .db import create_db_and_tables
+from .runtime_metrics import record_request
 from .routers.projects import router as projects_router
 from .routers.checks import router as checks_router
 from .routers.heartbeats import router as heartbeats_router
@@ -23,6 +26,18 @@ app = FastAPI(title="LastPing API")
 
 # Serve static assets (JS/CSS) from ./static
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+
+@app.middleware("http")
+async def track_request_latency(request: Request, call_next):
+    started = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        record_request(request.url.path, request.method, 500, (time.perf_counter() - started) * 1000.0)
+        raise
+    record_request(request.url.path, request.method, response.status_code, (time.perf_counter() - started) * 1000.0)
+    return response
 
 
 @app.on_event("startup")

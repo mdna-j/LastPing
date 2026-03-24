@@ -20,7 +20,8 @@ from typing import Optional
 from datetime import datetime
 from sqlmodel import Session, select
 
-from .models import StatusSubscription
+from .db import ensure_engine
+from .models import AuditLog, StatusSubscription
 
 logger = logging.getLogger("lastping.alerts")
 
@@ -92,6 +93,74 @@ def _pagerduty_key(project, check=None) -> Optional[str]:
 
 def _generic_webhook_url(project, check=None) -> Optional[str]:
     return getattr(check, "alert_generic_webhook_url", None) or getattr(project, "generic_webhook_url", None)
+
+
+def _record_notification_failure(
+    *,
+    project,
+    channel: str,
+    event: str,
+    detail: str,
+    check=None,
+    target: Optional[str] = None,
+    subscription=None,
+) -> None:
+    payload = {
+        "project_id": getattr(project, "id", None),
+        "check_id": getattr(check, "id", None) if check is not None else None,
+        "subscription_id": getattr(subscription, "id", None) if subscription is not None else None,
+        "channel": channel,
+        "event": event,
+        "detail": detail,
+        "target": target,
+        "recorded_at": datetime.utcnow().isoformat(),
+    }
+    try:
+        with Session(ensure_engine()) as audit_session:
+            audit_session.add(
+                AuditLog(
+                    actor="alerts",
+                    action="notification_failed",
+                    target_type="project",
+                    target_id=getattr(project, "id", None),
+                    details=json.dumps(payload),
+                    actor_ip=None,
+                    user_agent=None,
+                )
+            )
+            audit_session.commit()
+    except Exception:
+        logger.exception(
+            "Failed to persist notification failure for project=%s channel=%s event=%s",
+            getattr(project, "id", None),
+            channel,
+            event,
+        )
+
+
+def _track_notification_result(
+    ok: bool,
+    *,
+    project,
+    channel: str,
+    event: str,
+    detail: str,
+    check=None,
+    target: Optional[str] = None,
+    subscription=None,
+) -> bool:
+    if ok:
+        return True
+    _record_notification_failure(
+        project=project,
+        check=check,
+        subscription=subscription,
+        channel=channel,
+        event=event,
+        detail=detail,
+        target=target,
+    )
+    return False
 
 
 def _post_json(url: str, payload: dict, timeout: int = 10) -> bool:
@@ -220,8 +289,15 @@ def notify_down(check, project, reason: str = None) -> None:
                 embed.setdefault("fields", []).append({"name": "Check URL", "value": check_url, "inline": False})
             if reason_text:
                 embed["fields"].append({"name": "Reason", "value": reason_text, "inline": False})
-            _post_json(discord_url, {"embeds": [embed]})
-            sent = True
+            sent = _track_notification_result(
+                _post_json(discord_url, {"embeds": [embed]}),
+                project=project,
+                check=check,
+                channel="discord",
+                event="down",
+                target=discord_url,
+                detail="project Discord webhook send failed",
+            ) or sent
 
         # Slack: send Block Kit payload for structured messages
         slack_url = _slack_url(project, check)
@@ -246,8 +322,15 @@ def notify_down(check, project, reason: str = None) -> None:
                 if check_url:
                     action_elements.append({"type": "button", "text": {"type": "plain_text", "text": "Open Check"}, "url": check_url})
                 attachment["actions"] = action_elements
-            _post_json(slack_url, {"attachments": [attachment]})
-            sent = True
+            sent = _track_notification_result(
+                _post_json(slack_url, {"attachments": [attachment]}),
+                project=project,
+                check=check,
+                channel="slack",
+                event="down",
+                target=slack_url,
+                detail="project Slack webhook send failed",
+            ) or sent
 
         # PagerDuty: use existing helper which builds proper event payload
         pd_key = _pagerduty_key(project, check)
@@ -286,8 +369,15 @@ def notify_down(check, project, reason: str = None) -> None:
                 "check_url": check_url,
                 "timestamp": now_iso,
             }
-            send_generic_webhook(gen_url, payload)
-            sent = True
+            sent = _track_notification_result(
+                send_generic_webhook(gen_url, payload),
+                project=project,
+                check=check,
+                channel="webhook",
+                event="down",
+                target=gen_url,
+                detail="generic webhook send failed",
+            ) or sent
 
         # fall back to global endpoints if no project-specific webhook is set
         if not sent:
@@ -296,20 +386,52 @@ def notify_down(check, project, reason: str = None) -> None:
                 f"Last ping: `{check.last_ping}` — expected every `{getattr(check, 'expected_interval', getattr(check, 'interval', None))}s` + grace `{getattr(check, 'grace_period', None)}s`{(' — Reason: ' + reason) if reason else ''}"
             )
             if _check_channel_enabled(check, "alert_discord_enabled"):
-                send_discord_message(msg)
+                _track_notification_result(
+                    send_discord_message(msg),
+                    project=project,
+                    check=check,
+                    channel="discord",
+                    event="down",
+                    target=os.environ.get("DISCORD_WEBHOOK_URL"),
+                    detail="global Discord webhook send failed",
+                )
             if _check_channel_enabled(check, "alert_slack_enabled"):
-                send_slack_message(msg)
+                _track_notification_result(
+                    send_slack_message(msg),
+                    project=project,
+                    check=check,
+                    channel="slack",
+                    event="down",
+                    target=os.environ.get("SLACK_WEBHOOK_URL"),
+                    detail="global Slack webhook send failed",
+                )
         try:
             if _sms_allowed(project, check):
                 sms_msg = f"[LastPing] DOWN: {project.name}/{check.name} {reason or ''}".strip()
-                send_sms(sms_msg, to=_sms_to(project, check), project=project)
+                _track_notification_result(
+                    send_sms(sms_msg, to=_sms_to(project, check), project=project),
+                    project=project,
+                    check=check,
+                    channel="sms",
+                    event="down",
+                    target=_sms_to(project, check),
+                    detail="SMS send failed",
+                )
         except Exception:
             pass
         try:
             if _oncall_allowed(project, check) and _oncall_email(project, check):
                 subj = f"[LastPing] DOWN: {project.name}/{check.name}"
                 body = f"Project {project.name} check {check.name} is DOWN. {reason or ''}".strip()
-                send_email(subj, body, to=_oncall_email(project, check))
+                _track_notification_result(
+                    send_email(subj, body, to=_oncall_email(project, check)),
+                    project=project,
+                    check=check,
+                    channel="email",
+                    event="down",
+                    target=_oncall_email(project, check),
+                    detail="on-call email send failed",
+                )
         except Exception:
             pass
     except Exception:
@@ -334,38 +456,91 @@ def notify_degraded(check, project, reason: str = None) -> None:
             embed = {"title": ":warning: DEGRADED", "description": summary, "color": 16753920, "timestamp": now_iso}
             if reason:
                 embed["fields"] = [{"name": "Reason", "value": reason, "inline": False}]
-            _post_json(discord_url, {"embeds": [embed]})
-            sent = True
+            sent = _track_notification_result(
+                _post_json(discord_url, {"embeds": [embed]}),
+                project=project,
+                check=check,
+                channel="discord",
+                event="degraded",
+                target=discord_url,
+                detail="project Discord webhook send failed",
+            ) or sent
         slack_url = _slack_url(project, check)
         if slack_url and _check_channel_enabled(check, "alert_slack_enabled"):
             blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": f":warning: *{summary}*"}}]
             if reason:
                 blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"*Reason:* {reason}"}]})
             attachment = {"color": "#F5A623", "blocks": blocks}
-            _post_json(slack_url, {"attachments": [attachment]})
-            sent = True
+            sent = _track_notification_result(
+                _post_json(slack_url, {"attachments": [attachment]}),
+                project=project,
+                check=check,
+                channel="slack",
+                event="degraded",
+                target=slack_url,
+                detail="project Slack webhook send failed",
+            ) or sent
         gen_url = _generic_webhook_url(project, check)
         if gen_url and _check_channel_enabled(check, "alert_webhook_enabled"):
             payload = {"event": "degraded", "summary": summary, "details": {"reason": reason}, "timestamp": now_iso}
-            send_generic_webhook(gen_url, payload)
-            sent = True
+            sent = _track_notification_result(
+                send_generic_webhook(gen_url, payload),
+                project=project,
+                check=check,
+                channel="webhook",
+                event="degraded",
+                target=gen_url,
+                detail="generic webhook send failed",
+            ) or sent
         if not sent:
             msg = f":warning: **DEGRADED** -- Project `{project.name}` Check `{check.name}` {reason or ''}".strip()
             if _check_channel_enabled(check, "alert_discord_enabled"):
-                send_discord_message(msg)
+                _track_notification_result(
+                    send_discord_message(msg),
+                    project=project,
+                    check=check,
+                    channel="discord",
+                    event="degraded",
+                    target=os.environ.get("DISCORD_WEBHOOK_URL"),
+                    detail="global Discord webhook send failed",
+                )
             if _check_channel_enabled(check, "alert_slack_enabled"):
-                send_slack_message(msg)
+                _track_notification_result(
+                    send_slack_message(msg),
+                    project=project,
+                    check=check,
+                    channel="slack",
+                    event="degraded",
+                    target=os.environ.get("SLACK_WEBHOOK_URL"),
+                    detail="global Slack webhook send failed",
+                )
         try:
             if _sms_allowed(project, check):
                 sms_msg = f"[LastPing] DEGRADED: {project.name}/{check.name} {reason or ''}".strip()
-                send_sms(sms_msg, to=_sms_to(project, check), project=project)
+                _track_notification_result(
+                    send_sms(sms_msg, to=_sms_to(project, check), project=project),
+                    project=project,
+                    check=check,
+                    channel="sms",
+                    event="degraded",
+                    target=_sms_to(project, check),
+                    detail="SMS send failed",
+                )
         except Exception:
             pass
         try:
             if _oncall_allowed(project, check) and _oncall_email(project, check):
                 subj = f"[LastPing] DEGRADED: {project.name}/{check.name}"
                 body = f"Project {project.name} check {check.name} is DEGRADED. {reason or ''}".strip()
-                send_email(subj, body, to=_oncall_email(project, check))
+                _track_notification_result(
+                    send_email(subj, body, to=_oncall_email(project, check)),
+                    project=project,
+                    check=check,
+                    channel="email",
+                    event="degraded",
+                    target=_oncall_email(project, check),
+                    detail="on-call email send failed",
+                )
         except Exception:
             pass
     except Exception:
@@ -402,8 +577,15 @@ def notify_recovery(check, project) -> None:
                 embed["fields"].append({"name": "Project URL", "value": project_url, "inline": False})
             if check_url:
                 embed["fields"].append({"name": "Check URL", "value": check_url, "inline": False})
-            _post_json(discord_url, {"embeds": [embed]})
-            sent = True
+            sent = _track_notification_result(
+                _post_json(discord_url, {"embeds": [embed]}),
+                project=project,
+                check=check,
+                channel="discord",
+                event="recovery",
+                target=discord_url,
+                detail="project Discord webhook send failed",
+            ) or sent
         slack_url = _slack_url(project, check)
         if slack_url and _check_channel_enabled(check, "alert_slack_enabled"):
             blocks = [
@@ -418,8 +600,15 @@ def notify_recovery(check, project) -> None:
                 if check_url:
                     actions.append({"type": "button", "text": {"type": "plain_text", "text": "Open Check"}, "url": check_url})
                 attachment["actions"] = actions
-            _post_json(slack_url, {"attachments": [attachment]})
-            sent = True
+            sent = _track_notification_result(
+                _post_json(slack_url, {"attachments": [attachment]}),
+                project=project,
+                check=check,
+                channel="slack",
+                event="recovery",
+                target=slack_url,
+                detail="project Slack webhook send failed",
+            ) or sent
         pd_key = _pagerduty_key(project, check)
         if pd_key and _check_channel_enabled(check, "alert_pagerduty_enabled"):
             pd_details = details.copy()
@@ -440,23 +629,53 @@ def notify_recovery(check, project) -> None:
                     "custom_details": pd_details,
                 },
             }
-            _post_json("https://events.pagerduty.com/v2/enqueue", pd_payload)
-            sent = True
+            sent = _track_notification_result(
+                _post_json("https://events.pagerduty.com/v2/enqueue", pd_payload),
+                project=project,
+                check=check,
+                channel="pagerduty",
+                event="recovery",
+                target="https://events.pagerduty.com/v2/enqueue",
+                detail="PagerDuty recovery event send failed",
+            ) or sent
         gen_url = _generic_webhook_url(project, check)
         if gen_url and _check_channel_enabled(check, "alert_webhook_enabled"):
-            send_generic_webhook(
-                gen_url,
-                {"event": "recovery", "summary": summary, "details": details, "timestamp": now_iso, "project_url": project_url, "check_url": check_url},
-            )
-            sent = True
+            sent = _track_notification_result(
+                send_generic_webhook(
+                    gen_url,
+                    {"event": "recovery", "summary": summary, "details": details, "timestamp": now_iso, "project_url": project_url, "check_url": check_url},
+                ),
+                project=project,
+                check=check,
+                channel="webhook",
+                event="recovery",
+                target=gen_url,
+                detail="generic webhook send failed",
+            ) or sent
 
         # fall back to global endpoints if no project-specific webhook is configured
         if not sent:
             msg = (f":white_check_mark: **RECOVERY** — Project `{project.name}` — Check `{check.name}` is UP again\n" f"Last ping: `{check.last_ping}`")
             if _check_channel_enabled(check, "alert_discord_enabled"):
-                send_discord_message(msg)
+                _track_notification_result(
+                    send_discord_message(msg),
+                    project=project,
+                    check=check,
+                    channel="discord",
+                    event="recovery",
+                    target=os.environ.get("DISCORD_WEBHOOK_URL"),
+                    detail="global Discord webhook send failed",
+                )
             if _check_channel_enabled(check, "alert_slack_enabled"):
-                send_slack_message(msg)
+                _track_notification_result(
+                    send_slack_message(msg),
+                    project=project,
+                    check=check,
+                    channel="slack",
+                    event="recovery",
+                    target=os.environ.get("SLACK_WEBHOOK_URL"),
+                    detail="global Slack webhook send failed",
+                )
     except Exception:
         logger.exception("Failed to send recovery notification")
 
@@ -518,8 +737,15 @@ def notify_escalation(project, reason: str, check=None):
         }
         if check is not None:
             embed["fields"].append({"name": "Check", "value": getattr(check, "name", "n/a"), "inline": True})
-        _post_json(discord_url, {"embeds": [embed]})
-        sent = True
+        sent = _track_notification_result(
+            _post_json(discord_url, {"embeds": [embed]}),
+            project=project,
+            check=check,
+            channel="discord",
+            event="escalation",
+            target=discord_url,
+            detail="project Discord webhook send failed",
+        ) or sent
 
     slack_url = _slack_url(project, check)
     if slack_url and _check_channel_enabled(check, "alert_slack_enabled"):
@@ -530,8 +756,15 @@ def notify_escalation(project, reason: str, check=None):
         if check is not None:
             blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"*Check:* {getattr(check, 'name', 'n/a')}"}]})
         attachment = {"color": "#F5A623", "blocks": blocks}
-        _post_json(slack_url, {"attachments": [attachment]})
-        sent = True
+        sent = _track_notification_result(
+            _post_json(slack_url, {"attachments": [attachment]}),
+            project=project,
+            check=check,
+            channel="slack",
+            event="escalation",
+            target=slack_url,
+            detail="project Slack webhook send failed",
+        ) or sent
 
     pd_key = _pagerduty_key(project, check)
     if pd_key and _check_channel_enabled(check, "alert_pagerduty_enabled"):
@@ -546,14 +779,28 @@ def notify_escalation(project, reason: str, check=None):
                 "custom_details": details,
             },
         }
-        _post_json("https://events.pagerduty.com/v2/enqueue", pd_payload)
-        sent = True
+        sent = _track_notification_result(
+            _post_json("https://events.pagerduty.com/v2/enqueue", pd_payload),
+            project=project,
+            check=check,
+            channel="pagerduty",
+            event="escalation",
+            target="https://events.pagerduty.com/v2/enqueue",
+            detail="PagerDuty escalation event send failed",
+        ) or sent
 
     gen_url = _generic_webhook_url(project, check)
     if gen_url and _check_channel_enabled(check, "alert_webhook_enabled"):
         payload = {"event": "escalation", "summary": summary, "details": details}
-        send_generic_webhook(gen_url, payload)
-        sent = True
+        sent = _track_notification_result(
+            send_generic_webhook(gen_url, payload),
+            project=project,
+            check=check,
+            channel="webhook",
+            event="escalation",
+            target=gen_url,
+            detail="generic webhook send failed",
+        ) or sent
 
     esc = os.environ.get("ALERT_ESCALATION_EMAIL")
     if esc:
@@ -563,14 +810,30 @@ def notify_escalation(project, reason: str, check=None):
         else:
             subj = f"[LastPing] Escalation: project {project.name} alert threshold exceeded"
             body = f"Project {project.name} has exceeded its alert threshold. Latest reason: {reason}"
-        sent = send_email(subj, body, to=esc) or sent
+        sent = _track_notification_result(
+            send_email(subj, body, to=esc),
+            project=project,
+            check=check,
+            channel="email",
+            event="escalation",
+            target=esc,
+            detail="escalation email send failed",
+        ) or sent
     try:
         if _sms_allowed(project, check):
             if check is not None:
                 sms_msg = f"[LastPing] ESCALATION: {project.name}/{getattr(check, 'name', 'check')} {reason or ''}".strip()
             else:
                 sms_msg = f"[LastPing] ESCALATION: {project.name} {reason or ''}".strip()
-            sent = send_sms(sms_msg, to=_sms_to(project, check), project=project) or sent
+            sent = _track_notification_result(
+                send_sms(sms_msg, to=_sms_to(project, check), project=project),
+                project=project,
+                check=check,
+                channel="sms",
+                event="escalation",
+                target=_sms_to(project, check),
+                detail="SMS send failed",
+            ) or sent
     except Exception:
         pass
     try:
@@ -581,7 +844,15 @@ def notify_escalation(project, reason: str, check=None):
             else:
                 subj = f"[LastPing] ESCALATION: {project.name}"
                 body = f"Project {project.name} escalation: {reason}"
-            sent = send_email(subj, body, to=_oncall_email(project, check)) or sent
+            sent = _track_notification_result(
+                send_email(subj, body, to=_oncall_email(project, check)),
+                project=project,
+                check=check,
+                channel="email",
+                event="escalation",
+                target=_oncall_email(project, check),
+                detail="on-call email send failed",
+            ) or sent
     except Exception:
         pass
 
@@ -654,10 +925,37 @@ def notify_status_subscribers(session: Session, project, check, incident, *, eve
     for subscription in subscriptions:
         try:
             if subscription.channel == "email":
-                sent = send_email(subject, "\n".join(body_lines), to=subscription.target) or sent
+                sent = _track_notification_result(
+                    send_email(subject, "\n".join(body_lines), to=subscription.target),
+                    project=project,
+                    check=check,
+                    subscription=subscription,
+                    channel="email",
+                    event=f"status_{event}",
+                    target=subscription.target,
+                    detail="public status email send failed",
+                ) or sent
             elif subscription.channel == "webhook":
-                sent = send_generic_webhook(subscription.target, payload) or sent
+                sent = _track_notification_result(
+                    send_generic_webhook(subscription.target, payload),
+                    project=project,
+                    check=check,
+                    subscription=subscription,
+                    channel="webhook",
+                    event=f"status_{event}",
+                    target=subscription.target,
+                    detail="public status webhook send failed",
+                ) or sent
         except Exception:
+            _record_notification_failure(
+                project=project,
+                check=check,
+                subscription=subscription,
+                channel=subscription.channel,
+                event=f"status_{event}",
+                target=getattr(subscription, "target", None),
+                detail="public status notification raised an exception",
+            )
             logger.exception(
                 "Failed public status notification for project=%s subscription=%s",
                 getattr(project, "id", None),
