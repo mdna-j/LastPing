@@ -291,8 +291,8 @@ def require_project_api_key(project_id: int, authorization: Optional[str] = Head
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
-    _matched_api_key, project_primary = _match_project_api_key(session, project_id, key)
-    if project_primary:
+    matched_api_key, project_primary = _match_project_api_key(session, project_id, key)
+    if matched_api_key or project_primary:
         return project
 
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API key")

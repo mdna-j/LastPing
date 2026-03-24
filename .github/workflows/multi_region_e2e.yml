@@ -100,31 +100,62 @@ jobs:
 
       - name: Create Project + Region-Pinned Check (us-east)
         run: |
-          code="$(curl -sS -o /tmp/project_resp.json -w '%{http_code}' -X POST http://localhost:8000/projects/ -H 'Content-Type: application/json' -d '{"name":"ci-multi-region"}')"
-          if [ "$code" -ge 400 ]; then
-            echo "Create project failed: HTTP $code"
-            cat /tmp/project_resp.json || true
-            exit 1
-          fi
-          project_id="$(python -c 'import json,sys; data=json.load(sys.stdin); print(data["project"]["id"])' </tmp/project_resp.json)"
-          api_key="$(python -c 'import json,sys; data=json.load(sys.stdin); print(data["api_key"])' </tmp/project_resp.json)"
+          python - <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.error
+          import urllib.request
 
-          code="$(curl -sS -o /tmp/check_resp.json -w '%{http_code}' -X POST "http://localhost:8000/projects/${project_id}/checks/" \
-            -H 'Content-Type: application/json' \
-            -H "X-API-KEY: ${api_key}" \
-            -d '{"name":"ci-us-east","type":"heartbeat","expected_interval":60,"grace_period":0,"region":"us-east","alert_enabled":false}')"
-          if [ "$code" -ge 400 ]; then
-            echo "Create check failed: HTTP $code"
-            cat /tmp/check_resp.json || true
-            exit 1
-          fi
-          check_id="$(python -c 'import json,sys; data=json.load(sys.stdin); print(data["id"])' </tmp/check_resp.json)"
+          base_url = "http://localhost:8000"
 
-          {
-            echo "PROJECT_ID=${project_id}"
-            echo "API_KEY=${api_key}"
-            echo "CHECK_ID=${check_id}"
-          } >> "$GITHUB_ENV"
+          def post_json(path, payload, headers=None):
+            merged_headers = {"Content-Type": "application/json"}
+            if headers:
+              merged_headers.update(headers)
+            req = urllib.request.Request(
+              base_url + path,
+              data=json.dumps(payload).encode("utf-8"),
+              headers=merged_headers,
+              method="POST",
+            )
+            try:
+              with urllib.request.urlopen(req, timeout=20) as resp:
+                body = resp.read().decode("utf-8")
+                return resp.getcode(), json.loads(body)
+            except urllib.error.HTTPError as exc:
+              body = exc.read().decode("utf-8", errors="replace")
+              print(f"{path} failed: HTTP {exc.code}")
+              print(body)
+              raise
+
+          _, project_resp = post_json("/projects/", {"name": "ci-multi-region"})
+          project_id = project_resp["project"]["id"]
+          api_key = project_resp["api_key"].strip()
+          if not api_key:
+            raise RuntimeError("project creation returned an empty api_key")
+
+          _, check_resp = post_json(
+            f"/projects/{project_id}/checks/",
+            {
+              "name": "ci-us-east",
+              "type": "heartbeat",
+              "expected_interval": 60,
+              "grace_period": 0,
+              "region": "us-east",
+              "alert_enabled": False,
+            },
+            headers={
+              "X-API-KEY": api_key,
+            },
+          )
+          check_id = check_resp["id"]
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as fh:
+            fh.write(f"PROJECT_ID={project_id}\n")
+            fh.write(f"API_KEY={api_key}\n")
+            fh.write(f"CHECK_ID={check_id}\n")
+          PY
 
       - name: Wait For Initial Lease (Expect us-east-1)
         run: |
@@ -209,31 +240,65 @@ jobs:
 
       - name: Create Project + Region-Pinned Check (us-east)
         run: |
-          code="$(curl -sS -o /tmp/project_resp.json -w '%{http_code}' -X POST http://localhost:8000/projects/ -H 'Content-Type: application/json' -d '{"name":"ci-multi-region-soak-${{ matrix.iteration }}-${{ github.run_id }}"}')"
-          if [ "$code" -ge 400 ]; then
-            echo "Create project failed: HTTP $code"
-            cat /tmp/project_resp.json || true
-            exit 1
-          fi
-          project_id="$(python -c 'import json,sys; data=json.load(sys.stdin); print(data["project"]["id"])' </tmp/project_resp.json)"
-          api_key="$(python -c 'import json,sys; data=json.load(sys.stdin); print(data["api_key"])' </tmp/project_resp.json)"
+          python - <<'PY'
+          import json
+          import os
+          import urllib.error
+          import urllib.request
 
-          code="$(curl -sS -o /tmp/check_resp.json -w '%{http_code}' -X POST "http://localhost:8000/projects/${project_id}/checks/" \
-            -H 'Content-Type: application/json' \
-            -H "X-API-KEY: ${api_key}" \
-            -d '{"name":"ci-us-east-soak-${{ matrix.iteration }}","type":"heartbeat","expected_interval":60,"grace_period":0,"region":"us-east","alert_enabled":false}')"
-          if [ "$code" -ge 400 ]; then
-            echo "Create check failed: HTTP $code"
-            cat /tmp/check_resp.json || true
-            exit 1
-          fi
-          check_id="$(python -c 'import json,sys; data=json.load(sys.stdin); print(data["id"])' </tmp/check_resp.json)"
+          base_url = "http://localhost:8000"
+          run_id = os.environ.get("GITHUB_RUN_ID", "local")
+          iteration = os.environ.get("MATRIX_ITERATION", "0")
 
-          {
-            echo "PROJECT_ID=${project_id}"
-            echo "API_KEY=${api_key}"
-            echo "CHECK_ID=${check_id}"
-          } >> "$GITHUB_ENV"
+          def post_json(path, payload, headers=None):
+            merged_headers = {"Content-Type": "application/json"}
+            if headers:
+              merged_headers.update(headers)
+            req = urllib.request.Request(
+              base_url + path,
+              data=json.dumps(payload).encode("utf-8"),
+              headers=merged_headers,
+              method="POST",
+            )
+            try:
+              with urllib.request.urlopen(req, timeout=20) as resp:
+                body = resp.read().decode("utf-8")
+                return resp.getcode(), json.loads(body)
+            except urllib.error.HTTPError as exc:
+              body = exc.read().decode("utf-8", errors="replace")
+              print(f"{path} failed: HTTP {exc.code}")
+              print(body)
+              raise
+
+          _, project_resp = post_json("/projects/", {"name": f"ci-multi-region-soak-{iteration}-{run_id}"})
+          project_id = project_resp["project"]["id"]
+          api_key = project_resp["api_key"].strip()
+          if not api_key:
+            raise RuntimeError("project creation returned an empty api_key")
+
+          _, check_resp = post_json(
+            f"/projects/{project_id}/checks/",
+            {
+              "name": f"ci-us-east-soak-{iteration}",
+              "type": "heartbeat",
+              "expected_interval": 60,
+              "grace_period": 0,
+              "region": "us-east",
+              "alert_enabled": False,
+            },
+            headers={
+              "X-API-KEY": api_key,
+            },
+          )
+          check_id = check_resp["id"]
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as fh:
+            fh.write(f"PROJECT_ID={project_id}\n")
+            fh.write(f"API_KEY={api_key}\n")
+            fh.write(f"CHECK_ID={check_id}\n")
+          PY
+        env:
+          MATRIX_ITERATION: ${{ matrix.iteration }}
 
       - name: Wait For Initial Lease (Expect us-east-1)
         run: |
