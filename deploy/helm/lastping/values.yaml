@@ -1,0 +1,43 @@
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: ghcr.io/example/lastping
+  tag: latest
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+secretName: lastping-env
+
+api:
+  replicas: 1
+  podAnnotations: {}
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8000
+
+workers:
+  - name: default
+    replicas: 1
+    env: []
+    resources: {}
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: lastping.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []

@@ -50,6 +50,24 @@ Use `docker build` or the provided `docker-compose.yml` to build and run contain
 process can be run inside the container; ensure `DATABASE_URL` and any alerting secrets are provided
 via environment or a secrets mechanism.
 
+**Deployment**
+
+This repo now includes a real staging / production deployment foundation:
+
+- runtime env validation via `scripts/validate_env.py`
+- Helm chart at `deploy/helm/lastping`
+- example env files in `deploy/env/`
+- manual GitHub Actions deployment workflow at `.github/workflows/deploy.yml`
+- runbooks in `docs/deployment.md` and `docs/backup_restore.md`
+
+Recommended approach:
+
+1. keep PostgreSQL and Redis external to the app chart
+2. store deploy secrets in GitHub Environments (`staging`, `production`)
+3. validate runtime env before deploy
+4. deploy with Helm
+5. keep logical DB backups and restore drills documented
+
 **Development & CI recommendations**
 
 - Formatting: use `black` and `isort`.

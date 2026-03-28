@@ -1,0 +1,59 @@
+{{- range $worker := .Values.workers }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "lastping.fullname" $ }}-worker-{{ $worker.name }}
+  labels:
+    {{- include "lastping.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: worker
+    app.kubernetes.io/worker-name: {{ $worker.name | quote }}
+spec:
+  replicas: {{ default 1 $worker.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ include "lastping.fullname" $ }}
+      app.kubernetes.io/component: worker
+      app.kubernetes.io/worker-name: {{ $worker.name | quote }}
+  template:
+    metadata:
+      labels:
+        {{- include "lastping.labels" $ | nindent 8 }}
+        app.kubernetes.io/component: worker
+        app.kubernetes.io/worker-name: {{ $worker.name | quote }}
+    spec:
+      {{- if $.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml $.Values.imagePullSecrets | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: worker
+          image: "{{ $.Values.image.repository }}:{{ $.Values.image.tag }}"
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          command: ["/app/docker-entrypoint.sh"]
+          args: ["python", "-u", "-m", "src.worker"]
+          envFrom:
+            - secretRef:
+                name: {{ $.Values.secretName }}
+          env:
+            {{- range $env := $worker.env }}
+            - name: {{ $env.name }}
+              value: {{ $env.value | quote }}
+            {{- end }}
+          livenessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - "import os,time,sys; f='/tmp/lastping_worker.health'; sys.exit(0 if os.path.exists(f) and time.time()-os.path.getmtime(f) < 120 else 1)"
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            {{- toYaml $worker.resources | nindent 12 }}
+      nodeSelector:
+        {{- toYaml $worker.nodeSelector | nindent 8 }}
+      tolerations:
+        {{- toYaml $worker.tolerations | nindent 8 }}
+      affinity:
+        {{- toYaml $worker.affinity | nindent 8 }}
+{{- end }}
