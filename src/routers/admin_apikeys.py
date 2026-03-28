@@ -23,7 +23,13 @@ router = APIRouter(prefix="/admin/apikeys", tags=["admin_apikeys"])
 class ApiKeyRead(BaseModel):
     id: int
     project_id: int
+    name: Optional[str]
+    role: str
+    is_active: bool
+    revoked_at: Optional[datetime]
     rate_limit_per_minute: Optional[int]
+    created_by_user_id: Optional[int]
+    created_at: datetime
 
     class Config:
         orm_mode = True
@@ -42,7 +48,7 @@ def list_apikeys(x_admin_token: Optional[str] = Header(None), session: Session =
 
 
 @router.post("/create", status_code=status.HTTP_201_CREATED)
-def create_apikey(project_id: int = Query(..., ge=1), rate_limit_per_minute: Optional[int] = Query(0, ge=0, le=10000), request: Request = None, x_admin_token: Optional[str] = Header(None), x_csrf_token: Optional[str] = Header(None), admin_csrf: Optional[str] = Cookie(None), session: Session = Depends(get_session)):
+def create_apikey(project_id: int = Query(..., ge=1), name: Optional[str] = Query(None, max_length=120), role: str = Query("editor", regex="^(owner|admin|editor|viewer)$"), rate_limit_per_minute: Optional[int] = Query(0, ge=0, le=10000), request: Request = None, x_admin_token: Optional[str] = Header(None), x_csrf_token: Optional[str] = Header(None), admin_csrf: Optional[str] = Cookie(None), session: Session = Depends(get_session)):
     admin_token = os.environ.get('ADMIN_TOKEN')
     if not admin_token or x_admin_token != admin_token:
         raise HTTPException(status_code=403, detail="Admin token required")
@@ -65,13 +71,13 @@ def create_apikey(project_id: int = Query(..., ge=1), rate_limit_per_minute: Opt
         except Exception:
             pass
     plain = generate_api_key()
-    ak = ApiKey(project_id=project_id, key_hash=hash_api_key(plain), rate_limit_per_minute=rate_limit_per_minute or 0)
+    ak = ApiKey(project_id=project_id, key_hash=hash_api_key(plain), name=name, role=role, rate_limit_per_minute=rate_limit_per_minute or 0)
     session.add(ak)
     session.commit()
     session.refresh(ak)
     # audit
     actor, actor_ip, user_agent = get_audit_context(request, None, x_admin_token, session)
-    al = AuditLog(actor=actor, action="create_apikey", target_type="project", target_id=project_id, details=f"apikey_id={ak.id}", actor_ip=actor_ip, user_agent=user_agent)
+    al = AuditLog(actor=actor, action="create_apikey", target_type="project", target_id=project_id, details=f"apikey_id={ak.id}, role={role}", actor_ip=actor_ip, user_agent=user_agent, project_id=project_id, org_id=project.org_id)
     session.add(al)
     session.commit()
     return {"api_key": plain, "id": ak.id}
@@ -101,10 +107,13 @@ def revoke_apikey(api_key_id: int = Query(..., ge=1), request: Request = None, x
     if not ak:
         raise HTTPException(status_code=404, detail="ApiKey not found")
     pid = ak.project_id
-    session.delete(ak)
+    ak.is_active = False
+    ak.revoked_at = datetime.utcnow()
+    session.add(ak)
     # audit
     actor, actor_ip, user_agent = get_audit_context(request, None, x_admin_token, session)
-    al = AuditLog(actor=actor, action="revoke_apikey", target_type="project", target_id=pid, details=f"apikey_id={api_key_id}", actor_ip=actor_ip, user_agent=user_agent)
+    project = session.get(Project, pid)
+    al = AuditLog(actor=actor, action="revoke_apikey", target_type="project", target_id=pid, details=f"apikey_id={api_key_id}", actor_ip=actor_ip, user_agent=user_agent, project_id=pid, org_id=project.org_id if project else None)
     session.add(al)
     session.commit()
     return {"revoked": api_key_id}
@@ -125,6 +134,9 @@ def search_audit(
     actor: Optional[str] = Query(None, max_length=64),
     target_type: Optional[str] = Query(None, max_length=64),
     target_id: Optional[int] = None,
+    org_id: Optional[int] = None,
+    team_id: Optional[int] = None,
+    project_id: Optional[int] = None,
     start: Optional[datetime] = None,
     end: Optional[datetime] = None,
     page: int = Query(1, ge=1, le=100000),
@@ -146,13 +158,19 @@ def search_audit(
         stmt = stmt.where(AuditLog.target_type == target_type)
     if target_id is not None:
         stmt = stmt.where(AuditLog.target_id == target_id)
+    if org_id is not None:
+        stmt = stmt.where(AuditLog.org_id == org_id)
+    if team_id is not None:
+        stmt = stmt.where(AuditLog.team_id == team_id)
+    if project_id is not None:
+        stmt = stmt.where(AuditLog.project_id == project_id)
     if start:
         stmt = stmt.where(AuditLog.created_at >= start)
     if end:
         stmt = stmt.where(AuditLog.created_at <= end)
 
     # ordering + pagination
-    total = session.exec(stmt).count()
+    total = len(session.exec(stmt).all())
     stmt = stmt.order_by(AuditLog.created_at.desc()).offset((max(page, 1) - 1) * per_page).limit(per_page)
     items = session.exec(stmt).all()
     return {"total": total, "page": page, "per_page": per_page, "items": items}

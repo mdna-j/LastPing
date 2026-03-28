@@ -15,8 +15,8 @@ from pydantic import BaseModel, AnyHttpUrl, conint, constr, root_validator, Emai
 from sqlmodel import Session, select
 
 from ..db import get_session
-from ..models import Check as CheckModel, CheckType, CheckStatus, Project, AuditLog
-from ..deps import require_admin_or_project_api_key, get_current_user, require_project_role, limit_by_api_key, get_audit_context, limit_public_requests
+from ..models import Check as CheckModel, CheckType, CheckStatus, Project, AuditLog, Role
+from ..deps import authorize_project_operation, limit_by_api_key, get_audit_context, limit_public_requests
 from ..schemas import StrictBaseModel
 
 
@@ -56,26 +56,15 @@ def _require_check_write_access(
     x_api_key: Optional[str],
     session: Session,
 ) -> Project:
-    """Allow admin/project API key auth, or fall back to owner user auth without masking API-key failures."""
-    try:
-        return require_admin_or_project_api_key(
-            project_id,
-            x_admin_token=x_admin_token,
-            authorization=authorization,
-            x_api_key=x_api_key,
-            session=session,
-        )
-    except HTTPException as original_exc:
-        try:
-            user = get_current_user(authorization=authorization, session=session)
-            require_project_role(project_id, "owner", current_user=user, session=session)
-        except HTTPException:
-            raise original_exc
-
-        project = session.get(Project, project_id)
-        if not project:
-            raise original_exc
-        return project
+    """Allow admin/project API key auth, or effective project editor access."""
+    return authorize_project_operation(
+        project_id,
+        min_role=Role.EDITOR.value,
+        x_admin_token=x_admin_token,
+        authorization=authorization,
+        x_api_key=x_api_key,
+        session=session,
+    )
 
 
 class CheckCreate(StrictBaseModel):

@@ -17,6 +17,7 @@ from sqlmodel import Field, Relationship, SQLModel
 class Project(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str
+    org_id: Optional[int] = Field(default=None, foreign_key="organization.id", index=True)
     # hashed API key for improved security (PBKDF2)
     api_key_hash: Optional[str] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -36,6 +37,8 @@ class Project(SQLModel, table=True):
     api_keys: List["ApiKey"] = Relationship(back_populates="project")
     # Project membership (users and roles)
     memberships: List["ProjectMembership"] = Relationship(back_populates="project")
+    organization: Optional["Organization"] = Relationship(back_populates="projects")
+    team_access: List["ProjectTeamAccess"] = Relationship(back_populates="project")
     # per-project alert throttling/escalation
     alert_rate_limit_count: int = Field(default=100, description="max alerts in window before escalation/suppression")
     alert_rate_limit_window: int = Field(default=3600, description="window in seconds for rate limiting alerts")
@@ -164,6 +167,11 @@ class ApiKey(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     project_id: int = Field(foreign_key="project.id")
     key_hash: str = Field(index=True)
+    name: Optional[str] = Field(default=None, max_length=120)
+    role: str = Field(default="owner", index=True)
+    is_active: bool = Field(default=True, index=True)
+    revoked_at: Optional[datetime] = Field(default=None, index=True)
+    created_by_user_id: Optional[int] = Field(default=None, foreign_key="user.id", index=True)
     rate_limit_per_minute: Optional[int] = Field(default=0, description="requests per minute allowed for this key; 0 = unlimited")
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -172,7 +180,81 @@ class ApiKey(SQLModel, table=True):
 
 class Role(str, Enum):
     OWNER = "owner"
+    ADMIN = "admin"
+    EDITOR = "editor"
     VIEWER = "viewer"
+
+
+class OrgRole(str, Enum):
+    OWNER = "owner"
+    ADMIN = "admin"
+    MEMBER = "member"
+
+
+class TeamRole(str, Enum):
+    LEAD = "lead"
+    MEMBER = "member"
+
+
+class Organization(SQLModel, table=True):
+    __tablename__ = "organization"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(index=True)
+    slug: Optional[str] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    memberships: List["OrganizationMembership"] = Relationship(back_populates="organization")
+    teams: List["Team"] = Relationship(back_populates="organization")
+    projects: List["Project"] = Relationship(back_populates="organization")
+
+
+class OrganizationMembership(SQLModel, table=True):
+    __tablename__ = "organization_membership"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    organization_id: int = Field(foreign_key="organization.id", index=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    role: str = Field(default=OrgRole.MEMBER.value, index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    organization: Optional["Organization"] = Relationship(back_populates="memberships")
+    user: Optional["User"] = Relationship(back_populates="organization_memberships")
+
+
+class Team(SQLModel, table=True):
+    __tablename__ = "team"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    organization_id: int = Field(foreign_key="organization.id", index=True)
+    name: str = Field(index=True)
+    slug: Optional[str] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    organization: Optional["Organization"] = Relationship(back_populates="teams")
+    memberships: List["TeamMembership"] = Relationship(back_populates="team")
+    project_access: List["ProjectTeamAccess"] = Relationship(back_populates="team")
+
+
+class TeamMembership(SQLModel, table=True):
+    __tablename__ = "team_membership"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    team_id: int = Field(foreign_key="team.id", index=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    role: str = Field(default=TeamRole.MEMBER.value, index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    team: Optional["Team"] = Relationship(back_populates="memberships")
+    user: Optional["User"] = Relationship(back_populates="team_memberships")
+
+
+class ProjectTeamAccess(SQLModel, table=True):
+    __tablename__ = "project_team_access"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    team_id: int = Field(foreign_key="team.id", index=True)
+    role: str = Field(default=Role.VIEWER.value, index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    project: Optional["Project"] = Relationship(back_populates="team_access")
+    team: Optional["Team"] = Relationship(back_populates="project_access")
 
 
 class User(SQLModel, table=True):
@@ -184,6 +266,8 @@ class User(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
     memberships: List["ProjectMembership"] = Relationship(back_populates="user")
+    organization_memberships: List["OrganizationMembership"] = Relationship(back_populates="user")
+    team_memberships: List["TeamMembership"] = Relationship(back_populates="user")
 
 
 class ProjectMembership(SQLModel, table=True):
@@ -404,6 +488,9 @@ class AuditLog(SQLModel, table=True):
     action: str = Field(description="Action performed, e.g. 'create_apikey', 'rotate_apikey', 'revoke_apikey'")
     target_type: Optional[str] = None
     target_id: Optional[int] = None
+    org_id: Optional[int] = Field(default=None, index=True)
+    team_id: Optional[int] = Field(default=None, index=True)
+    project_id: Optional[int] = Field(default=None, index=True)
     details: Optional[str] = None
     # optional network context for the actor performing the action
     actor_ip: Optional[str] = None

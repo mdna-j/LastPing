@@ -15,9 +15,9 @@ from pydantic import BaseModel, EmailStr, AnyHttpUrl, confloat, constr, root_val
 from sqlmodel import select, Session
 
 from ..db import get_session
-from ..models import Project as ProjectModel, AuditLog, ApiKey
+from ..models import AuditLog, ApiKey, OrgRole, Project as ProjectModel, ProjectMembership, Role
 from ..security import generate_api_key, hash_api_key
-from ..deps import limit_by_api_key, get_audit_context, limit_public_requests
+from ..deps import authorize_org_operation, authorize_project_operation, get_audit_context, get_current_user, limit_public_requests
 from ..schemas import StrictBaseModel
 import os
 import json
@@ -43,11 +43,13 @@ def _diff_details(before: dict, after: dict) -> Optional[str]:
 class ProjectCreate(StrictBaseModel):
     name: constr(min_length=1, max_length=120)
     owner_email: Optional[EmailStr] = None
+    org_id: Optional[int] = None
 
 
 class ProjectRead(BaseModel):
     id: int
     name: str
+    org_id: Optional[int] = None
     created_at: datetime
     discord_webhook_url: Optional[str] = None
     slack_webhook_url: Optional[str] = None
@@ -62,26 +64,92 @@ class ProjectRead(BaseModel):
         orm_mode = True
 
 
+class ProjectTokenCreate(StrictBaseModel):
+    name: constr(min_length=1, max_length=120)
+    role: constr(regex=r"^(owner|admin|editor|viewer)$") = Role.EDITOR.value
+    rate_limit_per_minute: Optional[int] = 0
+
+
+class ProjectTokenRead(BaseModel):
+    id: int
+    project_id: int
+    name: Optional[str]
+    role: str
+    is_active: bool
+    revoked_at: Optional[datetime]
+    rate_limit_per_minute: Optional[int]
+    created_by_user_id: Optional[int]
+    created_at: datetime
+
+    class Config:
+        orm_mode = True
+
+
+def _project_scope_kwargs(project: ProjectModel) -> dict:
+    return {
+        "project_id": project.id,
+        "org_id": getattr(project, "org_id", None),
+    }
+
+
 @router.post("/", status_code=status.HTTP_201_CREATED, dependencies=[Depends(limit_public_requests)])
 def create_project(payload: ProjectCreate, request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), session: Session = Depends(get_session)):
     """Create a new project and return the project and API key."""
+    current_user = None
+    if isinstance(authorization, str) and authorization:
+        current_user = get_current_user(authorization=authorization, session=session)
+    if payload.org_id is not None:
+        authorize_org_operation(
+            payload.org_id,
+            min_role=OrgRole.ADMIN.value,
+            x_admin_token=x_admin_token,
+            authorization=authorization,
+            session=session,
+        )
+
     # generate one-time plaintext API key and store only the hash
     api_key = generate_api_key()
     api_key_hash = hash_api_key(api_key)
-    project = ProjectModel(name=payload.name, api_key_hash=api_key_hash, owner_email=payload.owner_email)
+    project = ProjectModel(
+        name=payload.name,
+        org_id=payload.org_id,
+        api_key_hash=api_key_hash,
+        owner_email=payload.owner_email,
+    )
     session.add(project)
     session.commit()
     session.refresh(project)
+    if current_user:
+        session.add(ProjectMembership(user_id=current_user.id, project_id=project.id, role=Role.OWNER.value))
+        session.commit()
     # Ensure the primary project API key is also represented in the `api_key`
     # table so write endpoints guarded by `limit_by_api_key` accept it.
     try:
-        session.add(ApiKey(project_id=project.id, key_hash=api_key_hash, rate_limit_per_minute=0))
+        session.add(
+            ApiKey(
+                project_id=project.id,
+                key_hash=api_key_hash,
+                name="primary",
+                role=Role.OWNER.value,
+                rate_limit_per_minute=0,
+                created_by_user_id=current_user.id if current_user else None,
+            )
+        )
         session.commit()
     except Exception:
         session.rollback()
     try:
         actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
-        al = AuditLog(actor=actor, action="create_project", target_type="project", target_id=project.id, details=None, actor_ip=actor_ip, user_agent=user_agent)
+        al = AuditLog(
+            actor=actor,
+            action="create_project",
+            target_type="project",
+            target_id=project.id,
+            details=None,
+            actor_ip=actor_ip,
+            user_agent=user_agent,
+            **_project_scope_kwargs(project),
+        )
         session.add(al)
         session.commit()
     except Exception:
@@ -102,6 +170,130 @@ def get_project(project_id: int = Path(..., ge=1), session: Session = Depends(ge
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     return ProjectRead.from_orm(project)
+
+
+@router.get("/{project_id}/tokens", response_model=List[ProjectTokenRead])
+def list_project_tokens(
+    project_id: int = Path(..., ge=1),
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    authorize_project_operation(
+        project_id,
+        min_role=Role.OWNER.value,
+        x_admin_token=x_admin_token,
+        authorization=authorization,
+        x_api_key=x_api_key,
+        session=session,
+    )
+    rows = session.exec(select(ApiKey).where(ApiKey.project_id == project_id).order_by(ApiKey.created_at.desc())).all()
+    return [ProjectTokenRead.from_orm(row) for row in rows]
+
+
+@router.post("/{project_id}/tokens", status_code=status.HTTP_201_CREATED)
+def create_project_token(
+    project_id: int = Path(..., ge=1),
+    payload: ProjectTokenCreate = Body(...),
+    request: Request = None,
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    project = authorize_project_operation(
+        project_id,
+        min_role=Role.OWNER.value,
+        x_admin_token=x_admin_token,
+        authorization=authorization,
+        x_api_key=x_api_key,
+        session=session,
+    )
+    creator = None
+    if isinstance(authorization, str) and authorization:
+        try:
+            creator = get_current_user(authorization=authorization, session=session)
+        except HTTPException:
+            creator = None
+    plain = generate_api_key()
+    token = ApiKey(
+        project_id=project_id,
+        key_hash=hash_api_key(plain),
+        name=payload.name,
+        role=payload.role,
+        rate_limit_per_minute=payload.rate_limit_per_minute or 0,
+        created_by_user_id=creator.id if creator else None,
+    )
+    session.add(token)
+    session.commit()
+    session.refresh(token)
+    try:
+        actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
+        session.add(
+            AuditLog(
+                actor=actor,
+                action="create_scoped_project_token",
+                target_type="api_key",
+                target_id=token.id,
+                details=f"name={payload.name}, role={payload.role}",
+                actor_ip=actor_ip,
+                user_agent=user_agent,
+                **_project_scope_kwargs(project),
+            )
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+    return {"token": ProjectTokenRead.from_orm(token), "api_key": plain}
+
+
+@router.post("/{project_id}/tokens/{api_key_id}/revoke", response_model=ProjectTokenRead)
+def revoke_project_token(
+    project_id: int = Path(..., ge=1),
+    api_key_id: int = Path(..., ge=1),
+    request: Request = None,
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    project = authorize_project_operation(
+        project_id,
+        min_role=Role.OWNER.value,
+        x_admin_token=x_admin_token,
+        authorization=authorization,
+        x_api_key=x_api_key,
+        session=session,
+    )
+    token = session.get(ApiKey, api_key_id)
+    if not token or token.project_id != project_id:
+        raise HTTPException(status_code=404, detail="API token not found")
+    if token.key_hash == project.api_key_hash or token.name == "primary":
+        raise HTTPException(status_code=400, detail="Use rotate-key for the primary project token")
+    token.is_active = False
+    token.revoked_at = datetime.utcnow()
+    session.add(token)
+    session.commit()
+    session.refresh(token)
+    try:
+        actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
+        session.add(
+            AuditLog(
+                actor=actor,
+                action="revoke_scoped_project_token",
+                target_type="api_key",
+                target_id=token.id,
+                details=f"name={token.name}, role={token.role}",
+                actor_ip=actor_ip,
+                user_agent=user_agent,
+                **_project_scope_kwargs(project),
+            )
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+    return ProjectTokenRead.from_orm(token)
 
 
 class WebhookUpdate(StrictBaseModel):
@@ -150,10 +342,15 @@ def get_project_webhooks(project_id: int = Path(..., ge=1), session: Session = D
 
 
 @router.post("/{project_id}/webhooks", response_model=WebhookUpdate)
-def update_project_webhooks(project_id: int = Path(..., ge=1), payload: WebhookUpdate = Body(...), request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
-    project = session.get(ProjectModel, project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+def update_project_webhooks(project_id: int = Path(..., ge=1), payload: WebhookUpdate = Body(...), request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), _rl=None, session: Session = Depends(get_session)):
+    project = authorize_project_operation(
+        project_id,
+        min_role=Role.ADMIN.value,
+        x_admin_token=x_admin_token,
+        authorization=authorization,
+        x_api_key=x_api_key,
+        session=session,
+    )
     before = {
         "discord_webhook_url": project.discord_webhook_url,
         "slack_webhook_url": project.slack_webhook_url,
@@ -175,7 +372,7 @@ def update_project_webhooks(project_id: int = Path(..., ge=1), payload: WebhookU
             "pagerduty_integration_key": project.pagerduty_integration_key,
             "generic_webhook_url": project.generic_webhook_url,
         }
-        al = AuditLog(actor=actor, action="update_project_webhooks", target_type="project", target_id=project_id, details=_diff_details(before, after), actor_ip=actor_ip, user_agent=user_agent)
+        al = AuditLog(actor=actor, action="update_project_webhooks", target_type="project", target_id=project_id, details=_diff_details(before, after), actor_ip=actor_ip, user_agent=user_agent, **_project_scope_kwargs(project))
         session.add(al)
         session.commit()
     except Exception:
@@ -192,10 +389,15 @@ def get_project_maintenance(project_id: int = Path(..., ge=1), session: Session 
 
 
 @router.post("/{project_id}/maintenance", response_model=MaintenanceWindow)
-def set_project_maintenance(project_id: int = Path(..., ge=1), payload: MaintenanceWindow = Body(...), request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
-    project = session.get(ProjectModel, project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+def set_project_maintenance(project_id: int = Path(..., ge=1), payload: MaintenanceWindow = Body(...), request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), _rl=None, session: Session = Depends(get_session)):
+    project = authorize_project_operation(
+        project_id,
+        min_role=Role.ADMIN.value,
+        x_admin_token=x_admin_token,
+        authorization=authorization,
+        x_api_key=x_api_key,
+        session=session,
+    )
     before = {
         "maintenance_starts_at": project.maintenance_starts_at,
         "maintenance_ends_at": project.maintenance_ends_at,
@@ -211,7 +413,7 @@ def set_project_maintenance(project_id: int = Path(..., ge=1), payload: Maintena
             "maintenance_starts_at": project.maintenance_starts_at,
             "maintenance_ends_at": project.maintenance_ends_at,
         }
-        al = AuditLog(actor=actor, action="set_project_maintenance", target_type="project", target_id=project_id, details=_diff_details(before, after), actor_ip=actor_ip, user_agent=user_agent)
+        al = AuditLog(actor=actor, action="set_project_maintenance", target_type="project", target_id=project_id, details=_diff_details(before, after), actor_ip=actor_ip, user_agent=user_agent, **_project_scope_kwargs(project))
         session.add(al)
         session.commit()
     except Exception:
@@ -220,10 +422,15 @@ def set_project_maintenance(project_id: int = Path(..., ge=1), payload: Maintena
 
 
 @router.post("/{project_id}/rotate-key")
-def rotate_api_key(project_id: int = Path(..., ge=1), request: Request = None, session: Session = Depends(get_session), _rl = Depends(limit_by_api_key)):
-    project = session.get(ProjectModel, project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+def rotate_api_key(project_id: int = Path(..., ge=1), request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), session: Session = Depends(get_session)):
+    project = authorize_project_operation(
+        project_id,
+        min_role=Role.OWNER.value,
+        x_admin_token=x_admin_token,
+        authorization=authorization,
+        x_api_key=x_api_key,
+        session=session,
+    )
     new_key = generate_api_key()
     old_hash = getattr(project, "api_key_hash", None)
     new_hash = hash_api_key(new_key)
@@ -238,7 +445,7 @@ def rotate_api_key(project_id: int = Path(..., ge=1), request: Request = None, s
             ak.key_hash = new_hash
             session.add(ak)
         else:
-            session.add(ApiKey(project_id=project_id, key_hash=new_hash, rate_limit_per_minute=0))
+            session.add(ApiKey(project_id=project_id, key_hash=new_hash, name="primary", role=Role.OWNER.value, rate_limit_per_minute=0))
     except Exception:
         pass
     # Email the new key to the project owner when configured. This is
@@ -258,8 +465,8 @@ def rotate_api_key(project_id: int = Path(..., ge=1), request: Request = None, s
     # audit
     try:
         from ..models import AuditLog
-        actor, actor_ip, user_agent = get_audit_context(request, None, None, session)
-        al = AuditLog(actor=actor or "project_api", action="rotate_primary_api_key", target_type="project", target_id=project_id, details=None, actor_ip=actor_ip, user_agent=user_agent)
+        actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
+        al = AuditLog(actor=actor or "project_api", action="rotate_primary_api_key", target_type="project", target_id=project_id, details=None, actor_ip=actor_ip, user_agent=user_agent, **_project_scope_kwargs(project))
         session.add(al)
         session.commit()
     except Exception:
@@ -297,7 +504,7 @@ def rotate_all_keys(request: Request = None, x_admin_token: Optional[str] = Head
                 ak.key_hash = new_hash
                 session.add(ak)
             else:
-                session.add(ApiKey(project_id=p.id, key_hash=new_hash, rate_limit_per_minute=0))
+                session.add(ApiKey(project_id=p.id, key_hash=new_hash, name="primary", role=Role.OWNER.value, rate_limit_per_minute=0))
         except Exception:
             pass
         session.add(p)
@@ -314,7 +521,7 @@ def rotate_all_keys(request: Request = None, x_admin_token: Optional[str] = Head
         # audit per project rotation
         try:
             actor, actor_ip, user_agent = get_audit_context(request, None, x_admin_token, session)
-            al = AuditLog(actor=actor, action="rotate_project_key_admin", target_type="project", target_id=p.id, details="rotate_all_keys", actor_ip=actor_ip, user_agent=user_agent)
+            al = AuditLog(actor=actor, action="rotate_project_key_admin", target_type="project", target_id=p.id, details="rotate_all_keys", actor_ip=actor_ip, user_agent=user_agent, **_project_scope_kwargs(p))
             session.add(al)
         except Exception:
             pass
@@ -338,10 +545,15 @@ def get_project_slo(project_id: int = Path(..., ge=1), session: Session = Depend
 
 
 @router.post("/{project_id}/slo", response_model=SloSettings)
-def set_project_slo(project_id: int = Path(..., ge=1), payload: SloSettings = Body(...), request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
-    project = session.get(ProjectModel, project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+def set_project_slo(project_id: int = Path(..., ge=1), payload: SloSettings = Body(...), request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), session: Session = Depends(get_session)):
+    project = authorize_project_operation(
+        project_id,
+        min_role=Role.ADMIN.value,
+        x_admin_token=x_admin_token,
+        authorization=authorization,
+        x_api_key=x_api_key,
+        session=session,
+    )
     before = {"slo_target": project.slo_target, "sla_target": project.sla_target}
     if payload.slo_target is not None:
         project.slo_target = payload.slo_target
@@ -353,7 +565,7 @@ def set_project_slo(project_id: int = Path(..., ge=1), payload: SloSettings = Bo
     try:
         actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
         after = {"slo_target": project.slo_target, "sla_target": project.sla_target}
-        al = AuditLog(actor=actor, action="set_project_slo", target_type="project", target_id=project_id, details=_diff_details(before, after), actor_ip=actor_ip, user_agent=user_agent)
+        al = AuditLog(actor=actor, action="set_project_slo", target_type="project", target_id=project_id, details=_diff_details(before, after), actor_ip=actor_ip, user_agent=user_agent, **_project_scope_kwargs(project))
         session.add(al)
         session.commit()
     except Exception:
@@ -375,10 +587,15 @@ def get_project_alert_settings(project_id: int = Path(..., ge=1), session: Sessi
 
 
 @router.post("/{project_id}/alert-settings", response_model=AlertSettings)
-def set_project_alert_settings(project_id: int = Path(..., ge=1), payload: AlertSettings = Body(...), request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), _rl = Depends(limit_by_api_key), session: Session = Depends(get_session)):
-    project = session.get(ProjectModel, project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+def set_project_alert_settings(project_id: int = Path(..., ge=1), payload: AlertSettings = Body(...), request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), session: Session = Depends(get_session)):
+    project = authorize_project_operation(
+        project_id,
+        min_role=Role.ADMIN.value,
+        x_admin_token=x_admin_token,
+        authorization=authorization,
+        x_api_key=x_api_key,
+        session=session,
+    )
     before = {
         "sms_enabled": project.sms_enabled,
         "sms_to": project.sms_to,
@@ -404,7 +621,7 @@ def set_project_alert_settings(project_id: int = Path(..., ge=1), payload: Alert
             "oncall_enabled": project.oncall_enabled,
             "oncall_email": project.oncall_email,
         }
-        al = AuditLog(actor=actor, action="set_project_alert_settings", target_type="project", target_id=project_id, details=_diff_details(before, after), actor_ip=actor_ip, user_agent=user_agent)
+        al = AuditLog(actor=actor, action="set_project_alert_settings", target_type="project", target_id=project_id, details=_diff_details(before, after), actor_ip=actor_ip, user_agent=user_agent, **_project_scope_kwargs(project))
         session.add(al)
         session.commit()
     except Exception:

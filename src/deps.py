@@ -15,7 +15,20 @@ from fastapi import Depends, Header, HTTPException, Request, status
 from sqlmodel import Session, select
 
 from .db import get_session
-from .models import ApiKey, ApiKeyUsage, Project, ProjectMembership, User, UserToken, UserUsage
+from .models import (
+    ApiKey,
+    ApiKeyUsage,
+    OrgRole,
+    OrganizationMembership,
+    Project,
+    ProjectMembership,
+    ProjectTeamAccess,
+    Role,
+    TeamMembership,
+    User,
+    UserToken,
+    UserUsage,
+)
 from .security import verify_api_key
 
 # Optional Redis support for distributed rate limiting
@@ -33,6 +46,17 @@ if os.environ.get('REDIS_URL'):
 _user_counters: dict = {}
 _public_counters: dict = {}
 _CACHE_MISS = object()
+_PROJECT_ROLE_RANK = {
+    Role.VIEWER.value: 1,
+    Role.EDITOR.value: 2,
+    Role.ADMIN.value: 3,
+    Role.OWNER.value: 4,
+}
+_ORG_ROLE_RANK = {
+    OrgRole.MEMBER.value: 1,
+    OrgRole.ADMIN.value: 2,
+    OrgRole.OWNER.value: 3,
+}
 
 
 def _deps_cache(session: Session) -> dict:
@@ -84,8 +108,188 @@ def _get_cached_membership(session: Session, user_id: int, project_id: int) -> O
     return membership
 
 
+def _get_cached_org_membership(session: Session, user_id: int, org_id: int) -> Optional[OrganizationMembership]:
+    cache = _deps_cache(session)
+    cache_key = ("org_membership", user_id, org_id)
+    membership = cache.get(cache_key, _CACHE_MISS)
+    if membership is _CACHE_MISS:
+        membership = session.exec(
+            select(OrganizationMembership).where(
+                OrganizationMembership.user_id == user_id,
+                OrganizationMembership.organization_id == org_id,
+            )
+        ).first()
+        cache[cache_key] = membership
+    return membership
+
+
+def _get_cached_team_membership(session: Session, user_id: int, team_id: int) -> Optional[TeamMembership]:
+    cache = _deps_cache(session)
+    cache_key = ("team_membership", user_id, team_id)
+    membership = cache.get(cache_key, _CACHE_MISS)
+    if membership is _CACHE_MISS:
+        membership = session.exec(
+            select(TeamMembership).where(
+                TeamMembership.user_id == user_id,
+                TeamMembership.team_id == team_id,
+            )
+        ).first()
+        cache[cache_key] = membership
+    return membership
+
+
+def _get_cached_project_team_access(session: Session, project_id: int) -> list[ProjectTeamAccess]:
+    cache = _deps_cache(session)
+    cache_key = ("project_team_access", project_id)
+    access_rows = cache.get(cache_key, _CACHE_MISS)
+    if access_rows is _CACHE_MISS:
+        access_rows = list(
+            session.exec(select(ProjectTeamAccess).where(ProjectTeamAccess.project_id == project_id)).all()
+        )
+        cache[cache_key] = access_rows
+    return access_rows
+
+
+def _project_role_rank(role: Optional[str]) -> int:
+    if not role:
+        return 0
+    return _PROJECT_ROLE_RANK.get(role, 0)
+
+
+def _project_role_at_least(current_role: Optional[str], required_role: str) -> bool:
+    return _project_role_rank(current_role) >= _project_role_rank(required_role)
+
+
+def _org_role_at_least(current_role: Optional[str], required_role: str) -> bool:
+    return _ORG_ROLE_RANK.get(current_role or "", 0) >= _ORG_ROLE_RANK.get(required_role, 0)
+
+
+def _role_required_detail(role: str) -> str:
+    if role == Role.OWNER.value:
+        return "Owner role required"
+    if role == Role.ADMIN.value:
+        return "Admin or owner role required"
+    if role == Role.EDITOR.value:
+        return "Editor role required"
+    return "Viewer role required"
+
+
+def get_effective_project_role(session: Session, user_id: int, project_id: int) -> Optional[str]:
+    cache = _deps_cache(session)
+    cache_key = ("effective_project_role", user_id, project_id)
+    effective_role = cache.get(cache_key, _CACHE_MISS)
+    if effective_role is not _CACHE_MISS:
+        return effective_role
+
+    candidates: list[str] = []
+    direct_membership = _get_cached_membership(session, user_id, project_id)
+    if direct_membership:
+        if direct_membership.role == Role.OWNER.value:
+            cache[cache_key] = direct_membership.role
+            return direct_membership.role
+        candidates.append(direct_membership.role)
+
+    project = _get_cached_project(session, project_id)
+    if project and project.org_id:
+        org_membership = _get_cached_org_membership(session, user_id, project.org_id)
+        if org_membership:
+            if org_membership.role == OrgRole.OWNER.value:
+                candidates.append(Role.OWNER.value)
+            elif org_membership.role == OrgRole.ADMIN.value:
+                candidates.append(Role.ADMIN.value)
+
+    for access in _get_cached_project_team_access(session, project_id):
+        if _get_cached_team_membership(session, user_id, access.team_id):
+            candidates.append(access.role)
+
+    effective_role = max(candidates, key=_project_role_rank) if candidates else None
+    cache[cache_key] = effective_role
+    return effective_role
+
+
+def get_effective_org_role(session: Session, user_id: int, org_id: int) -> Optional[str]:
+    membership = _get_cached_org_membership(session, user_id, org_id)
+    if not membership:
+        return None
+    return membership.role
+
+
+def authorize_org_operation(
+    org_id: int,
+    *,
+    min_role: str = OrgRole.MEMBER.value,
+    x_admin_token: Optional[str] = None,
+    authorization: Optional[str] = None,
+    session: Session,
+) -> OrganizationMembership:
+    admin_token = os.environ.get("ADMIN_TOKEN")
+    if admin_token and x_admin_token and x_admin_token == admin_token:
+        membership = OrganizationMembership(organization_id=org_id, user_id=0, role=OrgRole.OWNER.value)
+        return membership
+
+    ut = _get_valid_user_token(session, authorization)
+    membership = _get_cached_org_membership(session, ut.user_id, org_id)
+    if not membership:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not an organization member")
+    if not _org_role_at_least(membership.role, min_role):
+        detail = "Organization admin or owner role required" if min_role == OrgRole.ADMIN.value else "Organization owner role required"
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+    return membership
+
+
+def authorize_project_operation(
+    project_id: int,
+    *,
+    min_role: str = Role.VIEWER.value,
+    x_admin_token: Optional[str] = None,
+    authorization: Optional[str] = None,
+    x_api_key: Optional[str] = None,
+    session: Session,
+) -> Project:
+    admin_token = os.environ.get("ADMIN_TOKEN")
+    project = _get_cached_project(session, project_id)
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    if admin_token and x_admin_token and x_admin_token == admin_token:
+        return project
+
+    if x_api_key:
+        matched, project_primary = _match_project_api_key(session, project_id, x_api_key)
+        if not matched and not project_primary:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API key")
+        role = Role.OWNER.value if project_primary else (matched.role or Role.OWNER.value)
+        if not _project_role_at_least(role, min_role):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_role_required_detail(min_role))
+        return project
+
+    bearer = _extract_bearer_token(authorization)
+    if bearer:
+        matched, project_primary = _match_project_api_key(session, project_id, bearer)
+        if matched or project_primary:
+            role = Role.OWNER.value if project_primary else (matched.role or Role.OWNER.value)
+            if not _project_role_at_least(role, min_role):
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_role_required_detail(min_role))
+            return project
+
+        try:
+            ut = _get_valid_user_token(session, authorization)
+        except HTTPException as exc:
+            if exc.status_code == status.HTTP_401_UNAUTHORIZED:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API key") from exc
+            raise
+        role = get_effective_project_role(session, ut.user_id, project_id)
+        if not role:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not a project member")
+        if not _project_role_at_least(role, min_role):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_role_required_detail(min_role))
+        return project
+
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing credentials")
+
+
 def _extract_bearer_token(authorization: Optional[str]) -> Optional[str]:
-    if authorization and authorization.lower().startswith("bearer "):
+    if isinstance(authorization, str) and authorization.lower().startswith("bearer "):
         return authorization.split(None, 1)[1].strip()
     return None
 
@@ -113,6 +317,10 @@ def _match_project_api_key(session: Session, project_id: int, key: str) -> tuple
     candidates = session.exec(stmt).all()
     matched = None
     for api_key in candidates:
+        if not getattr(api_key, "is_active", True):
+            continue
+        if getattr(api_key, "revoked_at", None):
+            continue
         if verify_api_key(key, api_key.key_hash):
             matched = api_key
             break
@@ -235,32 +443,14 @@ def require_admin_or_project_api_key(project_id: int, x_admin_token: Optional[st
 
 def require_project_access(project_id: int, x_admin_token: Optional[str] = Header(None), authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), session: Session = Depends(get_session)) -> Project:
     """Allow read access via admin token, project API key, or project membership."""
-    admin_token = os.environ.get('ADMIN_TOKEN')
-    project = _get_cached_project(session, project_id)
-    if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
-
-    if admin_token and x_admin_token and x_admin_token == admin_token:
-        return project
-
-    key = _extract_api_key(authorization, x_api_key)
-    if key:
-        matched, project_primary = _match_project_api_key(session, project_id, key)
-        if matched or project_primary:
-            return project
-
-        token = _extract_bearer_token(authorization)
-        if token:
-            ut = _get_cached_user_token(session, token)
-            if ut and (not ut.expires_at or ut.expires_at >= datetime.utcnow()):
-                pm = _get_cached_membership(session, ut.user_id, project_id)
-                if pm:
-                    return project
-                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not a project member")
-
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API key or token")
-
-    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing credentials")
+    return authorize_project_operation(
+        project_id,
+        min_role=Role.VIEWER.value,
+        x_admin_token=x_admin_token,
+        authorization=authorization,
+        x_api_key=x_api_key,
+        session=session,
+    )
 
 
 def _extract_api_key(authorization: Optional[str], x_api_key: Optional[str]) -> Optional[str]:
@@ -268,10 +458,10 @@ def _extract_api_key(authorization: Optional[str], x_api_key: Optional[str]) -> 
 
     Supports `Authorization: Bearer <key>` and `X-API-KEY`.
     """
-    if authorization:
+    if isinstance(authorization, str):
         if authorization.lower().startswith("bearer "):
             return authorization.split(None, 1)[1].strip()
-    if x_api_key:
+    if isinstance(x_api_key, str) and x_api_key:
         return x_api_key
     return None
 
@@ -382,6 +572,9 @@ def limit_by_api_key(project_id: int, authorization: Optional[str] = Header(None
 
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API key")
 
+    if not _project_role_at_least(getattr(matched, "role", Role.OWNER.value), Role.EDITOR.value):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="API key role does not allow write access")
+
     limit = getattr(matched, 'rate_limit_per_minute', 0) or 0
     if not limit:
         return matched
@@ -428,12 +621,15 @@ def get_current_user(authorization: Optional[str] = Header(None), session: Sessi
 
 
 def require_project_role(project_id: int, role: str, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)) -> ProjectMembership:
-    pm = _get_cached_membership(session, current_user.id, project_id)
-    if not pm:
+    effective_role = get_effective_project_role(session, current_user.id, project_id)
+    if not effective_role:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not a project member")
-    if role == 'owner' and pm.role != 'owner':
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Owner role required")
-    return pm
+    if not _project_role_at_least(effective_role, role):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_role_required_detail(role))
+    pm = _get_cached_membership(session, current_user.id, project_id)
+    if pm:
+        return pm
+    return ProjectMembership(user_id=current_user.id, project_id=project_id, role=effective_role)
 
 
 def require_admin_or_owner(project_id: int, x_admin_token: Optional[str] = Header(None), authorization: Optional[str] = Header(None), session: Session = Depends(get_session)) -> Project:
@@ -448,11 +644,11 @@ def require_admin_or_owner(project_id: int, x_admin_token: Optional[str] = Heade
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
         return project
 
-    # validate bearer token and ensure owner role
+    # validate bearer token and ensure admin-or-owner effective role
     ut = _get_valid_user_token(session, authorization)
-    pm = _get_cached_membership(session, ut.user_id, project_id)
-    if not pm or pm.role != 'owner':
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Owner role required")
+    role = get_effective_project_role(session, ut.user_id, project_id)
+    if not _project_role_at_least(role, Role.ADMIN.value):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin or owner role required")
 
     project = _get_cached_project(session, project_id)
     if not project:

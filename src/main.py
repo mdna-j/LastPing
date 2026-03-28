@@ -18,6 +18,7 @@ from .routers.ui import router as ui_router
 from .routers.webhooks import router as webhooks_router
 from .routers.analytics import router as analytics_router
 from .routers.oncall import router as oncall_router
+from .routers.orgs import router as orgs_router
 from .routers.remediation import router as remediation_router
 from .deps import limit_public_requests
 
@@ -72,4 +73,5 @@ app.include_router(ui_router)
 app.include_router(webhooks_router)
 app.include_router(analytics_router)
 app.include_router(oncall_router)
+app.include_router(orgs_router)
 app.include_router(remediation_router)
