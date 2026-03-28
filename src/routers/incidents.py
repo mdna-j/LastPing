@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Header, Request, Path, Body
+from fastapi.responses import PlainTextResponse, Response
 from pydantic import constr, root_validator
 from sqlalchemy import update as sa_update
 from sqlmodel import Session, select
@@ -14,6 +15,11 @@ from ..deps import (
     require_project_access,
 )
 from ..models import AuditLog, Event, Incident, IncidentNote, Project
+from ..postmortems import (
+    build_incident_timeline,
+    render_incident_postmortem_markdown,
+    render_incident_postmortem_pdf,
+)
 from ..schemas import StrictBaseModel
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["incidents"])
@@ -124,6 +130,7 @@ def get_incident(
     notes = session.exec(
         select(IncidentNote).where(IncidentNote.incident_id == incident_id).order_by(IncidentNote.created_at)
     ).all()
+    timeline = build_incident_timeline(session, incident)
     return {
         "incident": _serialize_incident(incident, note_count=len(notes)),
         "events": [
@@ -131,7 +138,59 @@ def get_incident(
             for event in events
         ],
         "notes": [_serialize_note(note) for note in notes],
+        "timeline": timeline["timeline"],
+        "timeline_stats": timeline["stats"],
+        "postmortem": {
+            "duration": timeline["duration"],
+            "project_name": timeline["project_name"],
+            "check_name": timeline["check_name"],
+        },
     }
+
+
+@router.get("/incidents/{incident_id}/timeline")
+def get_incident_timeline(
+    project_id: int = Path(..., ge=1),
+    incident_id: int = Path(..., ge=1),
+    session: Session = Depends(get_session),
+    _proj: Project = Depends(require_project_access),
+):
+    incident = _get_incident_or_404(session, project_id, incident_id)
+    return build_incident_timeline(session, incident)
+
+
+@router.get("/incidents/{incident_id}/postmortem.md", response_class=PlainTextResponse)
+def export_incident_postmortem_markdown(
+    project_id: int = Path(..., ge=1),
+    incident_id: int = Path(..., ge=1),
+    session: Session = Depends(get_session),
+    _proj: Project = Depends(require_project_access),
+):
+    incident = _get_incident_or_404(session, project_id, incident_id)
+    markdown = render_incident_postmortem_markdown(session, incident)
+    filename = f"incident-{incident.id}-postmortem.md"
+    return PlainTextResponse(
+        markdown,
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/incidents/{incident_id}/postmortem.pdf")
+def export_incident_postmortem_pdf(
+    project_id: int = Path(..., ge=1),
+    incident_id: int = Path(..., ge=1),
+    session: Session = Depends(get_session),
+    _proj: Project = Depends(require_project_access),
+):
+    incident = _get_incident_or_404(session, project_id, incident_id)
+    payload = render_incident_postmortem_pdf(session, incident)
+    filename = f"incident-{incident.id}-postmortem.pdf"
+    return Response(
+        content=payload,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 public_router = APIRouter(prefix="/incidents", tags=["incidents-public"], dependencies=[Depends(limit_public_requests)])

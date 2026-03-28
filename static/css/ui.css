@@ -209,12 +209,14 @@ tbody tr:hover {
 
 .incident-feed-card,
 .incident-note-card,
+.incident-timeline-item,
 .incident-child-card {
   transition: transform 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
 }
 
 .incident-feed-card:hover,
 .incident-note-card:hover,
+.incident-timeline-item:hover,
 .incident-child-card:hover {
   transform: translateY(-1px);
   border-color: rgba(109, 152, 227, 0.42);
@@ -234,6 +236,12 @@ tbody tr:hover {
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 10px 14px;
   margin: 12px 0;
+}
+
+#incidentTimeline {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
 }
 
 .incident-action-row {

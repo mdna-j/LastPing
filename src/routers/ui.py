@@ -763,6 +763,8 @@ def incident_detail_page(incident_id: int = Path(..., ge=1)):
             <div class="dashboard-actions">
               <button id="reloadIncidentBtn" class="btn">Refresh</button>
               <button id="shareBtn" class="btn btn-secondary">Create Share Link</button>
+              <button id="exportMarkdownBtn" class="btn btn-secondary">Export Markdown</button>
+              <button id="exportPdfBtn" class="btn btn-secondary">Export PDF</button>
               <a class="btn btn-secondary" href="/ui/incidents">Back To Incidents</a>
             </div>
           </div>
@@ -781,6 +783,15 @@ def incident_detail_page(incident_id: int = Path(..., ge=1)):
             <button id="silenceIncidentBtn" class="btn btn-secondary">Snooze</button>
             <button id="clearSilenceBtn" class="btn btn-secondary">Clear Silence</button>
           </div>
+        </section>
+
+        <section class="card">
+          <div class="section-head">
+            <h3>Timeline</h3>
+            <div class="muted">Auto-built chronology from events, alerts, merges, acknowledgements, and remediation steps.</div>
+          </div>
+          <div id="timelineStats" class="muted">Timeline metrics will appear here.</div>
+          <div id="incidentTimeline" class="muted">Timeline will load with incident details.</div>
         </section>
 
         <section class="card">

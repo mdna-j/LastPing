@@ -40,6 +40,43 @@ function formatTimestamp(value){
   }
 }
 
+function renderTimeline(timeline, stats){
+  const timelineEl = document.getElementById("incidentTimeline");
+  const statsEl = document.getElementById("timelineStats");
+  if(statsEl){
+    if(stats){
+      statsEl.innerHTML = `
+        <div class="incident-meta-grid">
+          <div><span class="muted">Events</span><div>${stats.events || 0}</div></div>
+          <div><span class="muted">Notes</span><div>${stats.notes || 0}</div></div>
+          <div><span class="muted">Alerts</span><div>${stats.alerts || 0}</div></div>
+          <div><span class="muted">Remediation</span><div>${stats.remediation_steps || 0}</div></div>
+        </div>
+      `;
+    }else{
+      statsEl.innerHTML = `<div class="muted">No timeline metrics available.</div>`;
+    }
+  }
+  if(!timelineEl) return;
+  if(!timeline || !timeline.length){
+    timelineEl.innerHTML = `<div class="muted">No timeline entries yet.</div>`;
+    return;
+  }
+  timelineEl.innerHTML = timeline.map((item)=> `
+    <div class="card incident-timeline-item">
+      <div class="incident-card-head">
+        <div>
+          <strong>${escapeHtml(item.title || "Timeline entry")}</strong>
+          <span class="badge status-up">${escapeHtml(item.kind || "timeline")}</span>
+        </div>
+        <span class="muted">${formatTimestamp(item.ts)}</span>
+      </div>
+      <div>${escapeHtml(item.summary || "")}</div>
+      ${item.actor ? `<div class="muted">Actor: ${escapeHtml(item.actor)}</div>` : ""}
+    </div>
+  `).join("");
+}
+
 function renderNotes(notes){
   const notesEl = document.getElementById("notesList");
   if(!notesEl) return;
@@ -125,6 +162,7 @@ async function loadIncidentDetail(){
   renderIncidentSummary(json.incident);
   renderEvents(json);
   renderNotes(json.notes || []);
+  renderTimeline(json.timeline || [], json.timeline_stats || null);
   const shareInfo = document.getElementById("shareInfo");
   if(shareInfo){
     shareInfo.innerText = json.incident.share_token
@@ -177,6 +215,31 @@ async function createShare(){
   if(shareInfo){
     shareInfo.innerText = `Public: ${location.origin}/incidents/public/${json.share_token}`;
   }
+}
+
+async function downloadPostmortem(format){
+  const iid = incidentIdFromPath();
+  const pid = incidentProjectId();
+  const path = format === "pdf"
+    ? `/projects/${pid}/incidents/${iid}/postmortem.pdf`
+    : `/projects/${pid}/incidents/${iid}/postmortem.md`;
+  const resp = await fetch(path, {headers: readHeaders()});
+  if(!resp.ok){
+    alert(`Failed to export ${format.toUpperCase()} postmortem.`);
+    return;
+  }
+  const blob = await resp.blob();
+  const disposition = resp.headers.get("Content-Disposition") || "";
+  const match = disposition.match(/filename="([^"]+)"/);
+  const filename = match ? match[1] : `incident-${iid}-postmortem.${format}`;
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
 }
 
 async function assignOwner(){
@@ -283,6 +346,8 @@ document.addEventListener("DOMContentLoaded", ()=>{
   const silenceBtn = document.getElementById("silenceIncidentBtn");
   const clearSilenceBtn = document.getElementById("clearSilenceBtn");
   const addNoteBtn = document.getElementById("addNoteBtn");
+  const exportMarkdownBtn = document.getElementById("exportMarkdownBtn");
+  const exportPdfBtn = document.getElementById("exportPdfBtn");
   if(shareBtn) shareBtn.addEventListener("click", createShare);
   if(refreshBtn) refreshBtn.addEventListener("click", refreshIncidentPage);
   if(assignBtn) assignBtn.addEventListener("click", assignOwner);
@@ -290,6 +355,8 @@ document.addEventListener("DOMContentLoaded", ()=>{
   if(silenceBtn) silenceBtn.addEventListener("click", ()=> silenceIncident(false));
   if(clearSilenceBtn) clearSilenceBtn.addEventListener("click", ()=> silenceIncident(true));
   if(addNoteBtn) addNoteBtn.addEventListener("click", addIncidentNote);
+  if(exportMarkdownBtn) exportMarkdownBtn.addEventListener("click", ()=> downloadPostmortem("md"));
+  if(exportPdfBtn) exportPdfBtn.addEventListener("click", ()=> downloadPostmortem("pdf"));
   refreshIncidentPage();
 
   document.addEventListener("click", async (event)=>{
