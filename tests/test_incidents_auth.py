@@ -103,8 +103,15 @@ def test_incident_endpoints_require_valid_project_api_key_and_support_share_flow
     public = client.get(f"/incidents/public/{share_token}")
     assert public.status_code == 200
     public_payload = public.json()
+    assert public_payload["project"]["status_page_url"] == f"/ui/status/{project_id}"
     assert public_payload["incident"]["id"] == incident_id
+    assert public_payload["incident"]["share_url"] == f"/ui/incidents/public/{share_token}"
     assert len(public_payload["events"]) == 1
+    assert len(public_payload["timeline"]) >= 2
+
+    public_page = client.get(f"/ui/incidents/public/{share_token}")
+    assert public_page.status_code == 200
+    assert "Shared incident" in public_page.text
 
 
 def test_incident_lifecycle_management_with_owner_token_and_viewer_read_access(tmp_path):

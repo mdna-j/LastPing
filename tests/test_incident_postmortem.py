@@ -48,6 +48,7 @@ def test_incident_timeline_and_postmortem_exports(tmp_path):
             started_at=started_at,
             resolved_at=started_at + timedelta(minutes=12),
             status="resolved",
+            share_token="shared-incident-token-12345",
             owner="alice",
             acknowledged_at=started_at + timedelta(minutes=2),
             acknowledged_by="user:1",
@@ -154,8 +155,12 @@ def test_incident_timeline_and_postmortem_exports(tmp_path):
     assert markdown.status_code == 200, markdown.text
     assert markdown.headers["content-type"].startswith("text/markdown")
     assert "Incident Postmortem" in markdown.text
+    assert "## Root Cause" in markdown.text
+    assert "## Action Items" in markdown.text
     assert "Primary on-call paged" in markdown.text
     assert "Restarted checkout worker" in markdown.text
+    assert f"/ui/status/{project_id}" in markdown.text
+    assert "/ui/incidents/public/shared-incident-token-12345" in markdown.text
 
     pdf = client.get(f"/projects/{project_id}/incidents/{incident_id}/postmortem.pdf", headers=headers)
     assert pdf.status_code == 200, pdf.text

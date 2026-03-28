@@ -1,3 +1,4 @@
+import html
 import json
 import os
 from datetime import datetime, timedelta
@@ -61,9 +62,15 @@ def _public_status_overall(checks: list[Check]) -> str:
     return "unknown"
 
 
+def _public_link(path: str) -> str:
+    base = (os.environ.get("BASE_URL") or "").rstrip("/")
+    return f"{base}{path}" if base else path
+
+
 def _serialize_public_incident(incident: Incident, *, check_name: str, latest_event: Event | None, now: datetime) -> dict:
     ended_at = incident.resolved_at or now
     duration_seconds = max(0, int((ended_at - incident.started_at).total_seconds()))
+    share_path = f"/ui/incidents/public/{incident.share_token}" if incident.share_token else None
     return {
         "id": incident.id,
         "check_id": incident.check_id,
@@ -72,6 +79,9 @@ def _serialize_public_incident(incident: Incident, *, check_name: str, latest_ev
         "resolved_at": incident.resolved_at.isoformat() if incident.resolved_at else None,
         "status": incident.status,
         "duration_seconds": duration_seconds,
+        "share_token": incident.share_token,
+        "share_url": _public_link(share_path) if share_path else None,
+        "share_path": share_path,
         "latest_event": {
             "type": latest_event.event_type,
             "message": latest_event.message,
@@ -720,6 +730,34 @@ def checks_manage_page(check_id: int = Path(..., ge=1)):
     </html>
     """
     return html.replace('__CHECK_ID__', str(check_id))
+
+
+@router.get("/incidents/public/{token}", response_class=HTMLResponse)
+def public_incident_page(token: str):
+    safe_token = html.escape(token, quote=True)
+    return f"""
+    <html>
+    <head>
+      <title>Shared Incident</title>
+      <meta name="viewport" content="width=device-width,initial-scale=1" />
+      <link rel="stylesheet" href="/static/css/ui.css" />
+    </head>
+    <body class="page-status-public">
+    <main class="public-status-shell">
+      <header class="public-status-header">
+        <div class="public-status-brand">LP</div>
+        <div>
+          <div class="public-status-kicker">Shared incident</div>
+          <h1>Incident Timeline</h1>
+          <div class="muted">Customer-safe incident summary, timeline, and links back to the public status page.</div>
+        </div>
+      </header>
+      <div id="publicIncidentRoot" class="status-public-root" data-token="{safe_token}"></div>
+    </main>
+    <script src="/static/js/public_incident.js"></script>
+    </body>
+    </html>
+    """
 
 
 @router.get("/incidents/{incident_id}", response_class=HTMLResponse)

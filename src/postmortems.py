@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta
 from textwrap import wrap
 from typing import Optional
@@ -38,6 +39,15 @@ def _format_duration(started_at: datetime, resolved_at: Optional[datetime]) -> s
     if minutes:
         return f"{minutes}m {seconds}s"
     return f"{seconds}s"
+
+
+def _base_url() -> str:
+    return (os.environ.get("BASE_URL") or "").rstrip("/")
+
+
+def _absolute_or_relative(path: str) -> str:
+    base = _base_url()
+    return f"{base}{path}" if base else path
 
 
 def _timeline_item(
@@ -89,6 +99,79 @@ def _incident_window(incident: Incident) -> tuple[datetime, datetime]:
     started_at = incident.started_at
     resolved_at = incident.resolved_at or datetime.utcnow()
     return started_at - timedelta(minutes=1), resolved_at + timedelta(minutes=5)
+
+
+def _build_postmortem_links(incident: Incident) -> dict:
+    status_page_path = f"/ui/status/{incident.project_id}"
+    links = {
+        "status_page_path": status_page_path,
+        "status_page_url": _absolute_or_relative(status_page_path),
+        "public_incident_path": None,
+        "public_incident_url": None,
+    }
+    if incident.share_token:
+        public_incident_path = f"/ui/incidents/public/{incident.share_token}"
+        links["public_incident_path"] = public_incident_path
+        links["public_incident_url"] = _absolute_or_relative(public_incident_path)
+    return links
+
+
+def _timeline_titles(payload: dict, kind: str) -> list[str]:
+    return [item["title"] for item in payload["timeline"] if item.get("kind") == kind]
+
+
+def _evidence_summary(payload: dict) -> list[str]:
+    evidence: list[str] = []
+    if payload["timeline"]:
+        first = payload["timeline"][0]
+        evidence.append(f"First recorded signal: {first['title']} at {first['ts']}.")
+        if len(payload["timeline"]) > 1:
+            latest = payload["timeline"][-1]
+            evidence.append(f"Latest recorded signal: {latest['title']} at {latest['ts']}.")
+    if payload["stats"]["alerts"]:
+        evidence.append(f"On-call alert fan-out occurred {payload['stats']['alerts']} time(s).")
+    if payload["stats"]["remediation_steps"]:
+        evidence.append(f"Remediation workflow recorded {payload['stats']['remediation_steps']} step(s).")
+    if payload["stats"]["notes"]:
+        evidence.append(f"Responders captured {payload['stats']['notes']} investigation note(s).")
+    return evidence
+
+
+def _response_summary(payload: dict, incident: Incident) -> list[str]:
+    summary: list[str] = []
+    if incident.owner:
+        summary.append(f"Incident owner: {incident.owner}.")
+    if incident.acknowledged_at:
+        summary.append(
+            f"Acknowledged at {_format_timestamp(incident.acknowledged_at)} by {incident.acknowledged_by or 'unknown'}."
+        )
+    alert_titles = _timeline_titles(payload, "alert")
+    if alert_titles:
+        summary.append(f"Alerting recorded: {', '.join(alert_titles[:2])}.")
+    workflow_titles = _timeline_titles(payload, "workflow")
+    if workflow_titles:
+        summary.append(f"Workflow updates: {', '.join(workflow_titles[:3])}.")
+    remediation_titles = _timeline_titles(payload, "remediation")
+    if remediation_titles:
+        summary.append(f"Remediation activity: {', '.join(remediation_titles[:3])}.")
+    return summary
+
+
+def _action_items(payload: dict) -> list[str]:
+    check_label = payload["check_name"] or f"check {payload['check_id']}"
+    items = [
+        f"Confirm the permanent fix for {check_label} and record the specific technical root cause.",
+        f"Update the runbook for {check_label} with the validated investigation and recovery steps from this incident.",
+    ]
+    if payload["stats"]["alerts"]:
+        items.append(f"Review alert routing, dedupe, and escalation timing for {check_label}.")
+    else:
+        items.append(f"Add or validate alert coverage for {check_label} so similar failures are detected faster.")
+    if payload["stats"]["notes"]:
+        items.append("Convert the captured investigation notes into a concise operator checklist and handoff note.")
+    else:
+        items.append("Add a responder note template so future incidents preserve investigation context.")
+    return items[:4]
 
 
 def build_incident_timeline(session: Session, incident: Incident) -> dict:
@@ -287,15 +370,20 @@ def build_incident_timeline(session: Session, incident: Incident) -> dict:
             "alerts": len(oncall_alerts),
             "remediation_steps": len(remediation_logs) + len(approvals),
         },
+        "links": _build_postmortem_links(incident),
     }
 
 
 def render_incident_postmortem_markdown(session: Session, incident: Incident) -> str:
     payload = build_incident_timeline(session, incident)
+    links = payload["links"]
+    evidence_summary = _evidence_summary(payload)
+    response_summary = _response_summary(payload, incident)
+    action_items = _action_items(payload)
     lines = [
         f"# Incident Postmortem: Incident {payload['incident_id']}",
         "",
-        "## Summary",
+        "## Executive Summary",
         "",
         f"- Project: {payload['project_name'] or payload['project_id']}",
         f"- Check: {payload['check_name'] or payload['check_id']}",
@@ -307,10 +395,54 @@ def render_incident_postmortem_markdown(session: Session, incident: Incident) ->
         f"- Notes: {payload['stats']['notes']}",
         f"- On-call alerts: {payload['stats']['alerts']}",
         f"- Remediation entries: {payload['stats']['remediation_steps']}",
+        f"- Status page: {links['status_page_url']}",
+        f"- Shared incident page: {links['public_incident_url'] or 'Create a share link if external access is needed.'}",
         "",
-        "## Timeline",
+        "## Root Cause",
+        "",
+        "- Primary cause: _Fill in the direct technical cause._",
+        "- Contributing factors: _Fill in contributing conditions, regressions, or dependencies._",
+        "- Evidence captured:",
         "",
     ]
+
+    if evidence_summary:
+        lines.extend([f"  - {item}" for item in evidence_summary])
+    else:
+        lines.append("  - _Add the strongest signals that support the root-cause conclusion._")
+
+    lines.extend(
+        [
+            "",
+            "## Impact",
+            "",
+            f"- Customer/system impact window: {payload['duration']}",
+            "- Affected users or components: _Describe what customers or internal systems experienced._",
+            "- Severity assessment: _Document the business or operational severity._",
+            "",
+            "## Detection & Response",
+            "",
+        ]
+    )
+
+    if response_summary:
+        lines.extend([f"- {item}" for item in response_summary])
+    else:
+        lines.append("- _Describe how the issue was detected and who responded first._")
+
+    lines.extend(
+        [
+            "",
+            "## Customer Communication",
+            "",
+            f"- Public status page: {links['status_page_url']}",
+            f"- Shared incident page: {links['public_incident_url'] or 'Not created'}",
+            "- Customer-facing summary: _Capture the message sent to the status page, support, or stakeholders._",
+            "",
+            "## Timeline",
+            "",
+        ]
+    )
 
     if not payload["timeline"]:
         lines.append("- No timeline entries recorded.")
@@ -322,15 +454,16 @@ def render_incident_postmortem_markdown(session: Session, incident: Incident) ->
     lines.extend(
         [
             "",
-            "## Follow-up",
+            "## Action Items",
             "",
-            "- Root cause:",
-            "- Impact:",
-            "- Detection gaps:",
-            "- Remediation items:",
+            "| Action Item | Owner | Due | Status |",
+            "| --- | --- | --- | --- |",
             "",
         ]
     )
+    for item in action_items:
+        lines.append(f"| {item} | _unassigned_ | _YYYY-MM-DD_ | open |")
+    lines.append("")
     return "\n".join(lines)
 
 

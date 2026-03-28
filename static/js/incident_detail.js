@@ -166,7 +166,7 @@ async function loadIncidentDetail(){
   const shareInfo = document.getElementById("shareInfo");
   if(shareInfo){
     shareInfo.innerText = json.incident.share_token
-      ? `Public: ${location.origin}/incidents/public/${json.incident.share_token}`
+      ? `Public: ${location.origin}/ui/incidents/public/${json.incident.share_token}`
       : "";
   }
   return json;
@@ -213,7 +213,7 @@ async function createShare(){
   const json = await resp.json();
   const shareInfo = document.getElementById("shareInfo");
   if(shareInfo){
-    shareInfo.innerText = `Public: ${location.origin}/incidents/public/${json.share_token}`;
+    shareInfo.innerText = `Public: ${location.origin}/ui/incidents/public/${json.share_token}`;
   }
 }
 

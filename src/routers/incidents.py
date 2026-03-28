@@ -202,18 +202,29 @@ def public_incident(token: constr(min_length=10, max_length=128), session: Sessi
     if not incident:
         raise HTTPException(status_code=404, detail="Incident not found")
     events = session.exec(select(Event).where(Event.incident_id == incident.id).order_by(Event.created_at)).all()
+    timeline = build_incident_timeline(session, incident)
     return {
+        "project": {
+            "id": timeline["project_id"],
+            "name": timeline["project_name"],
+            "status_page_url": timeline["links"]["status_page_url"],
+        },
         "incident": {
             "id": incident.id,
             "check_id": incident.check_id,
+            "check_name": timeline["check_name"],
             "started_at": incident.started_at.isoformat(),
             "resolved_at": incident.resolved_at.isoformat() if incident.resolved_at else None,
             "status": incident.status,
+            "duration": timeline["duration"],
+            "share_url": timeline["links"]["public_incident_url"],
         },
         "events": [
             {"id": event.id, "type": event.event_type, "message": event.message, "ts": event.created_at.isoformat()}
             for event in events
         ],
+        "timeline": timeline["timeline"],
+        "timeline_stats": timeline["stats"],
     }
 
 
@@ -221,8 +232,11 @@ def public_incident(token: constr(min_length=10, max_length=128), session: Sessi
 def create_share(
     project_id: int = Path(..., ge=1),
     incident_id: int = Path(..., ge=1),
+    request: Request = None,
     session: Session = Depends(get_session),
     _proj: Project = Depends(require_project_access),
+    x_admin_token: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None),
 ):
     incident = _get_incident_or_404(session, project_id, incident_id)
     if not incident.share_token:
@@ -230,6 +244,15 @@ def create_share(
 
         incident.share_token = secrets.token_urlsafe(16)
         session.add(incident)
+        _audit(
+            session,
+            request,
+            authorization,
+            x_admin_token,
+            "create_share",
+            incident.id,
+            f"share_token_created={bool(incident.share_token)}",
+        )
         session.commit()
     return {"share_token": incident.share_token}
 

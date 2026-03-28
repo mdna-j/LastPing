@@ -161,6 +161,7 @@ function renderStatus(data) {
   const components = data.components || data.checks || [];
   const openIncidents = data.open_incidents || [];
   const history = data.incident_history || [];
+  const sharedHistory = history.filter((incident) => incident.share_path);
   const leadIncident = openIncidents[0];
   const heroClass = `status-hero status-hero-${summary.overall_status || "unknown"}`;
   const heroSubtitle = openIncidents.length
@@ -246,6 +247,28 @@ function renderStatus(data) {
       </div>
       ${renderIncidentHistory(history)}
     </section>
+
+    ${sharedHistory.length ? `
+      <section class="card">
+        <div class="section-head">
+          <h3>Shared Incident Pages</h3>
+          <div class="muted">Public links for incidents with customer-safe timelines.</div>
+        </div>
+        <div class="status-history-list">
+          ${sharedHistory.map((incident) => `
+            <div class="card status-history-card">
+              <div class="status-history-head">
+                <div>
+                  <div class="status-history-title">${escapeHtml(incident.check_name)}</div>
+                  <div class="muted">Incident #${incident.id}</div>
+                </div>
+                <a class="btn btn-secondary" href="${escapeHtml(incident.share_path)}">Open shared timeline</a>
+              </div>
+            </div>
+          `).join("")}
+        </div>
+      </section>
+    ` : ""}
   `;
 }
 

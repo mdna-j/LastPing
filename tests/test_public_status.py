@@ -60,6 +60,7 @@ def test_public_status_page_exposes_components_history_and_subscriptions(tmp_pat
             check_id=api_check.id,
             started_at=datetime.utcnow() - timedelta(minutes=11),
             status="open",
+            share_token="public-status-share-token",
         )
         resolved_incident = Incident(
             project_id=project.id,
@@ -97,6 +98,7 @@ def test_public_status_page_exposes_components_history_and_subscriptions(tmp_pat
         session.commit()
 
         project_id = project.id
+        open_incident_id = open_incident.id
 
     page = client.get(f"/ui/status/{project_id}")
     assert page.status_code == 200
@@ -113,6 +115,13 @@ def test_public_status_page_exposes_components_history_and_subscriptions(tmp_pat
     assert any(component["incident_open"] for component in payload["components"])
     assert len(payload["incident_history"]) == 2
     assert any(incident["resolved_at"] is not None for incident in payload["incident_history"])
+    shared_incident = next(incident for incident in payload["incident_history"] if incident["id"] == open_incident_id)
+    assert shared_incident["share_token"] == "public-status-share-token"
+    assert shared_incident["share_path"] == "/ui/incidents/public/public-status-share-token"
+
+    public_incident_page = client.get("/ui/incidents/public/public-status-share-token")
+    assert public_incident_page.status_code == 200
+    assert "Incident Timeline" in public_incident_page.text
 
     subscribe = client.post(
         f"/ui/status/{project_id}/subscribe",

@@ -97,7 +97,7 @@ async function createShare(pid, incidentId){
     return;
   }
   const json = await resp.json();
-  alert(`Share token: ${json.share_token}\nPublic URL: ${location.origin}/incidents/public/${json.share_token}`);
+  alert(`Share token: ${json.share_token}\nPublic URL: ${location.origin}/ui/incidents/public/${json.share_token}`);
 }
 
 async function mergePrompt(pid, incidentId){
