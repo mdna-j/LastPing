@@ -800,6 +800,7 @@ def incident_detail_page(incident_id: int = Path(..., ge=1)):
             </div>
             <div class="dashboard-actions">
               <button id="reloadIncidentBtn" class="btn">Refresh</button>
+              <button id="jiraTicketBtn" class="btn btn-secondary">Create Jira Ticket</button>
               <button id="shareBtn" class="btn btn-secondary">Create Share Link</button>
               <button id="exportMarkdownBtn" class="btn btn-secondary">Export Markdown</button>
               <button id="exportPdfBtn" class="btn btn-secondary">Export PDF</button>
@@ -807,6 +808,7 @@ def incident_detail_page(incident_id: int = Path(..., ge=1)):
             </div>
           </div>
           <div id="shareInfo" class="muted"></div>
+          <div id="jiraTicketInfo" class="muted"></div>
         </section>
 
         <section id="incidentLifecycleCard" class="card">
@@ -1484,6 +1486,33 @@ def project_settings_page(project_id: int = Path(..., ge=1)):
             <label>On-call Email: <input id="oncallEmail" placeholder="oncall@example.com" style="width:240px"/></label>
           </div>
           <div class="muted">SMS requires Twilio env vars (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM).</div>
+        </section>
+
+        <section class="card">
+          <div class="section-head">
+            <h3>Jira</h3>
+            <div class="muted">Configure Jira issue creation for incident handoff and operator tracking.</div>
+          </div>
+          <div class="row">
+            <label>Base URL:
+              <input id="jiraBaseUrl" placeholder="https://your-domain.atlassian.net" style="width:300px"/>
+            </label>
+            <label>User Email:
+              <input id="jiraUserEmail" placeholder="ops@example.com" style="width:220px"/>
+            </label>
+          </div>
+          <div class="row">
+            <label>API Token:
+              <input id="jiraApiToken" type="password" autocomplete="off" placeholder="(optional)" style="width:220px"/>
+            </label>
+            <label>Project Key:
+              <input id="jiraProjectKey" placeholder="OPS" style="width:120px"/>
+            </label>
+            <label>Issue Type:
+              <input id="jiraIssueType" placeholder="Task" style="width:160px"/>
+            </label>
+          </div>
+          <div id="jiraSettingsHint" class="muted">Create Jira issues directly from incident detail pages once project credentials are configured.</div>
         </section>
 
         <section class="card">

@@ -31,6 +31,11 @@ class Project(SQLModel, table=True):
     slack_channel: Optional[str] = None
     pagerduty_integration_key: Optional[str] = None
     generic_webhook_url: Optional[str] = None
+    jira_base_url: Optional[str] = None
+    jira_user_email: Optional[str] = None
+    jira_api_token: Optional[str] = None
+    jira_project_key: Optional[str] = None
+    jira_issue_type: Optional[str] = Field(default="Task")
 
     # Relationship to checks owned by this project (one-to-many)
     checks: List["Check"] = Relationship(back_populates="project")
@@ -446,6 +451,8 @@ class Incident(SQLModel, table=True):
     slack_thread_ts: Optional[str] = Field(default=None, index=True, description="Slack thread timestamp for threaded incident updates")
     slack_channel_id: Optional[str] = Field(default=None, description="Slack channel used for threaded incident updates")
     pagerduty_dedup_key: Optional[str] = Field(default=None, index=True, description="PagerDuty dedup key used to sync incident lifecycle")
+    jira_issue_key: Optional[str] = Field(default=None, index=True, description="Jira issue key linked to this incident")
+    jira_issue_url: Optional[str] = Field(default=None, description="Browsable Jira issue URL linked to this incident")
     # Optional grouping: incidents that are related can share a `group_id`.
     # Pointing to another incident (the group's representative) allows
     # grouping without creating a separate table. This is used by the

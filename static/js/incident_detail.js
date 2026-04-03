@@ -98,6 +98,7 @@ function renderNotes(notes){
 function renderIncidentSummary(incident){
   const summaryEl = document.getElementById("incidentSummary");
   const actionsEl = document.getElementById("incidentActions");
+  const jiraInfoEl = document.getElementById("jiraTicketInfo");
   if(!summaryEl) return;
   const owner = incident.owner ? escapeHtml(incident.owner) : "unassigned";
   const ack = incident.acknowledged_at
@@ -106,6 +107,9 @@ function renderIncidentSummary(incident){
   const silence = incident.silenced_until
     ? `${formatTimestamp(incident.silenced_until)} by ${escapeHtml(incident.silenced_by || "unknown")}`
     : "not silenced";
+  const jiraLink = incident.jira_issue_url
+    ? `<a href="${escapeHtml(incident.jira_issue_url)}" target="_blank" rel="noreferrer">${escapeHtml(incident.jira_issue_key || incident.jira_issue_url)}</a>`
+    : "not created";
   summaryEl.innerHTML = `
     <div class="incident-meta-grid">
       <div><span class="muted">Incident</span><div>${incident.id}</div></div>
@@ -116,18 +120,29 @@ function renderIncidentSummary(incident){
       <div><span class="muted">Acknowledged</span><div>${ack}</div></div>
       <div><span class="muted">Silenced</span><div>${silence}</div></div>
       <div><span class="muted">Notes</span><div>${incident.note_count || 0}</div></div>
+      <div><span class="muted">Jira</span><div>${jiraLink}</div></div>
     </div>
   `;
+  if(jiraInfoEl){
+    jiraInfoEl.innerHTML = incident.jira_issue_url
+      ? `Linked Jira issue: <a href="${escapeHtml(incident.jira_issue_url)}" target="_blank" rel="noreferrer">${escapeHtml(incident.jira_issue_key || incident.jira_issue_url)}</a>`
+      : "No Jira ticket linked yet.";
+  }
   if(actionsEl){
     actionsEl.classList.remove("hidden");
     const ackBtn = document.getElementById("ackIncidentBtn");
     const silenceBtn = document.getElementById("silenceIncidentBtn");
+    const jiraBtn = document.getElementById("jiraTicketBtn");
     if(ackBtn){
       ackBtn.textContent = incident.acknowledged_at ? "Clear Ack" : "Acknowledge";
       ackBtn.dataset.acknowledged = incident.acknowledged_at ? "false" : "true";
     }
     if(silenceBtn){
       silenceBtn.textContent = incident.silenced_until ? "Extend Snooze" : "Snooze";
+    }
+    if(jiraBtn){
+      jiraBtn.textContent = incident.jira_issue_url ? "Open Jira Ticket" : "Create Jira Ticket";
+      jiraBtn.dataset.issueUrl = incident.jira_issue_url || "";
     }
   }
 }
@@ -215,6 +230,23 @@ async function createShare(){
   if(shareInfo){
     shareInfo.innerText = `Public: ${location.origin}/ui/incidents/public/${json.share_token}`;
   }
+}
+
+async function createJiraTicket(){
+  const iid = incidentIdFromPath();
+  const pid = incidentProjectId();
+  const jiraBtn = document.getElementById("jiraTicketBtn");
+  if(jiraBtn && jiraBtn.dataset.issueUrl){
+    window.open(jiraBtn.dataset.issueUrl, "_blank", "noopener,noreferrer");
+    return;
+  }
+  const resp = await fetch(`/projects/${pid}/incidents/${iid}/jira-ticket`, {method: "POST", headers: readHeaders()});
+  const body = await resp.json().catch(()=> ({}));
+  if(!resp.ok){
+    alert(body && body.detail ? body.detail : "Failed to create Jira ticket.");
+    return;
+  }
+  await refreshIncidentPage();
 }
 
 async function downloadPostmortem(format){
@@ -340,6 +372,7 @@ function applyQueryParams(){
 document.addEventListener("DOMContentLoaded", ()=>{
   applyQueryParams();
   const shareBtn = document.getElementById("shareBtn");
+  const jiraTicketBtn = document.getElementById("jiraTicketBtn");
   const refreshBtn = document.getElementById("reloadIncidentBtn");
   const assignBtn = document.getElementById("assignOwnerBtn");
   const ackBtn = document.getElementById("ackIncidentBtn");
@@ -349,6 +382,7 @@ document.addEventListener("DOMContentLoaded", ()=>{
   const exportMarkdownBtn = document.getElementById("exportMarkdownBtn");
   const exportPdfBtn = document.getElementById("exportPdfBtn");
   if(shareBtn) shareBtn.addEventListener("click", createShare);
+  if(jiraTicketBtn) jiraTicketBtn.addEventListener("click", createJiraTicket);
   if(refreshBtn) refreshBtn.addEventListener("click", refreshIncidentPage);
   if(assignBtn) assignBtn.addEventListener("click", assignOwner);
   if(ackBtn) ackBtn.addEventListener("click", updateAck);

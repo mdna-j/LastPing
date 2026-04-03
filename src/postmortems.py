@@ -91,6 +91,7 @@ def _audit_title(action: str) -> str:
         "merge_incident": "Incident merged",
         "split_incident": "Incident split",
         "create_share": "Share link created",
+        "create_jira_ticket": "Jira ticket created",
         "pagerduty_ack": "PagerDuty acknowledgement synced",
         "pagerduty_clear_ack": "PagerDuty acknowledgement cleared",
         "pagerduty_resolve": "PagerDuty resolution synced",

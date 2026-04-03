@@ -16,6 +16,7 @@ from ..deps import (
     require_admin_or_owner,
     require_project_access,
 )
+from ..jira import create_jira_issue, jira_settings_ready
 from ..models import AuditLog, Check, Event, Incident, IncidentNote, Project
 from ..postmortems import (
     build_incident_timeline,
@@ -61,6 +62,8 @@ def _serialize_incident(incident: Incident, note_count: int = 0) -> dict:
         "acknowledged_by": incident.acknowledged_by,
         "silenced_until": incident.silenced_until.isoformat() if incident.silenced_until else None,
         "silenced_by": incident.silenced_by,
+        "jira_issue_key": incident.jira_issue_key,
+        "jira_issue_url": incident.jira_issue_url,
         "note_count": note_count,
     }
 
@@ -151,6 +154,31 @@ def _notify_pagerduty_ack(
         )
     except Exception:
         pass
+
+
+def _incident_jira_description(session: Session, project: Project, incident: Incident) -> str:
+    timeline = build_incident_timeline(session, incident)
+    check = session.get(Check, incident.check_id)
+    lines = [
+        f"LastPing incident {incident.id} for project {project.name}.",
+        f"Check: {check.name if check else incident.check_id}",
+        f"Status: {incident.status}",
+        f"Started: {incident.started_at.isoformat()}",
+    ]
+    if incident.owner:
+        lines.append(f"Owner: {incident.owner}")
+    if incident.acknowledged_at:
+        lines.append(f"Acknowledged: {incident.acknowledged_at.isoformat()} by {incident.acknowledged_by or 'unknown'}")
+    if timeline["links"].get("status_page_url"):
+        lines.append(f"Status page: {timeline['links']['status_page_url']}")
+    if timeline["links"].get("public_incident_url"):
+        lines.append(f"Shared incident: {timeline['links']['public_incident_url']}")
+    lines.append("")
+    lines.append("Timeline:")
+    for item in timeline["timeline"][:8]:
+        summary = item.get("summary") or item.get("title") or item.get("kind") or "timeline entry"
+        lines.append(f"- {item.get('ts')}: {summary}")
+    return "\n".join(lines)
 
 
 @router.get("/incidents")
@@ -321,6 +349,76 @@ def create_share(
             body="Created a public share link for this incident.",
         )
     return {"share_token": incident.share_token}
+
+
+@router.post("/incidents/{incident_id}/jira-ticket")
+def create_incident_jira_ticket(
+    project_id: int = Path(..., ge=1),
+    incident_id: int = Path(..., ge=1),
+    request: Request = None,
+    session: Session = Depends(get_session),
+    _proj: Project = Depends(require_admin_or_owner),
+    x_admin_token: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None),
+):
+    incident = _get_incident_or_404(session, project_id, incident_id)
+    if incident.jira_issue_key and incident.jira_issue_url:
+        return {
+            "created": False,
+            "issue_key": incident.jira_issue_key,
+            "issue_url": incident.jira_issue_url,
+            "incident": _serialize_incident(incident),
+        }
+    if not jira_settings_ready(_proj):
+        raise HTTPException(status_code=400, detail="Jira settings are incomplete for this project")
+    check = session.get(Check, incident.check_id)
+    summary = f"[LastPing] Incident #{incident.id}: {(check.name if check else f'check {incident.check_id}')} {incident.status}"
+    try:
+        result = create_jira_issue(
+            base_url=_proj.jira_base_url or "",
+            email=_proj.jira_user_email or "",
+            api_token=_proj.jira_api_token or "",
+            project_key=_proj.jira_project_key or "",
+            issue_type=_proj.jira_issue_type or "Task",
+            summary=summary,
+            description=_incident_jira_description(session, _proj, incident),
+            labels=["lastping", "incident"],
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    issue_key = result.get("key")
+    issue_url = result.get("url")
+    if not issue_key or not issue_url:
+        raise HTTPException(status_code=502, detail="Jira issue creation did not return an issue key")
+
+    incident.jira_issue_key = issue_key
+    incident.jira_issue_url = issue_url
+    session.add(incident)
+    actor = _audit(
+        session,
+        request,
+        authorization,
+        x_admin_token,
+        "create_jira_ticket",
+        incident.id,
+        f"issue_key={issue_key}, issue_url={issue_url}",
+    )
+    session.commit()
+    session.refresh(incident)
+    _notify_slack_thread_update(
+        session,
+        _proj,
+        incident,
+        action="jira_ticket",
+        body=f"Created Jira issue `{issue_key}`{f' by `{actor}`' if actor else ''}: {issue_url}",
+    )
+    return {
+        "created": True,
+        "issue_key": issue_key,
+        "issue_url": issue_url,
+        "incident": _serialize_incident(incident),
+    }
 
 
 class IncidentAssignPayload(StrictBaseModel):

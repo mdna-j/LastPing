@@ -15,6 +15,7 @@ from pydantic import BaseModel, EmailStr, AnyHttpUrl, confloat, constr, root_val
 from sqlmodel import select, Session
 
 from ..db import get_session
+from ..jira import jira_settings_ready
 from ..models import AuditLog, ApiKey, OrgRole, Project as ProjectModel, ProjectMembership, Role
 from ..security import generate_api_key, hash_api_key
 from ..alerts import retry_notification_failure_payload, send_pagerduty_event
@@ -337,6 +338,23 @@ class PagerDutyTestResult(BaseModel):
     trigger_sent: bool
     resolve_sent: bool
     message: str
+
+
+class JiraSettingsIn(StrictBaseModel):
+    base_url: Optional[AnyHttpUrl] = None
+    user_email: Optional[EmailStr] = None
+    api_token: Optional[constr(max_length=255)] = None
+    project_key: Optional[constr(max_length=64)] = None
+    issue_type: Optional[constr(max_length=120)] = None
+
+
+class JiraSettingsOut(BaseModel):
+    base_url: Optional[str] = None
+    user_email: Optional[str] = None
+    api_token: Optional[str] = None
+    project_key: Optional[str] = None
+    issue_type: Optional[str] = None
+    configured: bool
 
 
 class NotificationFailureOut(BaseModel):
@@ -708,6 +726,17 @@ def _pagerduty_settings_out(session: Session, project: ProjectModel) -> PagerDut
     )
 
 
+def _jira_settings_out(project: ProjectModel) -> JiraSettingsOut:
+    return JiraSettingsOut(
+        base_url=project.jira_base_url,
+        user_email=project.jira_user_email,
+        api_token=project.jira_api_token,
+        project_key=project.jira_project_key,
+        issue_type=project.jira_issue_type or "Task",
+        configured=jira_settings_ready(project),
+    )
+
+
 def _notification_failure_out(session: Session, row: AuditLog) -> NotificationFailureOut:
     details = {}
     try:
@@ -888,6 +917,85 @@ def send_project_pagerduty_test(
         resolve_sent=resolve_sent,
         message="Sent PagerDuty test trigger and resolve events.",
     )
+
+
+@router.get("/{project_id}/jira-settings", response_model=JiraSettingsOut)
+def get_project_jira_settings(
+    project_id: int = Path(..., ge=1),
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    project = authorize_project_operation(
+        project_id,
+        min_role=Role.ADMIN.value,
+        x_admin_token=x_admin_token,
+        authorization=authorization,
+        x_api_key=x_api_key,
+        session=session,
+    )
+    return _jira_settings_out(project)
+
+
+@router.post("/{project_id}/jira-settings", response_model=JiraSettingsOut)
+def set_project_jira_settings(
+    project_id: int = Path(..., ge=1),
+    payload: JiraSettingsIn = Body(...),
+    request: Request = None,
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    project = authorize_project_operation(
+        project_id,
+        min_role=Role.ADMIN.value,
+        x_admin_token=x_admin_token,
+        authorization=authorization,
+        x_api_key=x_api_key,
+        session=session,
+    )
+    before = {
+        "jira_base_url": project.jira_base_url,
+        "jira_user_email": project.jira_user_email,
+        "jira_api_token": project.jira_api_token,
+        "jira_project_key": project.jira_project_key,
+        "jira_issue_type": project.jira_issue_type,
+    }
+    project.jira_base_url = str(payload.base_url) if payload.base_url is not None else None
+    project.jira_user_email = str(payload.user_email) if payload.user_email is not None else None
+    project.jira_api_token = payload.api_token
+    project.jira_project_key = payload.project_key.upper() if payload.project_key else None
+    project.jira_issue_type = payload.issue_type or "Task"
+    session.add(project)
+    session.commit()
+    session.refresh(project)
+    try:
+        actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
+        after = {
+            "jira_base_url": project.jira_base_url,
+            "jira_user_email": project.jira_user_email,
+            "jira_api_token": project.jira_api_token,
+            "jira_project_key": project.jira_project_key,
+            "jira_issue_type": project.jira_issue_type,
+        }
+        session.add(
+            AuditLog(
+                actor=actor,
+                action="set_project_jira_settings",
+                target_type="project",
+                target_id=project_id,
+                details=_diff_details(before, after),
+                actor_ip=actor_ip,
+                user_agent=user_agent,
+                **_project_scope_kwargs(project),
+            )
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+    return _jira_settings_out(project)
 
 
 @router.get("/{project_id}/notification-failures", response_model=List[NotificationFailureOut])

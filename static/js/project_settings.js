@@ -22,6 +22,11 @@ function formatPagerdutySync(settings){
   return `${settings.latest_sync_action} at ${ts}`;
 }
 
+function formatJiraState(settings){
+  if(!settings || !settings.configured) return "not set";
+  return `${settings.project_key || "unknown project"} / ${settings.issue_type || "Task"}`;
+}
+
 function renderNotificationFailures(rows){
   const root = document.getElementById("notificationFailures");
   if(!root) return;
@@ -62,7 +67,7 @@ function renderNotificationFailures(rows){
   });
 }
 
-function renderSettingsCards(checks, health, slo, alerts, pagerduty){
+function renderSettingsCards(checks, health, slo, alerts, pagerduty, jira){
   const root = document.getElementById("settingsCards");
   if(!root) return;
 
@@ -78,12 +83,14 @@ function renderSettingsCards(checks, health, slo, alerts, pagerduty){
   const oncallEnabled = alerts ? !!alerts.oncall_enabled : false;
   const pdConfigured = pagerduty ? !!pagerduty.integration_key_configured : false;
   const pdInboundReady = pagerduty ? !!pagerduty.inbound_secret_configured : false;
+  const jiraConfigured = jira ? !!jira.configured : false;
 
   const checksState = counts.down > 0 ? "kpi-critical" : (counts.degraded > 0 ? "kpi-warning" : "kpi-healthy");
   const incidentState = openIncidents > 0 ? "kpi-critical" : "kpi-healthy";
   const sloState = (sloTarget !== null && sloTarget >= 99.5 && slaTarget !== null && slaTarget >= 99.0) ? "kpi-healthy" : "kpi-warning";
   const routeState = (smsEnabled || oncallEnabled) ? "kpi-healthy" : "kpi-warning";
   const pdState = (pdConfigured && pdInboundReady) ? "kpi-healthy" : (pdConfigured ? "kpi-warning" : "kpi-neutral");
+  const jiraState = jiraConfigured ? "kpi-healthy" : "kpi-neutral";
 
   root.innerHTML = [
     `<article class="card kpi-card ${checksState}"><div class="metric-label">Checks</div><div class="metric-value">${counts.total}</div><div class="metric-sub">${counts.up} up | ${counts.down} down | ${counts.degraded} degraded</div></article>`,
@@ -91,6 +98,7 @@ function renderSettingsCards(checks, health, slo, alerts, pagerduty){
     `<article class="card kpi-card ${sloState}"><div class="metric-label">Targets</div><div class="metric-value">${sloTarget !== null ? sloTarget.toFixed(1) : "n/a"} / ${slaTarget !== null ? slaTarget.toFixed(1) : "n/a"}</div><div class="metric-sub">SLO / SLA percentage goals</div></article>`,
     `<article class="card kpi-card ${routeState}"><div class="metric-label">Default routing</div><div class="metric-value">${oncallEnabled ? "On-call on" : "On-call off"}</div><div class="metric-sub">${smsEnabled ? "SMS enabled" : "SMS disabled"}</div></article>`,
     `<article class="card kpi-card ${pdState}"><div class="metric-label">PagerDuty</div><div class="metric-value">${pdConfigured ? "configured" : "not set"}</div><div class="metric-sub">${pdInboundReady ? "inbound sync ready" : "webhook secret missing"}</div></article>`,
+    `<article class="card kpi-card ${jiraState}"><div class="metric-label">Jira</div><div class="metric-value">${jiraConfigured ? "configured" : "not set"}</div><div class="metric-sub">${formatJiraState(jira)}</div></article>`,
   ].join("");
 }
 
@@ -100,7 +108,7 @@ async function loadSettings(){
   const headers = headersSettings();
 
   try{
-    const [checksRes, sloRes, alertRes, pagerdutyRes, failureRes] = await Promise.all([
+    const [checksRes, sloRes, alertRes, jiraRes, pagerdutyRes, failureRes] = await Promise.all([
       perf && window.LastPingShell
         ? perf.fetchJson("checks", `/projects/${pid}/checks`)
         : fetch(`/projects/${pid}/checks`).then(async (res)=> ({ok: res.ok, status: res.status, data: res.ok ? await res.json() : null})),
@@ -110,6 +118,9 @@ async function loadSettings(){
       perf && window.LastPingShell
         ? perf.fetchJson("alert-settings", `/projects/${pid}/alert-settings`, {headers})
         : fetch(`/projects/${pid}/alert-settings`, {headers}).then(async (res)=> ({ok: res.ok, status: res.status, data: res.ok ? await res.json() : null})),
+      perf && window.LastPingShell
+        ? perf.fetchJson("jira-settings", `/projects/${pid}/jira-settings`, {headers})
+        : fetch(`/projects/${pid}/jira-settings`, {headers}).then(async (res)=> ({ok: res.ok, status: res.status, data: res.ok ? await res.json() : null})),
       perf && window.LastPingShell
         ? perf.fetchJson("pagerduty-settings", `/projects/${pid}/pagerduty-settings`, {headers})
         : fetch(`/projects/${pid}/pagerduty-settings`, {headers}).then(async (res)=> ({ok: res.ok, status: res.status, data: res.ok ? await res.json() : null})),
@@ -122,16 +133,17 @@ async function loadSettings(){
       ? window.LastPingShell.hydratePageShell(pid, checks, {perf})
       : Promise.resolve({checks, health: null});
 
-    if(!sloRes.ok || !alertRes.ok || !pagerdutyRes.ok || !failureRes.ok){
+    if(!sloRes.ok || !alertRes.ok || !jiraRes.ok || !pagerdutyRes.ok || !failureRes.ok){
       alert("Failed to load settings");
       const shellData = await shellPromise;
-      renderSettingsCards(shellData.checks, shellData.health, null, null, null);
+      renderSettingsCards(shellData.checks, shellData.health, null, null, null, null);
       renderNotificationFailures([]);
       return;
     }
 
     const slo = sloRes.data || {};
     const alerts = alertRes.data || {};
+    const jira = jiraRes.data || {};
     const pagerduty = pagerdutyRes.data || {};
     const failures = failureRes.data || [];
     const shellData = await shellPromise;
@@ -143,6 +155,21 @@ async function loadSettings(){
       document.getElementById("smsTo").value = alerts.sms_to ?? "";
       document.getElementById("oncallEnabled").checked = !!alerts.oncall_enabled;
       document.getElementById("oncallEmail").value = alerts.oncall_email ?? "";
+      const jiraBaseUrl = document.getElementById("jiraBaseUrl");
+      const jiraUserEmail = document.getElementById("jiraUserEmail");
+      const jiraApiToken = document.getElementById("jiraApiToken");
+      const jiraProjectKey = document.getElementById("jiraProjectKey");
+      const jiraIssueType = document.getElementById("jiraIssueType");
+      const jiraSettingsHint = document.getElementById("jiraSettingsHint");
+      if(jiraBaseUrl) jiraBaseUrl.value = jira.base_url || "";
+      if(jiraUserEmail) jiraUserEmail.value = jira.user_email || "";
+      if(jiraApiToken) jiraApiToken.value = jira.api_token || "";
+      if(jiraProjectKey) jiraProjectKey.value = jira.project_key || "";
+      if(jiraIssueType) jiraIssueType.value = jira.issue_type || "Task";
+      if(jiraSettingsHint) jiraSettingsHint.textContent = jira.configured
+        ? `Jira ready for ${jira.project_key || "project"} ticket creation.`
+        : "Create Jira issues directly from incident detail pages once project credentials are configured.";
+
       const pdKey = document.getElementById("pagerdutyIntegrationKey");
       const pdUrl = document.getElementById("pagerdutyWebhookUrl");
       const pdHeader = document.getElementById("pagerdutySecretHeader");
@@ -156,7 +183,7 @@ async function loadSettings(){
       if(pdLastSync) pdLastSync.textContent = formatPagerdutySync(pagerduty);
       if(pdTestResult) pdTestResult.textContent = "Use test delivery to send a trigger and immediate resolve event to PagerDuty.";
 
-      renderSettingsCards(shellData.checks, shellData.health, slo, alerts, pagerduty);
+      renderSettingsCards(shellData.checks, shellData.health, slo, alerts, pagerduty, jira);
       renderNotificationFailures(failures);
     };
     if(perf) perf.measureRender("settings-render", render);
@@ -164,7 +191,7 @@ async function loadSettings(){
   }catch(_e){
     if(window.LastPingShell){
       const shellData = await window.LastPingShell.hydratePageShell(pid, null, {perf});
-      renderSettingsCards(shellData.checks, shellData.health, null, null, null);
+      renderSettingsCards(shellData.checks, shellData.health, null, null, null, null);
     }
     renderNotificationFailures([]);
     alert("Failed to load settings");
@@ -190,16 +217,24 @@ async function saveSettings(){
     oncall_enabled: document.getElementById("oncallEnabled").checked,
     oncall_email: document.getElementById("oncallEmail").value || null,
   };
+  const jiraPayload = {
+    base_url: document.getElementById("jiraBaseUrl").value || null,
+    user_email: document.getElementById("jiraUserEmail").value || null,
+    api_token: document.getElementById("jiraApiToken").value || null,
+    project_key: document.getElementById("jiraProjectKey").value || null,
+    issue_type: document.getElementById("jiraIssueType").value || null,
+  };
   const pagerdutyPayload = {
     integration_key: document.getElementById("pagerdutyIntegrationKey").value || null,
   };
 
-  const [sloRes, alertRes, pagerdutyRes] = await Promise.all([
+  const [sloRes, alertRes, jiraRes, pagerdutyRes] = await Promise.all([
     fetch(`/projects/${pid}/slo`, {method: "POST", headers, body: JSON.stringify(sloPayload)}),
     fetch(`/projects/${pid}/alert-settings`, {method: "POST", headers, body: JSON.stringify(alertPayload)}),
+    fetch(`/projects/${pid}/jira-settings`, {method: "POST", headers, body: JSON.stringify(jiraPayload)}),
     fetch(`/projects/${pid}/pagerduty-settings`, {method: "POST", headers, body: JSON.stringify(pagerdutyPayload)}),
   ]);
-  if(!sloRes.ok || !alertRes.ok || !pagerdutyRes.ok){
+  if(!sloRes.ok || !alertRes.ok || !jiraRes.ok || !pagerdutyRes.ok){
     alert("Failed to save settings");
     return;
   }
