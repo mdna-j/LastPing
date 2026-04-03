@@ -7,7 +7,13 @@ function headersSettings(){
   return headers;
 }
 
-function renderSettingsCards(checks, health, slo, alerts){
+function formatPagerdutySync(settings){
+  if(!settings || !settings.latest_sync_action) return "none yet";
+  const ts = settings.latest_sync_at ? new Date(settings.latest_sync_at).toLocaleString() : "unknown time";
+  return `${settings.latest_sync_action} at ${ts}`;
+}
+
+function renderSettingsCards(checks, health, slo, alerts, pagerduty){
   const root = document.getElementById("settingsCards");
   if(!root) return;
 
@@ -21,17 +27,21 @@ function renderSettingsCards(checks, health, slo, alerts){
   const slaTarget = slo && slo.sla_target !== undefined && slo.sla_target !== null ? Number(slo.sla_target) : null;
   const smsEnabled = alerts ? !!alerts.sms_enabled : false;
   const oncallEnabled = alerts ? !!alerts.oncall_enabled : false;
+  const pdConfigured = pagerduty ? !!pagerduty.integration_key_configured : false;
+  const pdInboundReady = pagerduty ? !!pagerduty.inbound_secret_configured : false;
 
   const checksState = counts.down > 0 ? "kpi-critical" : (counts.degraded > 0 ? "kpi-warning" : "kpi-healthy");
   const incidentState = openIncidents > 0 ? "kpi-critical" : "kpi-healthy";
   const sloState = (sloTarget !== null && sloTarget >= 99.5 && slaTarget !== null && slaTarget >= 99.0) ? "kpi-healthy" : "kpi-warning";
   const routeState = (smsEnabled || oncallEnabled) ? "kpi-healthy" : "kpi-warning";
+  const pdState = (pdConfigured && pdInboundReady) ? "kpi-healthy" : (pdConfigured ? "kpi-warning" : "kpi-neutral");
 
   root.innerHTML = [
     `<article class="card kpi-card ${checksState}"><div class="metric-label">Checks</div><div class="metric-value">${counts.total}</div><div class="metric-sub">${counts.up} up | ${counts.down} down | ${counts.degraded} degraded</div></article>`,
     `<article class="card kpi-card ${incidentState}"><div class="metric-label">Open incidents</div><div class="metric-value">${openIncidents}</div><div class="metric-sub">Current unresolved threads</div></article>`,
     `<article class="card kpi-card ${sloState}"><div class="metric-label">Targets</div><div class="metric-value">${sloTarget !== null ? sloTarget.toFixed(1) : "n/a"} / ${slaTarget !== null ? slaTarget.toFixed(1) : "n/a"}</div><div class="metric-sub">SLO / SLA percentage goals</div></article>`,
     `<article class="card kpi-card ${routeState}"><div class="metric-label">Default routing</div><div class="metric-value">${oncallEnabled ? "On-call on" : "On-call off"}</div><div class="metric-sub">${smsEnabled ? "SMS enabled" : "SMS disabled"}</div></article>`,
+    `<article class="card kpi-card ${pdState}"><div class="metric-label">PagerDuty</div><div class="metric-value">${pdConfigured ? "configured" : "not set"}</div><div class="metric-sub">${pdInboundReady ? "inbound sync ready" : "webhook secret missing"}</div></article>`,
   ].join("");
 }
 
@@ -41,7 +51,7 @@ async function loadSettings(){
   const headers = headersSettings();
 
   try{
-    const [checksRes, sloRes, alertRes] = await Promise.all([
+    const [checksRes, sloRes, alertRes, pagerdutyRes] = await Promise.all([
       perf && window.LastPingShell
         ? perf.fetchJson("checks", `/projects/${pid}/checks`)
         : fetch(`/projects/${pid}/checks`).then(async (res)=> ({ok: res.ok, status: res.status, data: res.ok ? await res.json() : null})),
@@ -51,21 +61,25 @@ async function loadSettings(){
       perf && window.LastPingShell
         ? perf.fetchJson("alert-settings", `/projects/${pid}/alert-settings`, {headers})
         : fetch(`/projects/${pid}/alert-settings`, {headers}).then(async (res)=> ({ok: res.ok, status: res.status, data: res.ok ? await res.json() : null})),
+      perf && window.LastPingShell
+        ? perf.fetchJson("pagerduty-settings", `/projects/${pid}/pagerduty-settings`, {headers})
+        : fetch(`/projects/${pid}/pagerduty-settings`, {headers}).then(async (res)=> ({ok: res.ok, status: res.status, data: res.ok ? await res.json() : null})),
     ]);
     const checks = checksRes.ok ? (checksRes.data || []) : [];
     const shellPromise = window.LastPingShell
       ? window.LastPingShell.hydratePageShell(pid, checks, {perf})
       : Promise.resolve({checks, health: null});
 
-    if(!sloRes.ok || !alertRes.ok){
+    if(!sloRes.ok || !alertRes.ok || !pagerdutyRes.ok){
       alert("Failed to load settings");
       const shellData = await shellPromise;
-      renderSettingsCards(shellData.checks, shellData.health, null, null);
+      renderSettingsCards(shellData.checks, shellData.health, null, null, null);
       return;
     }
 
     const slo = sloRes.data || {};
     const alerts = alertRes.data || {};
+    const pagerduty = pagerdutyRes.data || {};
     const shellData = await shellPromise;
 
     const render = ()=>{
@@ -75,15 +89,27 @@ async function loadSettings(){
       document.getElementById("smsTo").value = alerts.sms_to ?? "";
       document.getElementById("oncallEnabled").checked = !!alerts.oncall_enabled;
       document.getElementById("oncallEmail").value = alerts.oncall_email ?? "";
+      const pdKey = document.getElementById("pagerdutyIntegrationKey");
+      const pdUrl = document.getElementById("pagerdutyWebhookUrl");
+      const pdHeader = document.getElementById("pagerdutySecretHeader");
+      const pdSecret = document.getElementById("pagerdutySecretStatus");
+      const pdLastSync = document.getElementById("pagerdutyLastSync");
+      const pdTestResult = document.getElementById("pagerdutyTestResult");
+      if(pdKey) pdKey.value = pagerduty.integration_key || "";
+      if(pdUrl) pdUrl.textContent = pagerduty.inbound_webhook_url || "/integrations/pagerduty/webhook";
+      if(pdHeader) pdHeader.textContent = pagerduty.inbound_secret_header || "X-PagerDuty-Webhook-Secret";
+      if(pdSecret) pdSecret.textContent = pagerduty.inbound_secret_configured ? "configured" : "missing";
+      if(pdLastSync) pdLastSync.textContent = formatPagerdutySync(pagerduty);
+      if(pdTestResult) pdTestResult.textContent = "Use test delivery to send a trigger and immediate resolve event to PagerDuty.";
 
-      renderSettingsCards(shellData.checks, shellData.health, slo, alerts);
+      renderSettingsCards(shellData.checks, shellData.health, slo, alerts, pagerduty);
     };
     if(perf) perf.measureRender("settings-render", render);
     else render();
   }catch(_e){
     if(window.LastPingShell){
       const shellData = await window.LastPingShell.hydratePageShell(pid, null, {perf});
-      renderSettingsCards(shellData.checks, shellData.health, null, null);
+      renderSettingsCards(shellData.checks, shellData.health, null, null, null);
     }
     alert("Failed to load settings");
   }finally{
@@ -108,12 +134,16 @@ async function saveSettings(){
     oncall_enabled: document.getElementById("oncallEnabled").checked,
     oncall_email: document.getElementById("oncallEmail").value || null,
   };
+  const pagerdutyPayload = {
+    integration_key: document.getElementById("pagerdutyIntegrationKey").value || null,
+  };
 
-  const [sloRes, alertRes] = await Promise.all([
+  const [sloRes, alertRes, pagerdutyRes] = await Promise.all([
     fetch(`/projects/${pid}/slo`, {method: "POST", headers, body: JSON.stringify(sloPayload)}),
     fetch(`/projects/${pid}/alert-settings`, {method: "POST", headers, body: JSON.stringify(alertPayload)}),
+    fetch(`/projects/${pid}/pagerduty-settings`, {method: "POST", headers, body: JSON.stringify(pagerdutyPayload)}),
   ]);
-  if(!sloRes.ok || !alertRes.ok){
+  if(!sloRes.ok || !alertRes.ok || !pagerdutyRes.ok){
     alert("Failed to save settings");
     return;
   }
@@ -121,13 +151,40 @@ async function saveSettings(){
   loadSettings();
 }
 
+async function sendPagerdutyTest(){
+  const pid = document.getElementById("projectId").value || "1";
+  const headers = headersSettings();
+  const resultEl = document.getElementById("pagerdutyTestResult");
+  if(resultEl) resultEl.textContent = "Sending PagerDuty test delivery...";
+  try{
+    const res = await fetch(`/projects/${pid}/pagerduty-test`, {method: "POST", headers});
+    const body = await res.json().catch(()=> ({}));
+    if(!res.ok){
+      const detail = body && body.detail ? body.detail : "Failed to send PagerDuty test";
+      if(resultEl) resultEl.textContent = detail;
+      alert(detail);
+      return;
+    }
+    if(resultEl){
+      resultEl.textContent = `${body.message} Dedup key: ${body.dedup_key}`;
+    }
+    alert("PagerDuty test delivery sent");
+    loadSettings();
+  }catch(_e){
+    if(resultEl) resultEl.textContent = "Failed to send PagerDuty test";
+    alert("Failed to send PagerDuty test");
+  }
+}
+
 document.addEventListener("DOMContentLoaded", ()=>{
   const loadBtn = document.getElementById("loadBtn");
   const saveBtn = document.getElementById("saveBtn");
+  const testBtn = document.getElementById("sendPagerdutyTestBtn");
   const pid = document.getElementById("projectId");
 
   if(loadBtn) loadBtn.addEventListener("click", loadSettings);
   if(saveBtn) saveBtn.addEventListener("click", saveSettings);
+  if(testBtn) testBtn.addEventListener("click", sendPagerdutyTest);
   if(pid) pid.addEventListener("change", loadSettings);
 
   loadSettings();

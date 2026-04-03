@@ -17,6 +17,7 @@ from sqlmodel import select, Session
 from ..db import get_session
 from ..models import AuditLog, ApiKey, OrgRole, Project as ProjectModel, ProjectMembership, Role
 from ..security import generate_api_key, hash_api_key
+from ..alerts import send_pagerduty_event
 from ..deps import authorize_org_operation, authorize_project_operation, get_audit_context, get_current_user, limit_public_requests
 from ..schemas import StrictBaseModel
 import os
@@ -314,6 +315,28 @@ class AlertSettings(StrictBaseModel):
     sms_to: Optional[constr(regex=r"^\\+?[0-9]{7,20}$")] = None
     oncall_enabled: Optional[bool] = None
     oncall_email: Optional[EmailStr] = None
+
+
+class PagerDutySettingsIn(StrictBaseModel):
+    integration_key: Optional[constr(max_length=128)] = None
+
+
+class PagerDutySettingsOut(BaseModel):
+    integration_key: Optional[str] = None
+    integration_key_configured: bool
+    inbound_webhook_url: str
+    inbound_secret_configured: bool
+    inbound_secret_header: str
+    latest_sync_action: Optional[str] = None
+    latest_sync_at: Optional[datetime] = None
+
+
+class PagerDutyTestResult(BaseModel):
+    ok: bool
+    dedup_key: str
+    trigger_sent: bool
+    resolve_sent: bool
+    message: str
 
 
 class MaintenanceWindow(StrictBaseModel):
@@ -636,4 +659,177 @@ def set_project_alert_settings(project_id: int = Path(..., ge=1), payload: Alert
         sms_to=project.sms_to,
         oncall_enabled=project.oncall_enabled,
         oncall_email=project.oncall_email,
+    )
+
+
+def _pagerduty_settings_out(session: Session, project: ProjectModel) -> PagerDutySettingsOut:
+    base_url = (os.environ.get("BASE_URL") or "").rstrip("/")
+    inbound_path = "/integrations/pagerduty/webhook"
+    inbound_url = f"{base_url}{inbound_path}" if base_url else inbound_path
+    latest_sync = session.exec(
+        select(AuditLog)
+        .where(
+            AuditLog.project_id == project.id,
+            AuditLog.target_type == "incident",
+            AuditLog.action.like("pagerduty_%"),
+        )
+        .order_by(AuditLog.created_at.desc())
+    ).first()
+    return PagerDutySettingsOut(
+        integration_key=project.pagerduty_integration_key,
+        integration_key_configured=bool(project.pagerduty_integration_key),
+        inbound_webhook_url=inbound_url,
+        inbound_secret_configured=bool(os.environ.get("PAGERDUTY_WEBHOOK_SECRET")),
+        inbound_secret_header="X-PagerDuty-Webhook-Secret",
+        latest_sync_action=latest_sync.action if latest_sync else None,
+        latest_sync_at=latest_sync.created_at if latest_sync else None,
+    )
+
+
+@router.get("/{project_id}/pagerduty-settings", response_model=PagerDutySettingsOut)
+def get_project_pagerduty_settings(
+    project_id: int = Path(..., ge=1),
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    project = authorize_project_operation(
+        project_id,
+        min_role=Role.ADMIN.value,
+        x_admin_token=x_admin_token,
+        authorization=authorization,
+        x_api_key=x_api_key,
+        session=session,
+    )
+    return _pagerduty_settings_out(session, project)
+
+
+@router.post("/{project_id}/pagerduty-settings", response_model=PagerDutySettingsOut)
+def set_project_pagerduty_settings(
+    project_id: int = Path(..., ge=1),
+    payload: PagerDutySettingsIn = Body(...),
+    request: Request = None,
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    project = authorize_project_operation(
+        project_id,
+        min_role=Role.ADMIN.value,
+        x_admin_token=x_admin_token,
+        authorization=authorization,
+        x_api_key=x_api_key,
+        session=session,
+    )
+    before = {"pagerduty_integration_key": project.pagerduty_integration_key}
+    project.pagerduty_integration_key = payload.integration_key
+    session.add(project)
+    session.commit()
+    session.refresh(project)
+    try:
+        actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
+        after = {"pagerduty_integration_key": project.pagerduty_integration_key}
+        session.add(
+            AuditLog(
+                actor=actor,
+                action="set_project_pagerduty_settings",
+                target_type="project",
+                target_id=project_id,
+                details=_diff_details(before, after),
+                actor_ip=actor_ip,
+                user_agent=user_agent,
+                **_project_scope_kwargs(project),
+            )
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+    return _pagerduty_settings_out(session, project)
+
+
+@router.post("/{project_id}/pagerduty-test", response_model=PagerDutyTestResult)
+def send_project_pagerduty_test(
+    project_id: int = Path(..., ge=1),
+    request: Request = None,
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    project = authorize_project_operation(
+        project_id,
+        min_role=Role.ADMIN.value,
+        x_admin_token=x_admin_token,
+        authorization=authorization,
+        x_api_key=x_api_key,
+        session=session,
+    )
+    routing_key = (project.pagerduty_integration_key or "").strip()
+    if not routing_key:
+        raise HTTPException(status_code=400, detail="PagerDuty integration key is not configured")
+
+    dedup_key = f"lastping:test:{project.id}:{int(datetime.utcnow().timestamp())}"
+    trigger_sent = send_pagerduty_event(
+        routing_key,
+        f"LastPing test incident for project {project.name}",
+        "info",
+        event_action="trigger",
+        dedup_key=dedup_key,
+        source=project.name,
+        component="project-settings",
+        custom_details={
+            "project_id": project.id,
+            "project_name": project.name,
+            "test_delivery": True,
+        },
+    )
+    resolve_sent = False
+    if trigger_sent:
+        resolve_sent = send_pagerduty_event(
+            routing_key,
+            f"LastPing test incident resolved for project {project.name}",
+            "info",
+            event_action="resolve",
+            dedup_key=dedup_key,
+            source=project.name,
+            component="project-settings",
+            custom_details={
+                "project_id": project.id,
+                "project_name": project.name,
+                "test_delivery": True,
+            },
+        )
+
+    actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
+    session.add(
+        AuditLog(
+            actor=actor,
+            action="send_project_pagerduty_test",
+            target_type="project",
+            target_id=project.id,
+            details=json.dumps(
+                {
+                    "dedup_key": dedup_key,
+                    "trigger_sent": trigger_sent,
+                    "resolve_sent": resolve_sent,
+                }
+            ),
+            actor_ip=actor_ip,
+            user_agent=user_agent,
+            **_project_scope_kwargs(project),
+        )
+    )
+    session.commit()
+
+    if not trigger_sent:
+        raise HTTPException(status_code=502, detail="Failed to send PagerDuty test event")
+
+    return PagerDutyTestResult(
+        ok=trigger_sent and resolve_sent,
+        dedup_key=dedup_key,
+        trigger_sent=trigger_sent,
+        resolve_sent=resolve_sent,
+        message="Sent PagerDuty test trigger and resolve events.",
     )

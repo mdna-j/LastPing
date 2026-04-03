@@ -1485,6 +1485,28 @@ def project_settings_page(project_id: int = Path(..., ge=1)):
           </div>
           <div class="muted">SMS requires Twilio env vars (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM).</div>
         </section>
+
+        <section class="card">
+          <div class="section-head">
+            <h3>PagerDuty</h3>
+            <div class="muted">Configure outbound delivery and verify inbound webhook sync readiness.</div>
+          </div>
+          <div class="row">
+            <label>Integration Key:
+              <input id="pagerdutyIntegrationKey" placeholder="(optional)" style="width:260px"/>
+            </label>
+            <button id="sendPagerdutyTestBtn" class="btn btn-secondary">Send Test Delivery</button>
+          </div>
+          <div class="row">
+            <div class="status-inline"><strong>Inbound webhook:</strong> <code id="pagerdutyWebhookUrl">/integrations/pagerduty/webhook</code></div>
+          </div>
+          <div class="row">
+            <div class="status-inline"><strong>Secret header:</strong> <code id="pagerdutySecretHeader">X-PagerDuty-Webhook-Secret</code></div>
+            <div class="status-inline"><strong>Webhook secret:</strong> <span id="pagerdutySecretStatus" class="muted">unknown</span></div>
+            <div class="status-inline"><strong>Latest sync:</strong> <span id="pagerdutyLastSync" class="muted">none yet</span></div>
+          </div>
+          <div id="pagerdutyTestResult" class="muted">Use test delivery to send a trigger and immediate resolve event to PagerDuty.</div>
+        </section>
       </main>
     </div>
     <script src="/static/js/ui_shell.js"></script>
