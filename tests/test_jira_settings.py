@@ -5,6 +5,8 @@ from fastapi.testclient import TestClient
 
 def test_project_jira_settings_roundtrip(tmp_path):
     os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_jira_settings.sqlite'}"
+    os.environ["BASE_URL"] = "https://lastping.example"
+    os.environ["JIRA_WEBHOOK_SECRET"] = "jira-secret"
 
     from sqlmodel import Session, select
     from src import db as dbmod
@@ -25,6 +27,8 @@ def test_project_jira_settings_roundtrip(tmp_path):
     get_res = client.get(f"/projects/{project_id}/jira-settings", headers={"X-API-KEY": "owner-key"})
     assert get_res.status_code == 200
     assert get_res.json()["configured"] is False
+    assert get_res.json()["inbound_webhook_url"] == "https://lastping.example/integrations/jira/webhook"
+    assert get_res.json()["inbound_secret_configured"] is True
 
     save_res = client.post(
         f"/projects/{project_id}/jira-settings",

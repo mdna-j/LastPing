@@ -27,6 +27,12 @@ function formatJiraState(settings){
   return `${settings.project_key || "unknown project"} / ${settings.issue_type || "Task"}`;
 }
 
+function formatJiraSync(settings){
+  if(!settings || !settings.latest_sync_action) return "none yet";
+  const ts = settings.latest_sync_at ? new Date(settings.latest_sync_at).toLocaleString() : "unknown time";
+  return `${settings.latest_sync_action} at ${ts}`;
+}
+
 function renderNotificationFailures(rows){
   const root = document.getElementById("notificationFailures");
   if(!root) return;
@@ -161,11 +167,19 @@ async function loadSettings(){
       const jiraProjectKey = document.getElementById("jiraProjectKey");
       const jiraIssueType = document.getElementById("jiraIssueType");
       const jiraSettingsHint = document.getElementById("jiraSettingsHint");
+      const jiraWebhookUrl = document.getElementById("jiraWebhookUrl");
+      const jiraSecretHeader = document.getElementById("jiraSecretHeader");
+      const jiraSecretStatus = document.getElementById("jiraSecretStatus");
+      const jiraLastSync = document.getElementById("jiraLastSync");
       if(jiraBaseUrl) jiraBaseUrl.value = jira.base_url || "";
       if(jiraUserEmail) jiraUserEmail.value = jira.user_email || "";
       if(jiraApiToken) jiraApiToken.value = jira.api_token || "";
       if(jiraProjectKey) jiraProjectKey.value = jira.project_key || "";
       if(jiraIssueType) jiraIssueType.value = jira.issue_type || "Task";
+      if(jiraWebhookUrl) jiraWebhookUrl.textContent = jira.inbound_webhook_url || "/integrations/jira/webhook";
+      if(jiraSecretHeader) jiraSecretHeader.textContent = jira.inbound_secret_header || "X-Jira-Webhook-Secret";
+      if(jiraSecretStatus) jiraSecretStatus.textContent = jira.inbound_secret_configured ? "configured" : "missing";
+      if(jiraLastSync) jiraLastSync.textContent = formatJiraSync(jira);
       if(jiraSettingsHint) jiraSettingsHint.textContent = jira.configured
         ? `Jira ready for ${jira.project_key || "project"} ticket creation.`
         : "Create Jira issues directly from incident detail pages once project credentials are configured.";

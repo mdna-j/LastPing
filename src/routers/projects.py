@@ -354,6 +354,11 @@ class JiraSettingsOut(BaseModel):
     api_token: Optional[str] = None
     project_key: Optional[str] = None
     issue_type: Optional[str] = None
+    inbound_webhook_url: str
+    inbound_secret_configured: bool
+    inbound_secret_header: str
+    latest_sync_action: Optional[str] = None
+    latest_sync_at: Optional[datetime] = None
     configured: bool
 
 
@@ -726,13 +731,30 @@ def _pagerduty_settings_out(session: Session, project: ProjectModel) -> PagerDut
     )
 
 
-def _jira_settings_out(project: ProjectModel) -> JiraSettingsOut:
+def _jira_settings_out(session: Session, project: ProjectModel) -> JiraSettingsOut:
+    base_url = (os.environ.get("BASE_URL") or "").rstrip("/")
+    inbound_path = "/integrations/jira/webhook"
+    inbound_url = f"{base_url}{inbound_path}" if base_url else inbound_path
+    latest_sync = session.exec(
+        select(AuditLog)
+        .where(
+            AuditLog.project_id == project.id,
+            AuditLog.target_type == "incident",
+            AuditLog.action.like("jira_%"),
+        )
+        .order_by(AuditLog.created_at.desc())
+    ).first()
     return JiraSettingsOut(
         base_url=project.jira_base_url,
         user_email=project.jira_user_email,
         api_token=project.jira_api_token,
         project_key=project.jira_project_key,
         issue_type=project.jira_issue_type or "Task",
+        inbound_webhook_url=inbound_url,
+        inbound_secret_configured=bool(os.environ.get("JIRA_WEBHOOK_SECRET")),
+        inbound_secret_header="X-Jira-Webhook-Secret",
+        latest_sync_action=latest_sync.action if latest_sync else None,
+        latest_sync_at=latest_sync.created_at if latest_sync else None,
         configured=jira_settings_ready(project),
     )
 
@@ -935,7 +957,7 @@ def get_project_jira_settings(
         x_api_key=x_api_key,
         session=session,
     )
-    return _jira_settings_out(project)
+    return _jira_settings_out(session, project)
 
 
 @router.post("/{project_id}/jira-settings", response_model=JiraSettingsOut)
@@ -995,7 +1017,7 @@ def set_project_jira_settings(
         session.commit()
     except Exception:
         session.rollback()
-    return _jira_settings_out(project)
+    return _jira_settings_out(session, project)
 
 
 @router.get("/{project_id}/notification-failures", response_model=List[NotificationFailureOut])

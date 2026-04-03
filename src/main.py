@@ -17,6 +17,7 @@ from .routers.incidents import router as incidents_router, public_router as inci
 from .routers.ui import router as ui_router
 from .routers.webhooks import router as webhooks_router
 from .routers.pagerduty import router as pagerduty_router
+from .routers.jira_webhook import router as jira_webhook_router
 from .routers.analytics import router as analytics_router
 from .routers.oncall import router as oncall_router
 from .routers.orgs import router as orgs_router
@@ -73,6 +74,7 @@ app.include_router(incidents_public_router)
 app.include_router(ui_router)
 app.include_router(webhooks_router)
 app.include_router(pagerduty_router)
+app.include_router(jira_webhook_router)
 app.include_router(analytics_router)
 app.include_router(oncall_router)
 app.include_router(orgs_router)

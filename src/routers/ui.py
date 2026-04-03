@@ -1491,7 +1491,7 @@ def project_settings_page(project_id: int = Path(..., ge=1)):
         <section class="card">
           <div class="section-head">
             <h3>Jira</h3>
-            <div class="muted">Configure Jira issue creation for incident handoff and operator tracking.</div>
+            <div class="muted">Configure Jira issue creation and inbound webhook sync for operator tracking.</div>
           </div>
           <div class="row">
             <label>Base URL:
@@ -1511,6 +1511,14 @@ def project_settings_page(project_id: int = Path(..., ge=1)):
             <label>Issue Type:
               <input id="jiraIssueType" placeholder="Task" style="width:160px"/>
             </label>
+          </div>
+          <div class="row">
+            <div class="status-inline"><strong>Inbound webhook:</strong> <code id="jiraWebhookUrl">/integrations/jira/webhook</code></div>
+          </div>
+          <div class="row">
+            <div class="status-inline"><strong>Secret header:</strong> <code id="jiraSecretHeader">X-Jira-Webhook-Secret</code></div>
+            <div class="status-inline"><strong>Webhook secret:</strong> <span id="jiraSecretStatus" class="muted">unknown</span></div>
+            <div class="status-inline"><strong>Latest sync:</strong> <span id="jiraLastSync" class="muted">none yet</span></div>
           </div>
           <div id="jiraSettingsHint" class="muted">Create Jira issues directly from incident detail pages once project credentials are configured.</div>
         </section>
