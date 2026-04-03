@@ -220,3 +220,51 @@ def test_slack_thread_is_created_and_reused_for_incident_updates(tmp_path, monke
         assert calls[1]["payload"]["thread_ts"] == "1740000000.000123"
 
     os.environ.pop("SLACK_BOT_TOKEN", None)
+
+
+def test_pagerduty_trigger_and_resolve_reuse_incident_dedup_key(tmp_path, monkeypatch):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_alert_pagerduty.sqlite'}"
+
+    from sqlmodel import Session
+    from src import alerts
+    from src import db as dbmod
+    from src.models import Check, CheckType, Incident, Project
+
+    dbmod.create_db_and_tables()
+
+    calls = []
+
+    def fake_post_json(url, payload, timeout=10):
+        calls.append({"url": url, "payload": payload})
+        return True
+
+    monkeypatch.setattr(alerts, "_post_json", fake_post_json)
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="proj-pd", pagerduty_integration_key="pd-key")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        check = Check(project_id=project.id, name="api", type=CheckType.HTTP, url="https://example.com", alert_pagerduty_enabled=True)
+        session.add(check)
+        session.commit()
+        session.refresh(check)
+
+        incident = Incident(project_id=project.id, check_id=check.id, status="open")
+        session.add(incident)
+        session.commit()
+        session.refresh(incident)
+
+        alerts.notify_down(check, project, reason="timeout", incident=incident, session=session)
+        session.commit()
+        session.refresh(incident)
+
+        assert incident.pagerduty_dedup_key == f"lastping:incident:{project.id}:{incident.id}"
+        assert calls[0]["payload"]["event_action"] == "trigger"
+        assert calls[0]["payload"]["dedup_key"] == incident.pagerduty_dedup_key
+
+        alerts.notify_recovery(check, project, incident=incident, session=session)
+
+        assert calls[1]["payload"]["event_action"] == "resolve"
+        assert calls[1]["payload"]["dedup_key"] == incident.pagerduty_dedup_key

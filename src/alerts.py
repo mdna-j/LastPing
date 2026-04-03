@@ -104,6 +104,16 @@ def _pagerduty_key(project, check=None) -> Optional[str]:
     return getattr(check, "alert_pagerduty_integration_key", None) or getattr(project, "pagerduty_integration_key", None)
 
 
+def _pagerduty_dedup_key(project, check=None, incident: Optional[Incident] = None) -> Optional[str]:
+    if incident is not None and getattr(incident, "pagerduty_dedup_key", None):
+        return incident.pagerduty_dedup_key
+    if incident is not None and getattr(incident, "id", None) is not None:
+        return f"lastping:incident:{getattr(project, 'id', 'na')}:{incident.id}"
+    if check is not None and getattr(check, "id", None) is not None:
+        return f"lastping:check:{getattr(project, 'id', 'na')}:{check.id}"
+    return None
+
+
 def _generic_webhook_url(project, check=None) -> Optional[str]:
     return getattr(check, "alert_generic_webhook_url", None) or getattr(project, "generic_webhook_url", None)
 
@@ -267,6 +277,34 @@ def _remember_incident_slack_thread(
         logger.exception("Failed to persist Slack thread metadata for incident=%s", getattr(incident, "id", None))
 
 
+def _remember_incident_pagerduty_dedup_key(
+    incident: Optional[Incident],
+    *,
+    dedup_key: Optional[str],
+    session: Optional[Session] = None,
+) -> None:
+    if incident is None or not dedup_key:
+        return
+    if getattr(incident, "pagerduty_dedup_key", None) == dedup_key:
+        return
+    incident.pagerduty_dedup_key = dedup_key
+    if session is not None:
+        session.add(incident)
+        return
+    if getattr(incident, "id", None) is None:
+        return
+    try:
+        with Session(ensure_engine()) as update_session:
+            db_incident = update_session.get(Incident, incident.id)
+            if db_incident is None:
+                return
+            db_incident.pagerduty_dedup_key = dedup_key
+            update_session.add(db_incident)
+            update_session.commit()
+    except Exception:
+        logger.exception("Failed to persist PagerDuty dedup key for incident=%s", getattr(incident, "id", None))
+
+
 def _post_slack_message(
     *,
     project,
@@ -351,7 +389,17 @@ def send_sms(message: str, to: Optional[str] = None, project=None) -> bool:
     return False
 
 
-def send_pagerduty_event(routing_key: str, summary: str, severity: str = "critical") -> bool:
+def send_pagerduty_event(
+    routing_key: str,
+    summary: str,
+    severity: str = "critical",
+    *,
+    event_action: str = "trigger",
+    dedup_key: Optional[str] = None,
+    source: str = "lastping",
+    component: Optional[str] = None,
+    custom_details: Optional[dict] = None,
+) -> bool:
     if not routing_key:
         logger.debug("No PagerDuty routing key configured")
         return False
@@ -359,14 +407,20 @@ def send_pagerduty_event(routing_key: str, summary: str, severity: str = "critic
     timestamp = datetime.utcnow().isoformat() + "Z"
     pd_payload = {
         "routing_key": routing_key,
-        "event_action": "trigger",
+        "event_action": event_action,
         "payload": {
             "summary": summary,
             "severity": severity,
-            "source": "lastping",
+            "source": source,
             "timestamp": timestamp,
         },
     }
+    if dedup_key:
+        pd_payload["dedup_key"] = dedup_key
+    if component:
+        pd_payload["payload"]["component"] = component
+    if custom_details:
+        pd_payload["payload"]["custom_details"] = custom_details
     return _post_json("https://events.pagerduty.com/v2/enqueue", pd_payload)
 
 
@@ -477,22 +531,27 @@ def notify_down(check, project, reason: str = None, incident: Optional[Incident]
                 pd_details["project_url"] = project_url
             if check_url:
                 pd_details["check_url"] = check_url
-            timestamp_pd = now_iso
-            pd_summary = summary
-            pd_payload = {
-                "routing_key": pd_key,
-                "event_action": "trigger",
-                "payload": {
-                    "summary": pd_summary,
-                    "severity": "critical",
-                    "source": project.name,
-                    "timestamp": timestamp_pd,
-                    "component": check.name,
-                    "custom_details": pd_details,
-                },
-            }
-            _post_json("https://events.pagerduty.com/v2/enqueue", pd_payload)
-            sent = True
+            dedup_key = _pagerduty_dedup_key(project, check, incident)
+            if incident is not None:
+                _remember_incident_pagerduty_dedup_key(incident, dedup_key=dedup_key, session=session)
+            sent = _track_notification_result(
+                send_pagerduty_event(
+                    pd_key,
+                    summary,
+                    "critical",
+                    event_action="trigger",
+                    dedup_key=dedup_key,
+                    source=project.name,
+                    component=check.name,
+                    custom_details=pd_details,
+                ),
+                project=project,
+                check=check,
+                channel="pagerduty",
+                event="down",
+                target="https://events.pagerduty.com/v2/enqueue",
+                detail="PagerDuty trigger event send failed",
+            ) or sent
 
         # Generic webhook: send structured JSON payload so receivers can process
         gen_url = _generic_webhook_url(project, check)
@@ -760,21 +819,18 @@ def notify_recovery(check, project, incident: Optional[Incident] = None, session
                 pd_details["project_url"] = project_url
             if check_url:
                 pd_details["check_url"] = check_url
-            timestamp_pd = now_iso
-            pd_payload = {
-                "routing_key": pd_key,
-                "event_action": "trigger",
-                "payload": {
-                    "summary": summary,
-                    "severity": "info",
-                    "source": project.name,
-                    "timestamp": timestamp_pd,
-                    "component": check.name,
-                    "custom_details": pd_details,
-                },
-            }
+            dedup_key = _pagerduty_dedup_key(project, check, incident)
             sent = _track_notification_result(
-                _post_json("https://events.pagerduty.com/v2/enqueue", pd_payload),
+                send_pagerduty_event(
+                    pd_key,
+                    summary,
+                    "info",
+                    event_action="resolve",
+                    dedup_key=dedup_key,
+                    source=project.name,
+                    component=check.name,
+                    custom_details=pd_details,
+                ),
                 project=project,
                 check=check,
                 channel="pagerduty",
@@ -876,6 +932,44 @@ def notify_incident_slack_update(
         event=f"incident_{action}",
         target=slack_target,
         detail=f"incident Slack thread update failed for action={action}",
+    )
+
+
+def notify_incident_pagerduty_update(
+    project,
+    incident: Incident,
+    *,
+    event_action: str,
+    summary: str,
+    check=None,
+    session: Optional[Session] = None,
+    severity: str = "critical",
+    custom_details: Optional[dict] = None,
+) -> bool:
+    pd_key = _pagerduty_key(project, check)
+    if not pd_key or not _check_channel_enabled(check, "alert_pagerduty_enabled"):
+        return False
+    dedup_key = _pagerduty_dedup_key(project, check, incident)
+    if not dedup_key:
+        return False
+    _remember_incident_pagerduty_dedup_key(incident, dedup_key=dedup_key, session=session)
+    return _track_notification_result(
+        send_pagerduty_event(
+            pd_key,
+            summary,
+            severity,
+            event_action=event_action,
+            dedup_key=dedup_key,
+            source=getattr(project, "name", "lastping"),
+            component=getattr(check, "name", None),
+            custom_details=custom_details or {},
+        ),
+        project=project,
+        check=check,
+        channel="pagerduty",
+        event=f"incident_{event_action}",
+        target="https://events.pagerduty.com/v2/enqueue",
+        detail=f"incident PagerDuty sync failed for action={event_action}",
     )
 
 

@@ -445,6 +445,7 @@ class Incident(SQLModel, table=True):
     share_token: Optional[str] = None
     slack_thread_ts: Optional[str] = Field(default=None, index=True, description="Slack thread timestamp for threaded incident updates")
     slack_channel_id: Optional[str] = Field(default=None, description="Slack channel used for threaded incident updates")
+    pagerduty_dedup_key: Optional[str] = Field(default=None, index=True, description="PagerDuty dedup key used to sync incident lifecycle")
     # Optional grouping: incidents that are related can share a `group_id`.
     # Pointing to another incident (the group's representative) allows
     # grouping without creating a separate table. This is used by the

@@ -8,7 +8,7 @@ from pydantic import constr, root_validator
 from sqlalchemy import update as sa_update
 from sqlmodel import Session, select
 
-from ..alerts import notify_incident_slack_update
+from ..alerts import notify_incident_pagerduty_update, notify_incident_slack_update
 from ..db import get_session
 from ..deps import (
     get_audit_context,
@@ -118,6 +118,36 @@ def _notify_slack_thread_update(
             check=check,
             session=session,
             share_url=share_url,
+        )
+    except Exception:
+        pass
+
+
+def _notify_pagerduty_ack(
+    session: Session,
+    project: Project,
+    incident: Incident,
+    *,
+    actor: Optional[str],
+) -> None:
+    try:
+        check = session.get(Check, incident.check_id) if getattr(incident, "check_id", None) else None
+        if not getattr(incident, "pagerduty_dedup_key", None):
+            return
+        notify_incident_pagerduty_update(
+            project,
+            incident,
+            event_action="acknowledge",
+            summary=f"Incident #{incident.id} acknowledged in LastPing",
+            check=check,
+            session=session,
+            severity="critical",
+            custom_details={
+                "incident_id": incident.id,
+                "project_id": getattr(project, "id", None),
+                "check_id": getattr(check, "id", None) if check is not None else None,
+                "actor": actor,
+            },
         )
     except Exception:
         pass
@@ -378,6 +408,8 @@ def acknowledge_incident(
             else "Cleared the incident acknowledgement."
         ),
     )
+    if payload.acknowledged:
+        _notify_pagerduty_ack(session, _proj, incident, actor=incident.acknowledged_by)
     return {"incident": _serialize_incident(incident)}
 
 
