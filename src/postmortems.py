@@ -91,6 +91,12 @@ def _audit_title(action: str) -> str:
         "merge_incident": "Incident merged",
         "split_incident": "Incident split",
         "create_share": "Share link created",
+        "pagerduty_ack": "PagerDuty acknowledgement synced",
+        "pagerduty_clear_ack": "PagerDuty acknowledgement cleared",
+        "pagerduty_resolve": "PagerDuty resolution synced",
+        "pagerduty_reopen": "PagerDuty reopen synced",
+        "pagerduty_assign": "PagerDuty assignment synced",
+        "pagerduty_note": "PagerDuty note synced",
     }
     return labels.get(action, action.replace("_", " ").title())
 
