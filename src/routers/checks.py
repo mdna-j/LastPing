@@ -97,6 +97,7 @@ class CheckCreate(StrictBaseModel):
     alert_sms_to: Optional[constr(regex=r"^\\+?[0-9]{7,20}$")] = None
     alert_oncall_email: Optional[EmailStr] = None
     alert_slack_webhook_url: Optional[AnyHttpUrl] = None
+    alert_slack_channel: Optional[constr(max_length=120)] = None
     alert_discord_webhook_url: Optional[AnyHttpUrl] = None
     alert_pagerduty_integration_key: Optional[constr(max_length=128)] = None
     alert_generic_webhook_url: Optional[AnyHttpUrl] = None
@@ -223,6 +224,7 @@ class CheckRead(BaseModel):
     alert_sms_to: Optional[str] = None
     alert_oncall_email: Optional[str] = None
     alert_slack_webhook_url: Optional[str] = None
+    alert_slack_channel: Optional[str] = None
     alert_discord_webhook_url: Optional[str] = None
     alert_pagerduty_integration_key: Optional[str] = None
     alert_generic_webhook_url: Optional[str] = None
@@ -316,6 +318,7 @@ def create_check(project_id: int = Path(..., ge=1), payload: CheckCreate = Body(
         alert_sms_to=payload.alert_sms_to,
         alert_oncall_email=payload.alert_oncall_email,
         alert_slack_webhook_url=payload.alert_slack_webhook_url,
+        alert_slack_channel=payload.alert_slack_channel,
         alert_discord_webhook_url=payload.alert_discord_webhook_url,
         alert_pagerduty_integration_key=payload.alert_pagerduty_integration_key,
         alert_generic_webhook_url=payload.alert_generic_webhook_url,
@@ -363,6 +366,7 @@ class CheckUpdate(StrictBaseModel):
     alert_sms_to: Optional[constr(regex=r"^\\+?[0-9]{7,20}$")] = None
     alert_oncall_email: Optional[EmailStr] = None
     alert_slack_webhook_url: Optional[AnyHttpUrl] = None
+    alert_slack_channel: Optional[constr(max_length=120)] = None
     alert_discord_webhook_url: Optional[AnyHttpUrl] = None
     alert_pagerduty_integration_key: Optional[constr(max_length=128)] = None
     alert_generic_webhook_url: Optional[AnyHttpUrl] = None
@@ -443,6 +447,7 @@ def update_check(project_id: int = Path(..., ge=1), check_id: int = Path(..., ge
         "alert_sms_to": check.alert_sms_to,
         "alert_oncall_email": check.alert_oncall_email,
         "alert_slack_webhook_url": check.alert_slack_webhook_url,
+        "alert_slack_channel": check.alert_slack_channel,
         "alert_discord_webhook_url": check.alert_discord_webhook_url,
         "alert_pagerduty_integration_key": check.alert_pagerduty_integration_key,
         "alert_generic_webhook_url": check.alert_generic_webhook_url,
@@ -505,6 +510,8 @@ def update_check(project_id: int = Path(..., ge=1), check_id: int = Path(..., ge
         check.alert_oncall_email = payload.alert_oncall_email
     if payload.alert_slack_webhook_url is not None:
         check.alert_slack_webhook_url = payload.alert_slack_webhook_url
+    if payload.alert_slack_channel is not None:
+        check.alert_slack_channel = payload.alert_slack_channel
     if payload.alert_discord_webhook_url is not None:
         check.alert_discord_webhook_url = payload.alert_discord_webhook_url
     if payload.alert_pagerduty_integration_key is not None:
@@ -547,6 +554,7 @@ def update_check(project_id: int = Path(..., ge=1), check_id: int = Path(..., ge
             "alert_sms_to": check.alert_sms_to,
             "alert_oncall_email": check.alert_oncall_email,
             "alert_slack_webhook_url": check.alert_slack_webhook_url,
+            "alert_slack_channel": check.alert_slack_channel,
             "alert_discord_webhook_url": check.alert_discord_webhook_url,
             "alert_pagerduty_integration_key": check.alert_pagerduty_integration_key,
             "alert_generic_webhook_url": check.alert_generic_webhook_url,

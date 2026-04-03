@@ -28,6 +28,7 @@ class Project(SQLModel, table=True):
     # per-project webhook configuration (overrides global env vars)
     discord_webhook_url: Optional[str] = None
     slack_webhook_url: Optional[str] = None
+    slack_channel: Optional[str] = None
     pagerduty_integration_key: Optional[str] = None
     generic_webhook_url: Optional[str] = None
 
@@ -102,6 +103,7 @@ class Check(SQLModel, table=True):
     alert_sms_to: Optional[str] = None
     alert_oncall_email: Optional[str] = None
     alert_slack_webhook_url: Optional[str] = None
+    alert_slack_channel: Optional[str] = None
     alert_discord_webhook_url: Optional[str] = None
     alert_pagerduty_integration_key: Optional[str] = None
     alert_generic_webhook_url: Optional[str] = None
@@ -441,6 +443,8 @@ class Incident(SQLModel, table=True):
     resolved_at: Optional[datetime] = None
     status: str = Field(default="open")
     share_token: Optional[str] = None
+    slack_thread_ts: Optional[str] = Field(default=None, index=True, description="Slack thread timestamp for threaded incident updates")
+    slack_channel_id: Optional[str] = Field(default=None, description="Slack channel used for threaded incident updates")
     # Optional grouping: incidents that are related can share a `group_id`.
     # Pointing to another incident (the group's representative) allows
     # grouping without creating a separate table. This is used by the

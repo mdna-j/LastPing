@@ -291,6 +291,45 @@ def test_oncall_patch_routing_rejects_enabled_channel_without_destination(tmp_pa
     assert "Slack alerts are enabled" in resp.text
 
 
+def test_oncall_patch_routing_accepts_slack_channel_without_webhook(tmp_path):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'oncall_slack_channel.db'}"
+    os.environ["ADMIN_TOKEN"] = "adminkey"
+
+    from sqlmodel import Session
+    from src import db as dbmod
+    from src.main import app
+    from src.models import Check, CheckStatus, CheckType, Project
+
+    dbmod.create_db_and_tables()
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="routingproj-channel")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        check = Check(project_id=project.id, name="api", type=CheckType.HTTP, status=CheckStatus.UP)
+        session.add(check)
+        session.commit()
+        session.refresh(check)
+        project_id = project.id
+        check_id = check.id
+
+    client = TestClient(app)
+    admin_headers = {"X-ADMIN-TOKEN": "adminkey"}
+    resp = client.patch(
+        f"/projects/{project_id}/oncall/checks/{check_id}/routing",
+        json={"alert_slack_enabled": True, "alert_slack_channel": "COPS"},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 200, resp.text
+
+    with Session(dbmod.engine) as session:
+        chk = session.get(Check, check_id)
+        assert chk.alert_slack_enabled is True
+        assert chk.alert_slack_channel == "COPS"
+
+
 def test_oncall_patch_routing_rejects_oncall_enable_without_escalation_steps(tmp_path):
     os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'oncall_no_steps.db'}"
     os.environ["ADMIN_TOKEN"] = "adminkey"

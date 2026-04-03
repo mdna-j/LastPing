@@ -21,7 +21,7 @@ from datetime import datetime
 from sqlmodel import Session, select
 
 from .db import ensure_engine
-from .models import AuditLog, StatusSubscription
+from .models import AuditLog, Incident, StatusSubscription
 
 logger = logging.getLogger("lastping.alerts")
 
@@ -85,6 +85,19 @@ def _discord_url(project, check=None) -> Optional[str]:
 
 def _slack_url(project, check=None) -> Optional[str]:
     return getattr(check, "alert_slack_webhook_url", None) or getattr(project, "slack_webhook_url", None)
+
+
+def _slack_channel(project, check=None, incident=None) -> Optional[str]:
+    return (
+        getattr(incident, "slack_channel_id", None)
+        or getattr(check, "alert_slack_channel", None)
+        or getattr(project, "slack_channel", None)
+        or os.environ.get("SLACK_ALERT_CHANNEL")
+    )
+
+
+def _slack_bot_token() -> Optional[str]:
+    return os.environ.get("SLACK_BOT_TOKEN")
 
 
 def _pagerduty_key(project, check=None) -> Optional[str]:
@@ -163,25 +176,140 @@ def _track_notification_result(
     return False
 
 
-def _post_json(url: str, payload: dict, timeout: int = 10) -> bool:
+def _post_json_with_response(url: str, payload: dict, timeout: int = 10, headers: Optional[dict] = None) -> Optional[dict]:
     if not url:
         logger.debug("No webhook URL configured")
-        return False
+        return None
     data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+    req_headers = {"Content-Type": "application/json"}
+    if headers:
+        req_headers.update(headers)
+    req = urllib.request.Request(url, data=data, headers=req_headers)
     attempts = 3
     backoff = 0.5
+    last_response = None
     for i in range(attempts):
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 logger.debug("Webhook response code: %s", resp.getcode())
-            return True
+                body = resp.read()
+                if not body:
+                    return {"ok": True, "status": resp.getcode()}
+                try:
+                    parsed = json.loads(body.decode("utf-8"))
+                    if "ok" not in parsed:
+                        parsed["ok"] = 200 <= resp.getcode() < 300
+                    parsed.setdefault("status", resp.getcode())
+                    return parsed
+                except Exception:
+                    return {"ok": True, "status": resp.getcode(), "body": body.decode("utf-8", "replace")}
         except urllib.error.HTTPError as he:
             logger.exception("HTTP error sending webhook (attempt %s): %s", i + 1, he)
+            try:
+                body = he.read()
+                if body:
+                    try:
+                        parsed = json.loads(body.decode("utf-8"))
+                        parsed.setdefault("ok", False)
+                        parsed.setdefault("status", he.code)
+                        last_response = parsed
+                    except Exception:
+                        last_response = {"ok": False, "status": he.code, "body": body.decode("utf-8", "replace")}
+            except Exception:
+                pass
         except Exception as e:
             logger.exception("Error sending webhook (attempt %s): %s", i + 1, e)
         time.sleep(backoff)
         backoff *= 2
+    return last_response
+
+
+def _post_json(url: str, payload: dict, timeout: int = 10) -> bool:
+    response = _post_json_with_response(url, payload, timeout=timeout)
+    return bool(response and response.get("ok"))
+
+
+def _remember_incident_slack_thread(
+    incident: Optional[Incident],
+    *,
+    thread_ts: Optional[str],
+    channel_id: Optional[str],
+    session: Optional[Session] = None,
+) -> None:
+    if incident is None:
+        return
+    changed = False
+    if thread_ts and getattr(incident, "slack_thread_ts", None) != thread_ts:
+        incident.slack_thread_ts = thread_ts
+        changed = True
+    if channel_id and getattr(incident, "slack_channel_id", None) != channel_id:
+        incident.slack_channel_id = channel_id
+        changed = True
+    if not changed:
+        return
+    if session is not None:
+        session.add(incident)
+        return
+    if getattr(incident, "id", None) is None:
+        return
+    try:
+        with Session(ensure_engine()) as update_session:
+            db_incident = update_session.get(Incident, incident.id)
+            if db_incident is None:
+                return
+            if thread_ts:
+                db_incident.slack_thread_ts = thread_ts
+            if channel_id:
+                db_incident.slack_channel_id = channel_id
+            update_session.add(db_incident)
+            update_session.commit()
+    except Exception:
+        logger.exception("Failed to persist Slack thread metadata for incident=%s", getattr(incident, "id", None))
+
+
+def _post_slack_message(
+    *,
+    project,
+    check=None,
+    incident: Optional[Incident] = None,
+    session: Optional[Session] = None,
+    payload: dict,
+    fallback_text: str,
+) -> tuple[bool, Optional[str]]:
+    token = _slack_bot_token()
+    channel = _slack_channel(project, check, incident)
+    if token and channel:
+        api_payload = dict(payload)
+        api_payload["channel"] = channel
+        api_payload.setdefault("text", fallback_text)
+        thread_ts = getattr(incident, "slack_thread_ts", None) if incident is not None else None
+        if thread_ts:
+            api_payload["thread_ts"] = thread_ts
+        response = _post_json_with_response(
+            "https://slack.com/api/chat.postMessage",
+            api_payload,
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        ok = bool(response and response.get("ok"))
+        if ok and incident is not None:
+            _remember_incident_slack_thread(
+                incident,
+                thread_ts=response.get("ts") or thread_ts,
+                channel_id=response.get("channel") or channel,
+                session=session,
+            )
+        return ok, (response or {}).get("channel") or channel
+
+    slack_url = _slack_url(project, check)
+    if slack_url:
+        hook_payload = dict(payload)
+        hook_payload.setdefault("text", fallback_text)
+        thread_ts = getattr(incident, "slack_thread_ts", None) if incident is not None else None
+        if thread_ts:
+            hook_payload["thread_ts"] = thread_ts
+        return _post_json(slack_url, hook_payload), slack_url
+
+    return send_slack_message(fallback_text), os.environ.get("SLACK_WEBHOOK_URL")
     return False
 
 
@@ -242,7 +370,7 @@ def send_pagerduty_event(routing_key: str, summary: str, severity: str = "critic
     return _post_json("https://events.pagerduty.com/v2/enqueue", pd_payload)
 
 
-def notify_down(check, project, reason: str = None) -> None:
+def notify_down(check, project, reason: str = None, incident: Optional[Incident] = None, session: Optional[Session] = None) -> None:
     try:
         reason_text = f"Reason: {reason}" if reason else None
         timestamp = None
@@ -301,7 +429,7 @@ def notify_down(check, project, reason: str = None) -> None:
 
         # Slack: send Block Kit payload for structured messages
         slack_url = _slack_url(project, check)
-        if slack_url and _check_channel_enabled(check, "alert_slack_enabled"):
+        if (slack_url or _slack_channel(project, check, incident)) and _check_channel_enabled(check, "alert_slack_enabled"):
             # Slack Block Kit with attachments for color and optional action
             blocks = [
                 {"type": "section", "text": {"type": "mrkdwn", "text": f":rotating_light: *{summary}*"}},
@@ -322,13 +450,21 @@ def notify_down(check, project, reason: str = None) -> None:
                 if check_url:
                     action_elements.append({"type": "button", "text": {"type": "plain_text", "text": "Open Check"}, "url": check_url})
                 attachment["actions"] = action_elements
+            slack_ok, slack_target = _post_slack_message(
+                project=project,
+                check=check,
+                incident=incident,
+                session=session,
+                payload={"attachments": [attachment]},
+                fallback_text=summary,
+            )
             sent = _track_notification_result(
-                _post_json(slack_url, {"attachments": [attachment]}),
+                slack_ok,
                 project=project,
                 check=check,
                 channel="slack",
                 event="down",
-                target=slack_url,
+                target=slack_target,
                 detail="project Slack webhook send failed",
             ) or sent
 
@@ -547,7 +683,7 @@ def notify_degraded(check, project, reason: str = None) -> None:
         logger.exception("Failed to send DEGRADED notification")
 
 
-def notify_recovery(check, project) -> None:
+def notify_recovery(check, project, incident: Optional[Incident] = None, session: Optional[Session] = None) -> None:
     try:
         timestamp = None
         try:
@@ -587,7 +723,7 @@ def notify_recovery(check, project) -> None:
                 detail="project Discord webhook send failed",
             ) or sent
         slack_url = _slack_url(project, check)
-        if slack_url and _check_channel_enabled(check, "alert_slack_enabled"):
+        if (slack_url or _slack_channel(project, check, incident)) and _check_channel_enabled(check, "alert_slack_enabled"):
             blocks = [
                 {"type": "section", "text": {"type": "mrkdwn", "text": f":white_check_mark: *{summary}*"}},
                 {"type": "section", "fields": [{"type": "mrkdwn", "text": f"*Last ping:* {timestamp or 'n/a'}"}]},
@@ -600,13 +736,21 @@ def notify_recovery(check, project) -> None:
                 if check_url:
                     actions.append({"type": "button", "text": {"type": "plain_text", "text": "Open Check"}, "url": check_url})
                 attachment["actions"] = actions
+            slack_ok, slack_target = _post_slack_message(
+                project=project,
+                check=check,
+                incident=incident,
+                session=session,
+                payload={"attachments": [attachment]},
+                fallback_text=summary,
+            )
             sent = _track_notification_result(
-                _post_json(slack_url, {"attachments": [attachment]}),
+                slack_ok,
                 project=project,
                 check=check,
                 channel="slack",
                 event="recovery",
-                target=slack_url,
+                target=slack_target,
                 detail="project Slack webhook send failed",
             ) or sent
         pd_key = _pagerduty_key(project, check)
@@ -678,6 +822,61 @@ def notify_recovery(check, project) -> None:
                 )
     except Exception:
         logger.exception("Failed to send recovery notification")
+
+
+def notify_incident_slack_update(
+    project,
+    incident: Incident,
+    *,
+    action: str,
+    body: str,
+    check=None,
+    session: Optional[Session] = None,
+    share_url: Optional[str] = None,
+) -> bool:
+    if incident is None or not getattr(incident, "slack_thread_ts", None):
+        return False
+    if not _check_channel_enabled(check, "alert_slack_enabled"):
+        return False
+    summary = f"Incident #{incident.id} update"
+    blocks = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": f":speech_balloon: *{summary}*"}},
+        {"type": "section", "fields": [
+            {"type": "mrkdwn", "text": f"*Action:* {action}"},
+            {"type": "mrkdwn", "text": f"*Status:* {getattr(incident, 'status', 'open')}"},
+        ]},
+        {"type": "section", "text": {"type": "mrkdwn", "text": body}},
+    ]
+    if share_url:
+        blocks.append(
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Open Shared Incident"},
+                        "url": share_url,
+                    }
+                ],
+            }
+        )
+    slack_ok, slack_target = _post_slack_message(
+        project=project,
+        check=check,
+        incident=incident,
+        session=session,
+        payload={"blocks": blocks},
+        fallback_text=f"{summary}: {body}",
+    )
+    return _track_notification_result(
+        slack_ok,
+        project=project,
+        check=check,
+        channel="slack",
+        event=f"incident_{action}",
+        target=slack_target,
+        detail=f"incident Slack thread update failed for action={action}",
+    )
 
 
 def send_email(subject: str, body: str, to: Optional[str] = None) -> bool:

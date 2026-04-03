@@ -299,6 +299,7 @@ def revoke_project_token(
 class WebhookUpdate(StrictBaseModel):
     discord_webhook_url: Optional[AnyHttpUrl] = None
     slack_webhook_url: Optional[AnyHttpUrl] = None
+    slack_channel: Optional[constr(max_length=120)] = None
     pagerduty_integration_key: Optional[constr(max_length=128)] = None
     generic_webhook_url: Optional[AnyHttpUrl] = None
 
@@ -336,6 +337,7 @@ def get_project_webhooks(project_id: int = Path(..., ge=1), session: Session = D
     return WebhookUpdate(
         discord_webhook_url=project.discord_webhook_url,
         slack_webhook_url=project.slack_webhook_url,
+        slack_channel=project.slack_channel,
         pagerduty_integration_key=project.pagerduty_integration_key,
         generic_webhook_url=project.generic_webhook_url,
     )
@@ -354,11 +356,13 @@ def update_project_webhooks(project_id: int = Path(..., ge=1), payload: WebhookU
     before = {
         "discord_webhook_url": project.discord_webhook_url,
         "slack_webhook_url": project.slack_webhook_url,
+        "slack_channel": project.slack_channel,
         "pagerduty_integration_key": project.pagerduty_integration_key,
         "generic_webhook_url": project.generic_webhook_url,
     }
     project.discord_webhook_url = payload.discord_webhook_url
     project.slack_webhook_url = payload.slack_webhook_url
+    project.slack_channel = payload.slack_channel
     project.pagerduty_integration_key = payload.pagerduty_integration_key
     project.generic_webhook_url = payload.generic_webhook_url
     session.add(project)
@@ -369,6 +373,7 @@ def update_project_webhooks(project_id: int = Path(..., ge=1), payload: WebhookU
         after = {
             "discord_webhook_url": project.discord_webhook_url,
             "slack_webhook_url": project.slack_webhook_url,
+            "slack_channel": project.slack_channel,
             "pagerduty_integration_key": project.pagerduty_integration_key,
             "generic_webhook_url": project.generic_webhook_url,
         }

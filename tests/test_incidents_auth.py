@@ -259,6 +259,102 @@ def test_incident_lifecycle_management_with_owner_token_and_viewer_read_access(t
     assert len(detail_payload["notes"]) == 1
     assert detail_payload["notes"][0]["body"] == "Investigating heartbeat backlog."
 
+
+def test_incident_workflow_actions_emit_slack_thread_updates(tmp_path, monkeypatch):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_incident_slack_updates.sqlite'}"
+
+    from secrets import token_urlsafe
+
+    from sqlmodel import Session
+    from src import db as dbmod
+    from src.main import app
+    from src.models import Check, CheckType, Incident, Project, ProjectMembership, User, UserToken
+    from src.security import hash_password
+
+    calls = []
+
+    def fake_notify(project, incident, *, action, body, check=None, session=None, share_url=None):
+        calls.append(
+            {
+                "project_id": project.id,
+                "incident_id": incident.id,
+                "action": action,
+                "body": body,
+                "share_url": share_url,
+            }
+        )
+        return True
+
+    monkeypatch.setattr("src.routers.incidents.notify_incident_slack_update", fake_notify)
+
+    dbmod.create_db_and_tables()
+    client = TestClient(app)
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="incident-slack-project")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        check = Check(project_id=project.id, name="incident-check", type=CheckType.HEARTBEAT)
+        session.add(check)
+        session.commit()
+        session.refresh(check)
+
+        incident = Incident(
+            project_id=project.id,
+            check_id=check.id,
+            status="open",
+            slack_thread_ts="1740000000.000123",
+            slack_channel_id="COPS",
+        )
+        session.add(incident)
+        session.commit()
+        session.refresh(incident)
+
+        owner = User(email="owner2@example.com", hashed_password=hash_password("pw"))
+        session.add(owner)
+        session.commit()
+        session.refresh(owner)
+        session.add(ProjectMembership(user_id=owner.id, project_id=project.id, role="owner"))
+
+        owner_token = token_urlsafe(16)
+        session.add(UserToken(user_id=owner.id, token=owner_token, expires_at=datetime.utcnow() + timedelta(hours=1)))
+        session.commit()
+
+        project_id = project.id
+        incident_id = incident.id
+
+    owner_headers = {"Authorization": f"Bearer {owner_token}"}
+
+    share = client.post(f"/projects/{project_id}/incidents/{incident_id}/share", headers=owner_headers)
+    assert share.status_code == 200
+
+    assign = client.post(
+        f"/projects/{project_id}/incidents/{incident_id}/assign",
+        json={"owner": "alice"},
+        headers=owner_headers,
+    )
+    assert assign.status_code == 200
+
+    ack = client.post(
+        f"/projects/{project_id}/incidents/{incident_id}/ack",
+        json={"acknowledged": True},
+        headers=owner_headers,
+    )
+    assert ack.status_code == 200
+
+    note = client.post(
+        f"/projects/{project_id}/incidents/{incident_id}/notes",
+        json={"body": "Watching Slack thread."},
+        headers=owner_headers,
+    )
+    assert note.status_code == 200
+
+    actions = [call["action"] for call in calls]
+    assert actions == ["share", "assign", "ack", "note"]
+    assert any(call["share_url"] for call in calls if call["action"] == "share")
+
     clear_ack = client.post(
         f"/projects/{project_id}/incidents/{incident_id}/ack",
         json={"acknowledged": False},

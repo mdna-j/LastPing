@@ -156,8 +156,9 @@ def _validate_check_routing_update(
 
     slack_enabled = check.alert_slack_enabled is True
     slack_url = _clean_text(check.alert_slack_webhook_url) or _clean_text(project.slack_webhook_url)
-    if touched("alert_slack_enabled", "alert_slack_webhook_url") and slack_enabled and not slack_url:
-        errors.append("Slack alerts are enabled but no Slack webhook URL is configured.")
+    slack_channel = _clean_text(getattr(check, "alert_slack_channel", None)) or _clean_text(getattr(project, "slack_channel", None))
+    if touched("alert_slack_enabled", "alert_slack_webhook_url", "alert_slack_channel") and slack_enabled and not (slack_url or slack_channel):
+        errors.append("Slack alerts are enabled but no Slack webhook URL or Slack channel is configured.")
 
     discord_enabled = check.alert_discord_enabled is True
     discord_url = _clean_text(check.alert_discord_webhook_url) or _clean_text(project.discord_webhook_url)
@@ -177,7 +178,7 @@ def _validate_check_routing_update(
     if touched("escalation_after_minutes") and check.escalation_after_minutes is not None:
         escalation_channel_ready = any(
             [
-                (_enabled_with_fallback(check.alert_slack_enabled, True) and bool(slack_url)),
+                (_enabled_with_fallback(check.alert_slack_enabled, True) and bool(slack_url or slack_channel)),
                 (_enabled_with_fallback(check.alert_discord_enabled, True) and bool(discord_url)),
                 (_enabled_with_fallback(check.alert_pagerduty_enabled, True) and bool(pagerduty_key)),
                 (_enabled_with_fallback(check.alert_webhook_enabled, True) and bool(generic_webhook)),
@@ -288,6 +289,7 @@ class CheckRoutingPatch(StrictBaseModel):
     alert_sms_to: Optional[constr(regex=r"^\\+?[0-9]{7,20}$")] = None
     alert_oncall_email: Optional[EmailStr] = None
     alert_slack_webhook_url: Optional[AnyHttpUrl] = None
+    alert_slack_channel: Optional[constr(max_length=120)] = None
     alert_discord_webhook_url: Optional[AnyHttpUrl] = None
     alert_pagerduty_integration_key: Optional[constr(max_length=128)] = None
     alert_generic_webhook_url: Optional[AnyHttpUrl] = None
@@ -735,6 +737,7 @@ def patch_check_routing(
         "alert_sms_to",
         "alert_oncall_email",
         "alert_slack_webhook_url",
+        "alert_slack_channel",
         "alert_discord_webhook_url",
         "alert_pagerduty_integration_key",
         "alert_generic_webhook_url",

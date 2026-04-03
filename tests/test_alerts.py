@@ -165,3 +165,58 @@ def test_notification_failures_are_persisted_to_audit_log(tmp_path, monkeypatch)
         assert details["channel"] == "discord"
         assert details["event"] == "down"
         assert details["project_id"] == project_payload.id
+
+
+def test_slack_thread_is_created_and_reused_for_incident_updates(tmp_path, monkeypatch):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_alert_slack_thread.sqlite'}"
+    os.environ["SLACK_BOT_TOKEN"] = "xoxb-test"
+    os.environ.pop("SLACK_ALERT_CHANNEL", None)
+
+    from sqlmodel import Session
+    from src import alerts
+    from src import db as dbmod
+    from src.models import Check, CheckType, Incident, Project
+
+    dbmod.create_db_and_tables()
+
+    with Session(dbmod.engine) as session:
+        project = Project(name="proj-slack", slack_channel="COPS")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        check = Check(project_id=project.id, name="api", type=CheckType.HTTP, url="https://example.com", alert_slack_enabled=True)
+        session.add(check)
+        session.commit()
+        session.refresh(check)
+
+        incident = Incident(project_id=project.id, check_id=check.id, status="open")
+        session.add(incident)
+        session.commit()
+        session.refresh(incident)
+
+        calls = []
+
+        def fake_post_json_with_response(url, payload, timeout=10, headers=None):
+            calls.append({"url": url, "payload": payload, "headers": headers})
+            if "thread_ts" in payload:
+                return {"ok": True, "ts": "1740000000.000999", "channel": payload["channel"]}
+            return {"ok": True, "ts": "1740000000.000123", "channel": payload["channel"]}
+
+        monkeypatch.setattr(alerts, "_post_json_with_response", fake_post_json_with_response)
+
+        alerts.notify_down(check, project, reason="timeout", incident=incident, session=session)
+        session.commit()
+        session.refresh(incident)
+        assert incident.slack_thread_ts == "1740000000.000123"
+        assert incident.slack_channel_id == "COPS"
+
+        alerts.notify_recovery(check, project, incident=incident, session=session)
+        session.commit()
+
+        assert len(calls) == 2
+        assert calls[0]["url"] == "https://slack.com/api/chat.postMessage"
+        assert "thread_ts" not in calls[0]["payload"]
+        assert calls[1]["payload"]["thread_ts"] == "1740000000.000123"
+
+    os.environ.pop("SLACK_BOT_TOKEN", None)

@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -7,6 +8,7 @@ from pydantic import constr, root_validator
 from sqlalchemy import update as sa_update
 from sqlmodel import Session, select
 
+from ..alerts import notify_incident_slack_update
 from ..db import get_session
 from ..deps import (
     get_audit_context,
@@ -14,7 +16,7 @@ from ..deps import (
     require_admin_or_owner,
     require_project_access,
 )
-from ..models import AuditLog, Event, Incident, IncidentNote, Project
+from ..models import AuditLog, Check, Event, Incident, IncidentNote, Project
 from ..postmortems import (
     build_incident_timeline,
     render_incident_postmortem_markdown,
@@ -92,6 +94,33 @@ def _audit(
         )
     )
     return actor
+
+
+def _notify_slack_thread_update(
+    session: Session,
+    project: Project,
+    incident: Incident,
+    *,
+    action: str,
+    body: str,
+) -> None:
+    try:
+        check = session.get(Check, incident.check_id) if getattr(incident, "check_id", None) else None
+        share_url = None
+        if incident.share_token:
+            base_url = os.environ.get("BASE_URL", "").rstrip("/")
+            share_url = f"{base_url}/ui/incidents/public/{incident.share_token}" if base_url else f"/ui/incidents/public/{incident.share_token}"
+        notify_incident_slack_update(
+            project,
+            incident,
+            action=action,
+            body=body,
+            check=check,
+            session=session,
+            share_url=share_url,
+        )
+    except Exception:
+        pass
 
 
 @router.get("/incidents")
@@ -254,6 +283,13 @@ def create_share(
             f"share_token_created={bool(incident.share_token)}",
         )
         session.commit()
+        _notify_slack_thread_update(
+            session,
+            _proj,
+            incident,
+            action="share",
+            body="Created a public share link for this incident.",
+        )
     return {"share_token": incident.share_token}
 
 
@@ -287,6 +323,13 @@ def assign_incident(
     )
     session.commit()
     session.refresh(incident)
+    _notify_slack_thread_update(
+        session,
+        _proj,
+        incident,
+        action="assign",
+        body=f"Assigned incident owner to `{incident.owner or 'unassigned'}`.",
+    )
     return {"incident": _serialize_incident(incident)}
 
 
@@ -324,6 +367,17 @@ def acknowledge_incident(
     session.add(incident)
     session.commit()
     session.refresh(incident)
+    _notify_slack_thread_update(
+        session,
+        _proj,
+        incident,
+        action="ack" if payload.acknowledged else "clear_ack",
+        body=(
+            f"Acknowledged by `{incident.acknowledged_by}`."
+            if payload.acknowledged
+            else "Cleared the incident acknowledgement."
+        ),
+    )
     return {"incident": _serialize_incident(incident)}
 
 
@@ -375,6 +429,17 @@ def silence_incident(
     session.add(incident)
     session.commit()
     session.refresh(incident)
+    _notify_slack_thread_update(
+        session,
+        _proj,
+        incident,
+        action="silence" if not payload.clear else "clear_silence",
+        body=(
+            f"Silenced notifications until `{incident.silenced_until.isoformat()}`."
+            if incident.silenced_until
+            else "Cleared the incident silence window."
+        ),
+    )
     return {"incident": _serialize_incident(incident)}
 
 
@@ -412,6 +477,13 @@ def add_incident_note(
     session.add(note)
     session.commit()
     session.refresh(note)
+    _notify_slack_thread_update(
+        session,
+        _proj,
+        incident,
+        action="note",
+        body=f"*{note.author or 'operator'}* added a note:\n>{note.body}",
+    )
     return {"note": _serialize_note(note)}
 
 

@@ -76,6 +76,24 @@ def _uptime_snapshot_refresh_seconds() -> int:
     return max(60, int(os.environ.get("UPTIME_SNAPSHOT_REFRESH_SECONDS", "3600")))
 
 
+def _notify_down_compat(check: Check, project: Project, *, reason: Optional[str], incident: Optional[Incident], session: Session):
+    try:
+        return notify_down(check, project, reason=reason, incident=incident, session=session)
+    except TypeError as exc:
+        if "unexpected keyword argument" not in str(exc):
+            raise
+        return notify_down(check, project, reason=reason)
+
+
+def _notify_recovery_compat(check: Check, project: Project, *, incident: Optional[Incident], session: Session):
+    try:
+        return notify_recovery(check, project, incident=incident, session=session)
+    except TypeError as exc:
+        if "unexpected keyword argument" not in str(exc):
+            raise
+        return notify_recovery(check, project)
+
+
 def _as_utc_naive(value: datetime) -> datetime:
     """Normalize datetime to UTC-naive for safe comparisons across DB drivers."""
     if value.tzinfo is None:
@@ -2882,7 +2900,7 @@ def scan_checks_once(session: Session):
                                 session.add(check)
                                 session.commit()
                                 try:
-                                    ok = notify_down(check, project, reason="missed heartbeat")
+                                    ok = _notify_down_compat(check, project, reason="missed heartbeat", incident=open_inc, session=session)
                                     check.last_alerted_at = now
                                     check.last_alert_type = EventType.DOWN
                                     session.add(check)
@@ -2941,7 +2959,7 @@ def scan_checks_once(session: Session):
                                 session.add(check)
                                 session.commit()
                                 try:
-                                    notify_down(check, project, reason="still down (missed heartbeat)")
+                                    _notify_down_compat(check, project, reason="still down (missed heartbeat)", incident=open_inc, session=session)
                                     check.last_alerted_at = now
                                     check.last_alert_type = EventType.DOWN
                                     session.add(check)
@@ -3004,7 +3022,7 @@ def scan_checks_once(session: Session):
                             session.add(check)
                             session.commit()
                             try:
-                                notify_recovery(check, project)
+                                _notify_recovery_compat(check, project, incident=open_inc, session=session)
                                 check.last_alerted_at = now
                                 check.last_alert_type = EventType.UP
                                 session.add(check)
@@ -3220,7 +3238,7 @@ def scan_checks_once(session: Session):
                                 session.add(check)
                                 session.commit()
                                 try:
-                                    notify_recovery(check, project)
+                                    _notify_recovery_compat(check, project, incident=open_inc, session=session)
                                     check.last_alerted_at = now
                                     check.last_alert_type = EventType.UP
                                     session.add(check)
@@ -3329,7 +3347,7 @@ def scan_checks_once(session: Session):
                                     session.add(check)
                                     session.commit()
                                     try:
-                                        notify_down(check, project, reason=reason)
+                                        _notify_down_compat(check, project, reason=reason, incident=open_inc, session=session)
                                         check.last_alerted_at = now
                                         check.last_alert_type = event_type
                                         session.add(check)
@@ -3382,7 +3400,7 @@ def scan_checks_once(session: Session):
                                     session.add(check)
                                     session.commit()
                                     try:
-                                        notify_down(check, project, reason="still down")
+                                        _notify_down_compat(check, project, reason="still down", incident=open_inc, session=session)
                                         check.last_alerted_at = now
                                         check.last_alert_type = event_type
                                         session.add(check)
