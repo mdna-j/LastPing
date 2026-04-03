@@ -7,10 +7,59 @@ function headersSettings(){
   return headers;
 }
 
+function escapeHtml(value){
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function formatPagerdutySync(settings){
   if(!settings || !settings.latest_sync_action) return "none yet";
   const ts = settings.latest_sync_at ? new Date(settings.latest_sync_at).toLocaleString() : "unknown time";
   return `${settings.latest_sync_action} at ${ts}`;
+}
+
+function renderNotificationFailures(rows){
+  const root = document.getElementById("notificationFailures");
+  if(!root) return;
+  if(!Array.isArray(rows) || !rows.length){
+    root.innerHTML = '<div class="muted">No recent failed deliveries.</div>';
+    return;
+  }
+  root.innerHTML = `
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>When</th>
+            <th>Channel</th>
+            <th>Event</th>
+            <th>Target</th>
+            <th>Status</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map((row)=> `
+            <tr>
+              <td>${escapeHtml(new Date(row.created_at).toLocaleString())}</td>
+              <td>${escapeHtml(row.channel)}</td>
+              <td>${escapeHtml(row.event)}</td>
+              <td title="${escapeHtml(row.target || "")}">${escapeHtml(row.target || "n/a")}</td>
+              <td>${escapeHtml(row.last_retry_action ? `${row.last_retry_action} @ ${new Date(row.last_retry_at).toLocaleString()}` : row.detail || "failed")}</td>
+              <td>${row.retryable ? `<button class="btn btn-secondary notification-retry-btn" data-failure-id="${row.id}">Retry</button>` : '<span class="muted">Not retryable</span>'}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+  root.querySelectorAll(".notification-retry-btn").forEach((btn)=>{
+    btn.addEventListener("click", ()=> retryNotificationFailure(btn.getAttribute("data-failure-id")));
+  });
 }
 
 function renderSettingsCards(checks, health, slo, alerts, pagerduty){
@@ -51,7 +100,7 @@ async function loadSettings(){
   const headers = headersSettings();
 
   try{
-    const [checksRes, sloRes, alertRes, pagerdutyRes] = await Promise.all([
+    const [checksRes, sloRes, alertRes, pagerdutyRes, failureRes] = await Promise.all([
       perf && window.LastPingShell
         ? perf.fetchJson("checks", `/projects/${pid}/checks`)
         : fetch(`/projects/${pid}/checks`).then(async (res)=> ({ok: res.ok, status: res.status, data: res.ok ? await res.json() : null})),
@@ -64,22 +113,27 @@ async function loadSettings(){
       perf && window.LastPingShell
         ? perf.fetchJson("pagerduty-settings", `/projects/${pid}/pagerduty-settings`, {headers})
         : fetch(`/projects/${pid}/pagerduty-settings`, {headers}).then(async (res)=> ({ok: res.ok, status: res.status, data: res.ok ? await res.json() : null})),
+      perf && window.LastPingShell
+        ? perf.fetchJson("notification-failures", `/projects/${pid}/notification-failures`, {headers})
+        : fetch(`/projects/${pid}/notification-failures`, {headers}).then(async (res)=> ({ok: res.ok, status: res.status, data: res.ok ? await res.json() : null})),
     ]);
     const checks = checksRes.ok ? (checksRes.data || []) : [];
     const shellPromise = window.LastPingShell
       ? window.LastPingShell.hydratePageShell(pid, checks, {perf})
       : Promise.resolve({checks, health: null});
 
-    if(!sloRes.ok || !alertRes.ok || !pagerdutyRes.ok){
+    if(!sloRes.ok || !alertRes.ok || !pagerdutyRes.ok || !failureRes.ok){
       alert("Failed to load settings");
       const shellData = await shellPromise;
       renderSettingsCards(shellData.checks, shellData.health, null, null, null);
+      renderNotificationFailures([]);
       return;
     }
 
     const slo = sloRes.data || {};
     const alerts = alertRes.data || {};
     const pagerduty = pagerdutyRes.data || {};
+    const failures = failureRes.data || [];
     const shellData = await shellPromise;
 
     const render = ()=>{
@@ -103,6 +157,7 @@ async function loadSettings(){
       if(pdTestResult) pdTestResult.textContent = "Use test delivery to send a trigger and immediate resolve event to PagerDuty.";
 
       renderSettingsCards(shellData.checks, shellData.health, slo, alerts, pagerduty);
+      renderNotificationFailures(failures);
     };
     if(perf) perf.measureRender("settings-render", render);
     else render();
@@ -111,6 +166,7 @@ async function loadSettings(){
       const shellData = await window.LastPingShell.hydratePageShell(pid, null, {perf});
       renderSettingsCards(shellData.checks, shellData.health, null, null, null);
     }
+    renderNotificationFailures([]);
     alert("Failed to load settings");
   }finally{
     if(perf) perf.finish();
@@ -173,6 +229,30 @@ async function sendPagerdutyTest(){
   }catch(_e){
     if(resultEl) resultEl.textContent = "Failed to send PagerDuty test";
     alert("Failed to send PagerDuty test");
+  }
+}
+
+async function retryNotificationFailure(failureId){
+  const pid = document.getElementById("projectId").value || "1";
+  const headers = headersSettings();
+  const root = document.getElementById("notificationFailures");
+  try{
+    const res = await fetch(`/projects/${pid}/notification-failures/${failureId}/retry`, {method: "POST", headers});
+    const body = await res.json().catch(()=> ({}));
+    if(!res.ok){
+      const detail = body && body.detail ? body.detail : "Retry failed";
+      alert(detail);
+      return;
+    }
+    if(root){
+      const msg = document.createElement("div");
+      msg.className = "muted";
+      msg.textContent = `${body.message}${body.target ? ` (${body.target})` : ""}`;
+      root.prepend(msg);
+    }
+    await loadSettings();
+  }catch(_e){
+    alert("Retry failed");
   }
 }
 

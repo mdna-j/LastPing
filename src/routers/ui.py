@@ -1507,6 +1507,14 @@ def project_settings_page(project_id: int = Path(..., ge=1)):
           </div>
           <div id="pagerdutyTestResult" class="muted">Use test delivery to send a trigger and immediate resolve event to PagerDuty.</div>
         </section>
+
+        <section class="card">
+          <div class="section-head">
+            <h3>Webhook Delivery Failures</h3>
+            <div class="muted">Inspect recent failed webhook-style deliveries and retry supported ones.</div>
+          </div>
+          <div id="notificationFailures" class="muted">Loading failed delivery history...</div>
+        </section>
       </main>
     </div>
     <script src="/static/js/ui_shell.js"></script>

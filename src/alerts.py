@@ -26,6 +26,15 @@ from .models import AuditLog, Incident, StatusSubscription
 logger = logging.getLogger("lastping.alerts")
 
 
+def _json_safe(value):
+    if value is None:
+        return None
+    try:
+        return json.loads(json.dumps(value))
+    except Exception:
+        return str(value)
+
+
 def _check_channel_enabled(check, attr: str) -> bool:
     if check is None:
         return True
@@ -127,6 +136,8 @@ def _record_notification_failure(
     check=None,
     target: Optional[str] = None,
     subscription=None,
+    retry_payload: Optional[dict] = None,
+    request_kind: Optional[str] = None,
 ) -> None:
     payload = {
         "project_id": getattr(project, "id", None),
@@ -137,6 +148,14 @@ def _record_notification_failure(
         "detail": detail,
         "target": target,
         "recorded_at": datetime.utcnow().isoformat(),
+        "request_kind": request_kind,
+        "retry_payload": _json_safe(retry_payload) if retry_payload is not None else None,
+        "retryable": bool(
+            request_kind == "json_post"
+            and isinstance(target, str)
+            and target.startswith(("http://", "https://"))
+            and retry_payload is not None
+        ),
     }
     try:
         with Session(ensure_engine()) as audit_session:
@@ -171,6 +190,8 @@ def _track_notification_result(
     check=None,
     target: Optional[str] = None,
     subscription=None,
+    retry_payload: Optional[dict] = None,
+    request_kind: Optional[str] = None,
 ) -> bool:
     if ok:
         return True
@@ -182,8 +203,29 @@ def _track_notification_result(
         event=event,
         detail=detail,
         target=target,
+        retry_payload=retry_payload,
+        request_kind=request_kind,
     )
     return False
+
+
+def retry_notification_failure_payload(details: dict) -> dict:
+    if not isinstance(details, dict):
+        return {"ok": False, "detail": "Invalid failure payload"}
+    if details.get("request_kind") != "json_post":
+        return {"ok": False, "detail": "Failure does not support automatic retry"}
+    target = details.get("target")
+    payload = details.get("retry_payload")
+    if not isinstance(target, str) or not target.startswith(("http://", "https://")):
+        return {"ok": False, "detail": "No retryable webhook target recorded"}
+    if not isinstance(payload, dict):
+        return {"ok": False, "detail": "No retryable payload recorded"}
+    response = _post_json_with_response(target, payload)
+    return {
+        "ok": bool(response and response.get("ok")),
+        "target": target,
+        "response": response,
+    }
 
 
 def _post_json_with_response(url: str, payload: dict, timeout: int = 10, headers: Optional[dict] = None) -> Optional[dict]:
@@ -479,6 +521,8 @@ def notify_down(check, project, reason: str = None, incident: Optional[Incident]
                 event="down",
                 target=discord_url,
                 detail="project Discord webhook send failed",
+                retry_payload={"embeds": [embed]},
+                request_kind="json_post",
             ) or sent
 
         # Slack: send Block Kit payload for structured messages
@@ -520,6 +564,8 @@ def notify_down(check, project, reason: str = None, incident: Optional[Incident]
                 event="down",
                 target=slack_target,
                 detail="project Slack webhook send failed",
+                retry_payload={"attachments": [attachment]},
+                request_kind="json_post" if isinstance(slack_target, str) and slack_target.startswith(("http://", "https://")) else None,
             ) or sent
 
         # PagerDuty: use existing helper which builds proper event payload
@@ -572,6 +618,8 @@ def notify_down(check, project, reason: str = None, incident: Optional[Incident]
                 event="down",
                 target=gen_url,
                 detail="generic webhook send failed",
+                retry_payload=payload,
+                request_kind="json_post",
             ) or sent
 
         # fall back to global endpoints if no project-specific webhook is set
@@ -659,6 +707,8 @@ def notify_degraded(check, project, reason: str = None) -> None:
                 event="degraded",
                 target=discord_url,
                 detail="project Discord webhook send failed",
+                retry_payload={"embeds": [embed]},
+                request_kind="json_post",
             ) or sent
         slack_url = _slack_url(project, check)
         if slack_url and _check_channel_enabled(check, "alert_slack_enabled"):
@@ -674,6 +724,8 @@ def notify_degraded(check, project, reason: str = None) -> None:
                 event="degraded",
                 target=slack_url,
                 detail="project Slack webhook send failed",
+                retry_payload={"attachments": [attachment]},
+                request_kind="json_post",
             ) or sent
         gen_url = _generic_webhook_url(project, check)
         if gen_url and _check_channel_enabled(check, "alert_webhook_enabled"):
@@ -686,6 +738,8 @@ def notify_degraded(check, project, reason: str = None) -> None:
                 event="degraded",
                 target=gen_url,
                 detail="generic webhook send failed",
+                retry_payload=payload,
+                request_kind="json_post",
             ) or sent
         if not sent:
             msg = f":warning: **DEGRADED** -- Project `{project.name}` Check `{check.name}` {reason or ''}".strip()
@@ -780,6 +834,8 @@ def notify_recovery(check, project, incident: Optional[Incident] = None, session
                 event="recovery",
                 target=discord_url,
                 detail="project Discord webhook send failed",
+                retry_payload={"embeds": [embed]},
+                request_kind="json_post",
             ) or sent
         slack_url = _slack_url(project, check)
         if (slack_url or _slack_channel(project, check, incident)) and _check_channel_enabled(check, "alert_slack_enabled"):
@@ -811,6 +867,8 @@ def notify_recovery(check, project, incident: Optional[Incident] = None, session
                 event="recovery",
                 target=slack_target,
                 detail="project Slack webhook send failed",
+                retry_payload={"attachments": [attachment]},
+                request_kind="json_post" if isinstance(slack_target, str) and slack_target.startswith(("http://", "https://")) else None,
             ) or sent
         pd_key = _pagerduty_key(project, check)
         if pd_key and _check_channel_enabled(check, "alert_pagerduty_enabled"):
@@ -851,6 +909,8 @@ def notify_recovery(check, project, incident: Optional[Incident] = None, session
                 event="recovery",
                 target=gen_url,
                 detail="generic webhook send failed",
+                retry_payload={"event": "recovery", "summary": summary, "details": details, "timestamp": now_iso, "project_url": project_url, "check_url": check_url},
+                request_kind="json_post",
             ) or sent
 
         # fall back to global endpoints if no project-specific webhook is configured
@@ -932,6 +992,8 @@ def notify_incident_slack_update(
         event=f"incident_{action}",
         target=slack_target,
         detail=f"incident Slack thread update failed for action={action}",
+        retry_payload={"blocks": blocks},
+        request_kind="json_post" if isinstance(slack_target, str) and slack_target.startswith(("http://", "https://")) else None,
     )
 
 
@@ -1038,6 +1100,8 @@ def notify_escalation(project, reason: str, check=None):
             event="escalation",
             target=discord_url,
             detail="project Discord webhook send failed",
+            retry_payload={"embeds": [embed]},
+            request_kind="json_post",
         ) or sent
 
     slack_url = _slack_url(project, check)
@@ -1057,6 +1121,8 @@ def notify_escalation(project, reason: str, check=None):
             event="escalation",
             target=slack_url,
             detail="project Slack webhook send failed",
+            retry_payload={"attachments": [attachment]},
+            request_kind="json_post",
         ) or sent
 
     pd_key = _pagerduty_key(project, check)
@@ -1093,6 +1159,8 @@ def notify_escalation(project, reason: str, check=None):
             event="escalation",
             target=gen_url,
             detail="generic webhook send failed",
+            retry_payload=payload,
+            request_kind="json_post",
         ) or sent
 
     esc = os.environ.get("ALERT_ESCALATION_EMAIL")
@@ -1238,6 +1306,8 @@ def notify_status_subscribers(session: Session, project, check, incident, *, eve
                     event=f"status_{event}",
                     target=subscription.target,
                     detail="public status webhook send failed",
+                    retry_payload=payload,
+                    request_kind="json_post",
                 ) or sent
         except Exception:
             _record_notification_failure(
@@ -1248,6 +1318,8 @@ def notify_status_subscribers(session: Session, project, check, incident, *, eve
                 event=f"status_{event}",
                 target=getattr(subscription, "target", None),
                 detail="public status notification raised an exception",
+                retry_payload=payload if subscription.channel == "webhook" else None,
+                request_kind="json_post" if subscription.channel == "webhook" else None,
             )
             logger.exception(
                 "Failed public status notification for project=%s subscription=%s",

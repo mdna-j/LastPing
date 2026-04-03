@@ -17,7 +17,7 @@ from sqlmodel import select, Session
 from ..db import get_session
 from ..models import AuditLog, ApiKey, OrgRole, Project as ProjectModel, ProjectMembership, Role
 from ..security import generate_api_key, hash_api_key
-from ..alerts import send_pagerduty_event
+from ..alerts import retry_notification_failure_payload, send_pagerduty_event
 from ..deps import authorize_org_operation, authorize_project_operation, get_audit_context, get_current_user, limit_public_requests
 from ..schemas import StrictBaseModel
 import os
@@ -337,6 +337,28 @@ class PagerDutyTestResult(BaseModel):
     trigger_sent: bool
     resolve_sent: bool
     message: str
+
+
+class NotificationFailureOut(BaseModel):
+    id: int
+    created_at: datetime
+    channel: str
+    event: str
+    detail: Optional[str] = None
+    target: Optional[str] = None
+    check_id: Optional[int] = None
+    subscription_id: Optional[int] = None
+    retryable: bool = False
+    request_kind: Optional[str] = None
+    last_retry_action: Optional[str] = None
+    last_retry_at: Optional[datetime] = None
+
+
+class NotificationRetryResult(BaseModel):
+    ok: bool
+    message: str
+    target: Optional[str] = None
+    status: Optional[int] = None
 
 
 class MaintenanceWindow(StrictBaseModel):
@@ -686,6 +708,39 @@ def _pagerduty_settings_out(session: Session, project: ProjectModel) -> PagerDut
     )
 
 
+def _notification_failure_out(session: Session, row: AuditLog) -> NotificationFailureOut:
+    details = {}
+    try:
+        parsed = json.loads(row.details or "{}")
+        if isinstance(parsed, dict):
+            details = parsed
+    except Exception:
+        details = {}
+    last_retry = session.exec(
+        select(AuditLog)
+        .where(
+            AuditLog.target_type == "audit_log",
+            AuditLog.target_id == row.id,
+            AuditLog.action.in_(["notification_retry", "notification_retry_failed"]),
+        )
+        .order_by(AuditLog.created_at.desc())
+    ).first()
+    return NotificationFailureOut(
+        id=row.id,
+        created_at=row.created_at,
+        channel=str(details.get("channel") or "unknown"),
+        event=str(details.get("event") or "unknown"),
+        detail=details.get("detail"),
+        target=details.get("target"),
+        check_id=details.get("check_id"),
+        subscription_id=details.get("subscription_id"),
+        retryable=bool(details.get("retryable")),
+        request_kind=details.get("request_kind"),
+        last_retry_action=last_retry.action if last_retry else None,
+        last_retry_at=last_retry.created_at if last_retry else None,
+    )
+
+
 @router.get("/{project_id}/pagerduty-settings", response_model=PagerDutySettingsOut)
 def get_project_pagerduty_settings(
     project_id: int = Path(..., ge=1),
@@ -832,4 +887,93 @@ def send_project_pagerduty_test(
         trigger_sent=trigger_sent,
         resolve_sent=resolve_sent,
         message="Sent PagerDuty test trigger and resolve events.",
+    )
+
+
+@router.get("/{project_id}/notification-failures", response_model=List[NotificationFailureOut])
+def list_project_notification_failures(
+    project_id: int = Path(..., ge=1),
+    limit: int = 20,
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    authorize_project_operation(
+        project_id,
+        min_role=Role.ADMIN.value,
+        x_admin_token=x_admin_token,
+        authorization=authorization,
+        x_api_key=x_api_key,
+        session=session,
+    )
+    rows = session.exec(
+        select(AuditLog)
+        .where(
+            AuditLog.action == "notification_failed",
+            AuditLog.target_type == "project",
+            AuditLog.target_id == project_id,
+        )
+        .order_by(AuditLog.created_at.desc())
+    ).all()
+    capped = rows[: max(1, min(int(limit or 20), 100))]
+    return [_notification_failure_out(session, row) for row in capped]
+
+
+@router.post("/{project_id}/notification-failures/{failure_id}/retry", response_model=NotificationRetryResult)
+def retry_project_notification_failure(
+    project_id: int = Path(..., ge=1),
+    failure_id: int = Path(..., ge=1),
+    request: Request = None,
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    project = authorize_project_operation(
+        project_id,
+        min_role=Role.ADMIN.value,
+        x_admin_token=x_admin_token,
+        authorization=authorization,
+        x_api_key=x_api_key,
+        session=session,
+    )
+    row = session.get(AuditLog, failure_id)
+    if not row or row.action != "notification_failed" or row.target_type != "project" or row.target_id != project_id:
+        raise HTTPException(status_code=404, detail="Notification failure not found")
+    try:
+        details = json.loads(row.details or "{}")
+    except Exception:
+        details = {}
+    result = retry_notification_failure_payload(details)
+    actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
+    session.add(
+        AuditLog(
+            actor=actor,
+            action="notification_retry" if result.get("ok") else "notification_retry_failed",
+            target_type="audit_log",
+            target_id=row.id,
+            details=json.dumps(
+                {
+                    "source_failure_id": row.id,
+                    "target": result.get("target") or details.get("target"),
+                    "retry_ok": bool(result.get("ok")),
+                    "response": result.get("response"),
+                    "message": result.get("detail"),
+                }
+            ),
+            actor_ip=actor_ip,
+            user_agent=user_agent,
+            **_project_scope_kwargs(project),
+        )
+    )
+    session.commit()
+    if not result.get("ok"):
+        raise HTTPException(status_code=502, detail=result.get("detail") or "Retry failed")
+    response = result.get("response") or {}
+    return NotificationRetryResult(
+        ok=True,
+        message="Retried webhook delivery.",
+        target=result.get("target"),
+        status=response.get("status"),
     )

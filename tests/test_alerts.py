@@ -165,6 +165,9 @@ def test_notification_failures_are_persisted_to_audit_log(tmp_path, monkeypatch)
         assert details["channel"] == "discord"
         assert details["event"] == "down"
         assert details["project_id"] == project_payload.id
+        assert details["request_kind"] == "json_post"
+        assert details["retryable"] is True
+        assert isinstance(details["retry_payload"], dict)
 
 
 def test_slack_thread_is_created_and_reused_for_incident_updates(tmp_path, monkeypatch):
