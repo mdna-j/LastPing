@@ -53,10 +53,6 @@ class ProjectRead(BaseModel):
     name: str
     org_id: Optional[int] = None
     created_at: datetime
-    discord_webhook_url: Optional[str] = None
-    slack_webhook_url: Optional[str] = None
-    pagerduty_integration_key: Optional[str] = None
-    generic_webhook_url: Optional[str] = None
     slo_target: Optional[float] = None
     sla_target: Optional[float] = None
     maintenance_starts_at: Optional[datetime] = None
@@ -397,11 +393,22 @@ class MaintenanceWindow(StrictBaseModel):
         return values
 
 
-@router.get("/{project_id}/webhooks", response_model=WebhookUpdate, dependencies=[Depends(limit_public_requests)])
-def get_project_webhooks(project_id: int = Path(..., ge=1), session: Session = Depends(get_session)):
-    project = session.get(ProjectModel, project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+@router.get("/{project_id}/webhooks", response_model=WebhookUpdate)
+def get_project_webhooks(
+    project_id: int = Path(..., ge=1),
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    project = authorize_project_operation(
+        project_id,
+        min_role=Role.ADMIN.value,
+        x_admin_token=x_admin_token,
+        authorization=authorization,
+        x_api_key=x_api_key,
+        session=session,
+    )
     return WebhookUpdate(
         discord_webhook_url=project.discord_webhook_url,
         slack_webhook_url=project.slack_webhook_url,
@@ -646,11 +653,22 @@ def set_project_slo(project_id: int = Path(..., ge=1), payload: SloSettings = Bo
     return SloSettings(slo_target=project.slo_target, sla_target=project.sla_target)
 
 
-@router.get("/{project_id}/alert-settings", response_model=AlertSettings, dependencies=[Depends(limit_public_requests)])
-def get_project_alert_settings(project_id: int = Path(..., ge=1), session: Session = Depends(get_session)):
-    project = session.get(ProjectModel, project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+@router.get("/{project_id}/alert-settings", response_model=AlertSettings)
+def get_project_alert_settings(
+    project_id: int = Path(..., ge=1),
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    project = authorize_project_operation(
+        project_id,
+        min_role=Role.ADMIN.value,
+        x_admin_token=x_admin_token,
+        authorization=authorization,
+        x_api_key=x_api_key,
+        session=session,
+    )
     return AlertSettings(
         sms_enabled=project.sms_enabled,
         sms_to=project.sms_to,
