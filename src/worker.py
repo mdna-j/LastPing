@@ -642,8 +642,35 @@ def _resolve_script_path(script_path: str) -> Optional[str]:
     return full_real
 
 
+def _runtime_environment_name() -> str:
+    for key in ("LASTPING_ENV", "APP_ENV", "ENV"):
+        raw = (os.environ.get(key) or "").strip().lower()
+        if raw:
+            return raw
+
+    database_url = (os.environ.get("DATABASE_URL") or "").strip().lower()
+    if database_url and not database_url.startswith("sqlite:"):
+        return "production"
+
+    base_url = (os.environ.get("BASE_URL") or "").strip().lower()
+    if base_url and "localhost" not in base_url and "127.0.0.1" not in base_url:
+        return "production"
+
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return "test"
+
+    return "development"
+
+
+def _is_dev_runtime() -> bool:
+    runtime = _runtime_environment_name()
+    return runtime.startswith(("dev", "local", "test"))
+
+
 def _script_executor_mode() -> str:
-    raw = (os.environ.get("SCRIPT_CHECK_EXECUTOR") or "host").strip().lower()
+    raw = (os.environ.get("SCRIPT_CHECK_EXECUTOR") or "").strip().lower()
+    if not raw or raw == "default":
+        return "host" if _is_dev_runtime() else "docker"
     if raw in ("", "local"):
         return "host"
     return raw

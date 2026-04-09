@@ -65,3 +65,19 @@ def test_validate_env_requires_complete_twilio_group():
 
     assert not result.ok
     assert any("Twilio SMS config is partial" in error for error in result.errors)
+
+
+def test_validate_env_warns_when_host_script_executor_is_used_in_production():
+    result = validate_env_mapping(
+        {
+            "DATABASE_URL": "postgresql://lastping:secret@db.internal:5432/lastping",
+            "BASE_URL": "https://lastping.example.com",
+            "ADMIN_TOKEN": "super-secret-admin-token",
+            "REDIS_URL": "redis://cache.internal:6379/0",
+            "SCRIPT_CHECK_EXECUTOR": "host",
+        },
+        "production",
+    )
+
+    assert result.ok
+    assert any("disables isolated script execution" in warning for warning in result.warnings)

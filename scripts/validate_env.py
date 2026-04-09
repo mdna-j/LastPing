@@ -135,6 +135,13 @@ def validate_env_mapping(env: dict[str, str], profile: str) -> ValidationResult:
         if value and not _looks_like_http_url(value):
             result.errors.append(f"{webhook_key} must be a valid http(s) URL.")
 
+    script_executor = (env.get("SCRIPT_CHECK_EXECUTOR") or "").strip().lower()
+    if normalized_profile in {"staging", "production"} and script_executor in {"host", "local"}:
+        result.warnings.append(
+            f"SCRIPT_CHECK_EXECUTOR={script_executor} disables isolated script execution in {normalized_profile}; "
+            "prefer docker for script checks."
+        )
+
     return result
 
 

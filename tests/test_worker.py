@@ -972,6 +972,72 @@ def test_script_check_uses_docker_executor_command(tmp_path, monkeypatch):
     assert "--probe" in cmd
 
 
+def test_script_executor_defaults_to_host_for_dev_runtime(monkeypatch):
+    from src import worker
+
+    monkeypatch.delenv("SCRIPT_CHECK_EXECUTOR", raising=False)
+    monkeypatch.delenv("LASTPING_ENV", raising=False)
+    monkeypatch.delenv("APP_ENV", raising=False)
+    monkeypatch.delenv("ENV", raising=False)
+    monkeypatch.delenv("BASE_URL", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "sqlite:///./dev.db")
+
+    assert worker._script_executor_mode() == "host"
+
+
+def test_script_executor_defaults_to_docker_for_non_dev_runtime(monkeypatch):
+    from src import worker
+
+    monkeypatch.delenv("SCRIPT_CHECK_EXECUTOR", raising=False)
+    monkeypatch.delenv("LASTPING_ENV", raising=False)
+    monkeypatch.delenv("APP_ENV", raising=False)
+    monkeypatch.delenv("ENV", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://lastping:secret@db.internal:5432/lastping")
+
+    assert worker._script_executor_mode() == "docker"
+
+
+def test_script_check_defaults_to_docker_command_in_non_dev_runtime(tmp_path, monkeypatch):
+    os.environ["CUSTOM_CHECKS_DIR"] = str(tmp_path / "custom_checks_default_docker")
+
+    from src.models import Project, Check, CheckType
+    from src import worker
+
+    custom_dir = tmp_path / "custom_checks_default_docker"
+    custom_dir.mkdir(parents=True, exist_ok=True)
+    script = custom_dir / "ok.py"
+    script.write_text("print('ok')\n", encoding="utf-8")
+
+    monkeypatch.delenv("SCRIPT_CHECK_EXECUTOR", raising=False)
+    monkeypatch.delenv("LASTPING_ENV", raising=False)
+    monkeypatch.delenv("APP_ENV", raising=False)
+    monkeypatch.delenv("ENV", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://lastping:secret@db.internal:5432/lastping")
+    monkeypatch.setenv("SCRIPT_CHECK_DOCKER_IMAGE", "python:3.11-alpine")
+
+    captured = {}
+
+    def fake_run(cmd, timeout_s, env):
+        captured["cmd"] = cmd
+        return 0, "ok", "", False
+
+    monkeypatch.setattr(worker, "_run_subprocess_sandboxed", fake_run)
+
+    check = Check(
+        project_id=1,
+        name="script_default_docker",
+        type=CheckType.SCRIPT,
+        script_path="ok.py",
+    )
+    project = Project(id=1, name="proj_script_default_docker")
+
+    ok, msg, latency_ms = worker._script_check(check, project, timeout=3, retries=1)
+    assert ok is True
+    assert msg == "ok"
+    assert latency_ms is not None
+    assert captured["cmd"][:2] == ["docker", "run"]
+
+
 def test_check_schema_requires_script_path_for_script_type():
     from src.routers.checks import CheckCreate
 
