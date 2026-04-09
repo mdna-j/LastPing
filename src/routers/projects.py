@@ -33,7 +33,13 @@ _SECRET_AUDIT_FIELDS = {
     "slack_webhook_url",
     "pagerduty_integration_key",
     "generic_webhook_url",
+    "jira_user_email",
     "jira_api_token",
+    "sms_to",
+    "sms_from",
+    "sms_account_sid",
+    "sms_auth_token",
+    "oncall_email",
 }
 
 

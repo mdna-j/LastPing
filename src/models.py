@@ -13,8 +13,17 @@ from enum import Enum
 
 from pydantic import root_validator
 from sqlmodel import Field, Relationship, SQLModel
+import sqlalchemy as sa
 
-from .security import fingerprint_token, hash_api_key
+from .security import EncryptedString, fingerprint_token, hash_api_key
+
+
+def _encrypted_field(*, description: Optional[str] = None):
+    return Field(
+        default=None,
+        description=description,
+        sa_column=sa.Column(EncryptedString(), nullable=True),
+    )
 
 
 class Project(SQLModel, table=True):
@@ -29,14 +38,14 @@ class Project(SQLModel, table=True):
     owner_email: Optional[str] = None
 
     # per-project webhook configuration (overrides global env vars)
-    discord_webhook_url: Optional[str] = None
-    slack_webhook_url: Optional[str] = None
+    discord_webhook_url: Optional[str] = _encrypted_field()
+    slack_webhook_url: Optional[str] = _encrypted_field()
     slack_channel: Optional[str] = None
-    pagerduty_integration_key: Optional[str] = None
-    generic_webhook_url: Optional[str] = None
+    pagerduty_integration_key: Optional[str] = _encrypted_field()
+    generic_webhook_url: Optional[str] = _encrypted_field()
     jira_base_url: Optional[str] = None
-    jira_user_email: Optional[str] = None
-    jira_api_token: Optional[str] = None
+    jira_user_email: Optional[str] = _encrypted_field()
+    jira_api_token: Optional[str] = _encrypted_field()
     jira_project_key: Optional[str] = None
     jira_issue_type: Optional[str] = Field(default="Task")
 
@@ -57,13 +66,13 @@ class Project(SQLModel, table=True):
     sla_target: Optional[float] = Field(default=99.5, description="target uptime percentage for SLA reporting")
     # on-call and SMS alert settings (optional; when None fall back to env defaults)
     sms_enabled: Optional[bool] = Field(default=None, description="enable SMS alerts for this project")
-    sms_to: Optional[str] = Field(default=None, description="destination phone number for SMS alerts")
-    sms_from: Optional[str] = Field(default=None, description="override SMS from number (Twilio)")
+    sms_to: Optional[str] = _encrypted_field(description="destination phone number for SMS alerts")
+    sms_from: Optional[str] = _encrypted_field(description="override SMS from number (Twilio)")
     sms_provider: Optional[str] = Field(default=None, description="SMS provider id, e.g. 'twilio'")
-    sms_account_sid: Optional[str] = Field(default=None, description="SMS provider account SID (Twilio)")
-    sms_auth_token: Optional[str] = Field(default=None, description="SMS provider auth token (Twilio)")
+    sms_account_sid: Optional[str] = _encrypted_field(description="SMS provider account SID (Twilio)")
+    sms_auth_token: Optional[str] = _encrypted_field(description="SMS provider auth token (Twilio)")
     oncall_enabled: Optional[bool] = Field(default=None, description="enable on-call email alerts for this project")
-    oncall_email: Optional[str] = Field(default=None, description="destination email address for on-call alerts")
+    oncall_email: Optional[str] = _encrypted_field(description="destination email address for on-call alerts")
     # optional project-level maintenance window (suppress alerts across project)
     maintenance_starts_at: Optional[datetime] = None
     maintenance_ends_at: Optional[datetime] = None
@@ -108,13 +117,13 @@ class Check(SQLModel, table=True):
     alert_pagerduty_enabled: Optional[bool] = None
     alert_webhook_enabled: Optional[bool] = None
     # per-channel routing overrides
-    alert_sms_to: Optional[str] = None
-    alert_oncall_email: Optional[str] = None
-    alert_slack_webhook_url: Optional[str] = None
+    alert_sms_to: Optional[str] = _encrypted_field()
+    alert_oncall_email: Optional[str] = _encrypted_field()
+    alert_slack_webhook_url: Optional[str] = _encrypted_field()
     alert_slack_channel: Optional[str] = None
-    alert_discord_webhook_url: Optional[str] = None
-    alert_pagerduty_integration_key: Optional[str] = None
-    alert_generic_webhook_url: Optional[str] = None
+    alert_discord_webhook_url: Optional[str] = _encrypted_field()
+    alert_pagerduty_integration_key: Optional[str] = _encrypted_field()
+    alert_generic_webhook_url: Optional[str] = _encrypted_field()
     # per-check escalation policy (optional)
     escalation_after_minutes: Optional[int] = Field(default=None, description="minutes down before escalating")
     escalation_cooldown_seconds: Optional[int] = Field(default=3600, description="seconds between escalation notifications")
@@ -551,7 +560,7 @@ class RemediationHook(SQLModel, table=True):
     enabled: bool = Field(default=True)
     cooldown_seconds: int = Field(default=900)
     last_triggered_at: Optional[datetime] = None
-    secret: Optional[str] = None
+    secret: Optional[str] = _encrypted_field()
     require_secret: bool = Field(default=False, description="require a secret to be set before triggering")
     require_approval: bool = Field(default=False, description="require manual approval before triggering")
     max_triggers_per_day: Optional[int] = Field(default=50, description="max remediation triggers per 24h")

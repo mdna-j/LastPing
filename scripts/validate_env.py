@@ -17,8 +17,8 @@ PROFILE_ALIASES = {
 
 COMMON_REQUIRED = ("DATABASE_URL", "BASE_URL", "ADMIN_TOKEN")
 PROFILE_REQUIRED = {
-    "staging": (),
-    "production": ("REDIS_URL",),
+    "staging": ("LASTPING_ENCRYPTION_KEY",),
+    "production": ("REDIS_URL", "LASTPING_ENCRYPTION_KEY"),
 }
 PROFILE_RECOMMENDED = {
     "staging": ("REDIS_URL",),
