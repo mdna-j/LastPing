@@ -113,3 +113,62 @@ def test_audit_logs_for_project_and_checks(tmp_path):
             "delete_check",
         ]:
             assert action in actions
+
+
+def test_secret_settings_audit_logs_redact_values(tmp_path):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'mdb_audit_secret_redaction.sqlite'}"
+    os.environ["BASE_URL"] = "https://lastping.example"
+    os.environ["PAGERDUTY_WEBHOOK_SECRET"] = "pd-secret"
+    os.environ["JIRA_WEBHOOK_SECRET"] = "jira-secret"
+    os.environ['ADMIN_TOKEN'] = 'admintoken'
+
+    from sqlmodel import Session, select
+    from src import db as dbmod
+    from src.models import AuditLog, Project
+    from src.routers.projects import (
+        set_project_jira_settings,
+        set_project_pagerduty_settings,
+        JiraSettingsIn,
+        PagerDutySettingsIn,
+    )
+
+    dbmod.create_db_and_tables()
+
+    with Session(dbmod.engine) as session:
+        project = Project(name='proj_secret_redaction')
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        set_project_pagerduty_settings(
+            project_id=project.id,
+            payload=PagerDutySettingsIn(integration_key="pd-routing-key"),
+            x_admin_token='admintoken',
+            session=session,
+        )
+        set_project_jira_settings(
+            project_id=project.id,
+            payload=JiraSettingsIn(
+                base_url="https://lastping.atlassian.net",
+                user_email="ops@example.com",
+                api_token="jira-token",
+                project_key="OPS",
+                issue_type="Task",
+            ),
+            x_admin_token='admintoken',
+            session=session,
+        )
+
+        logs = {
+            row.action: row.details or ""
+            for row in session.exec(
+                select(AuditLog).where(AuditLog.target_type == "project", AuditLog.target_id == project.id)
+            ).all()
+        }
+
+        pd_details = logs["set_project_pagerduty_settings"]
+        jira_details = logs["set_project_jira_settings"]
+        assert "pd-routing-key" not in pd_details
+        assert "jira-token" not in jira_details
+        assert "[configured]" in pd_details
+        assert "[configured]" in jira_details

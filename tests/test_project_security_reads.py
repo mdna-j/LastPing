@@ -85,7 +85,13 @@ def test_get_project_webhooks_requires_admin_level_auth(tmp_path):
 
     auth_res = client.get(f"/projects/{project_id}/webhooks", headers={"X-API-KEY": "owner-key"})
     assert auth_res.status_code == 200
-    assert auth_res.json()["pagerduty_integration_key"] == "pd-secret"
+    body = auth_res.json()
+    assert body["discord_webhook_configured"] is True
+    assert body["slack_webhook_configured"] is True
+    assert body["pagerduty_integration_key_configured"] is True
+    assert body["generic_webhook_configured"] is True
+    assert body["slack_channel"] is None
+    assert "pagerduty_integration_key" not in body
 
 
 def test_get_project_alert_settings_requires_admin_level_auth(tmp_path):

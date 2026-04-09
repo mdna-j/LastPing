@@ -28,10 +28,26 @@ import json
 router = APIRouter(prefix="/projects", tags=["projects"])
 
 
+_SECRET_AUDIT_FIELDS = {
+    "discord_webhook_url",
+    "slack_webhook_url",
+    "pagerduty_integration_key",
+    "generic_webhook_url",
+    "jira_api_token",
+}
+
+
+def _audit_value_for_field(key: str, value):
+    if key in _SECRET_AUDIT_FIELDS:
+        return "[configured]" if value else None
+    return value
+
+
 def _diff_details(before: dict, after: dict) -> Optional[str]:
     changes = {}
     for key, old_val in before.items():
-        new_val = after.get(key)
+        old_val = _audit_value_for_field(key, old_val)
+        new_val = _audit_value_for_field(key, after.get(key))
         if old_val != new_val:
             changes[key] = {"from": old_val, "to": new_val}
     if not changes:
@@ -300,6 +316,18 @@ class WebhookUpdate(StrictBaseModel):
     slack_channel: Optional[constr(max_length=120)] = None
     pagerduty_integration_key: Optional[constr(max_length=128)] = None
     generic_webhook_url: Optional[AnyHttpUrl] = None
+    clear_discord_webhook_url: bool = False
+    clear_slack_webhook_url: bool = False
+    clear_pagerduty_integration_key: bool = False
+    clear_generic_webhook_url: bool = False
+
+
+class WebhookSettingsOut(BaseModel):
+    discord_webhook_configured: bool
+    slack_webhook_configured: bool
+    slack_channel: Optional[str] = None
+    pagerduty_integration_key_configured: bool
+    generic_webhook_configured: bool
 
 
 class SloSettings(StrictBaseModel):
@@ -316,10 +344,10 @@ class AlertSettings(StrictBaseModel):
 
 class PagerDutySettingsIn(StrictBaseModel):
     integration_key: Optional[constr(max_length=128)] = None
+    clear_integration_key: bool = False
 
 
 class PagerDutySettingsOut(BaseModel):
-    integration_key: Optional[str] = None
     integration_key_configured: bool
     inbound_webhook_url: str
     inbound_secret_configured: bool
@@ -342,12 +370,13 @@ class JiraSettingsIn(StrictBaseModel):
     api_token: Optional[constr(max_length=255)] = None
     project_key: Optional[constr(max_length=64)] = None
     issue_type: Optional[constr(max_length=120)] = None
+    clear_api_token: bool = False
 
 
 class JiraSettingsOut(BaseModel):
     base_url: Optional[str] = None
     user_email: Optional[str] = None
-    api_token: Optional[str] = None
+    api_token_configured: bool
     project_key: Optional[str] = None
     issue_type: Optional[str] = None
     inbound_webhook_url: str
@@ -393,7 +422,17 @@ class MaintenanceWindow(StrictBaseModel):
         return values
 
 
-@router.get("/{project_id}/webhooks", response_model=WebhookUpdate)
+def _webhook_settings_out(project: ProjectModel) -> WebhookSettingsOut:
+    return WebhookSettingsOut(
+        discord_webhook_configured=bool(project.discord_webhook_url),
+        slack_webhook_configured=bool(project.slack_webhook_url),
+        slack_channel=project.slack_channel,
+        pagerduty_integration_key_configured=bool(project.pagerduty_integration_key),
+        generic_webhook_configured=bool(project.generic_webhook_url),
+    )
+
+
+@router.get("/{project_id}/webhooks", response_model=WebhookSettingsOut)
 def get_project_webhooks(
     project_id: int = Path(..., ge=1),
     authorization: Optional[str] = Header(None),
@@ -409,16 +448,10 @@ def get_project_webhooks(
         x_api_key=x_api_key,
         session=session,
     )
-    return WebhookUpdate(
-        discord_webhook_url=project.discord_webhook_url,
-        slack_webhook_url=project.slack_webhook_url,
-        slack_channel=project.slack_channel,
-        pagerduty_integration_key=project.pagerduty_integration_key,
-        generic_webhook_url=project.generic_webhook_url,
-    )
+    return _webhook_settings_out(project)
 
 
-@router.post("/{project_id}/webhooks", response_model=WebhookUpdate)
+@router.post("/{project_id}/webhooks", response_model=WebhookSettingsOut)
 def update_project_webhooks(project_id: int = Path(..., ge=1), payload: WebhookUpdate = Body(...), request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), _rl=None, session: Session = Depends(get_session)):
     project = authorize_project_operation(
         project_id,
@@ -435,11 +468,25 @@ def update_project_webhooks(project_id: int = Path(..., ge=1), payload: WebhookU
         "pagerduty_integration_key": project.pagerduty_integration_key,
         "generic_webhook_url": project.generic_webhook_url,
     }
-    project.discord_webhook_url = payload.discord_webhook_url
-    project.slack_webhook_url = payload.slack_webhook_url
-    project.slack_channel = payload.slack_channel
-    project.pagerduty_integration_key = payload.pagerduty_integration_key
-    project.generic_webhook_url = payload.generic_webhook_url
+    fields_set = getattr(payload, "__fields_set__", set())
+    if payload.clear_discord_webhook_url:
+        project.discord_webhook_url = None
+    elif payload.discord_webhook_url:
+        project.discord_webhook_url = str(payload.discord_webhook_url)
+    if payload.clear_slack_webhook_url:
+        project.slack_webhook_url = None
+    elif payload.slack_webhook_url:
+        project.slack_webhook_url = str(payload.slack_webhook_url)
+    if "slack_channel" in fields_set:
+        project.slack_channel = payload.slack_channel
+    if payload.clear_pagerduty_integration_key:
+        project.pagerduty_integration_key = None
+    elif payload.pagerduty_integration_key:
+        project.pagerduty_integration_key = payload.pagerduty_integration_key
+    if payload.clear_generic_webhook_url:
+        project.generic_webhook_url = None
+    elif payload.generic_webhook_url:
+        project.generic_webhook_url = str(payload.generic_webhook_url)
     session.add(project)
     session.commit()
     session.refresh(project)
@@ -457,7 +504,7 @@ def update_project_webhooks(project_id: int = Path(..., ge=1), payload: WebhookU
         session.commit()
     except Exception:
         pass
-    return payload
+    return _webhook_settings_out(project)
 
 
 @router.get("/{project_id}/maintenance", response_model=MaintenanceWindow, dependencies=[Depends(limit_public_requests)])
@@ -739,7 +786,6 @@ def _pagerduty_settings_out(session: Session, project: ProjectModel) -> PagerDut
         .order_by(AuditLog.created_at.desc())
     ).first()
     return PagerDutySettingsOut(
-        integration_key=project.pagerduty_integration_key,
         integration_key_configured=bool(project.pagerduty_integration_key),
         inbound_webhook_url=inbound_url,
         inbound_secret_configured=bool(os.environ.get("PAGERDUTY_WEBHOOK_SECRET")),
@@ -765,7 +811,7 @@ def _jira_settings_out(session: Session, project: ProjectModel) -> JiraSettingsO
     return JiraSettingsOut(
         base_url=project.jira_base_url,
         user_email=project.jira_user_email,
-        api_token=project.jira_api_token,
+        api_token_configured=bool(project.jira_api_token),
         project_key=project.jira_project_key,
         issue_type=project.jira_issue_type or "Task",
         inbound_webhook_url=inbound_url,
@@ -848,7 +894,10 @@ def set_project_pagerduty_settings(
         session=session,
     )
     before = {"pagerduty_integration_key": project.pagerduty_integration_key}
-    project.pagerduty_integration_key = payload.integration_key
+    if payload.clear_integration_key:
+        project.pagerduty_integration_key = None
+    elif payload.integration_key:
+        project.pagerduty_integration_key = payload.integration_key
     session.add(project)
     session.commit()
     session.refresh(project)
@@ -1003,11 +1052,19 @@ def set_project_jira_settings(
         "jira_project_key": project.jira_project_key,
         "jira_issue_type": project.jira_issue_type,
     }
-    project.jira_base_url = str(payload.base_url) if payload.base_url is not None else None
-    project.jira_user_email = str(payload.user_email) if payload.user_email is not None else None
-    project.jira_api_token = payload.api_token
-    project.jira_project_key = payload.project_key.upper() if payload.project_key else None
-    project.jira_issue_type = payload.issue_type or "Task"
+    fields_set = getattr(payload, "__fields_set__", set())
+    if "base_url" in fields_set:
+        project.jira_base_url = str(payload.base_url) if payload.base_url is not None else None
+    if "user_email" in fields_set:
+        project.jira_user_email = str(payload.user_email) if payload.user_email is not None else None
+    if payload.clear_api_token:
+        project.jira_api_token = None
+    elif payload.api_token:
+        project.jira_api_token = payload.api_token
+    if "project_key" in fields_set:
+        project.jira_project_key = payload.project_key.upper() if payload.project_key else None
+    if "issue_type" in fields_set:
+        project.jira_issue_type = payload.issue_type or "Task"
     session.add(project)
     session.commit()
     session.refresh(project)

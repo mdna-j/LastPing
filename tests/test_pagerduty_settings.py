@@ -50,8 +50,13 @@ def test_project_pagerduty_settings_and_test_delivery(tmp_path, monkeypatch):
         headers={"X-API-KEY": "owner-key"},
     )
     assert save_res.status_code == 200
-    assert save_res.json()["integration_key"] == "pd-routing-key"
     assert save_res.json()["integration_key_configured"] is True
+    assert "integration_key" not in save_res.json()
+
+    get_after_res = client.get(f"/projects/{project_id}/pagerduty-settings", headers={"X-API-KEY": "owner-key"})
+    assert get_after_res.status_code == 200
+    assert get_after_res.json()["integration_key_configured"] is True
+    assert "integration_key" not in get_after_res.json()
 
     test_res = client.post(
         f"/projects/{project_id}/pagerduty-test",
@@ -76,3 +81,35 @@ def test_project_pagerduty_settings_and_test_delivery(tmp_path, monkeypatch):
         ]
         assert "set_project_pagerduty_settings" in actions
         assert "send_project_pagerduty_test" in actions
+
+
+def test_project_pagerduty_settings_clear_flow(tmp_path):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_pagerduty_settings_clear.sqlite'}"
+
+    from sqlmodel import Session
+    from src import db as dbmod
+    from src.main import app
+    from src.models import Project
+    from src.security import hash_api_key
+
+    dbmod.create_db_and_tables()
+    client = TestClient(app)
+
+    with Session(dbmod.engine) as session:
+        project = Project(
+            name="pagerduty-clear-project",
+            api_key_hash=hash_api_key("owner-key"),
+            pagerduty_integration_key="pd-routing-key",
+        )
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+        project_id = project.id
+
+    clear_res = client.post(
+        f"/projects/{project_id}/pagerduty-settings",
+        json={"clear_integration_key": True},
+        headers={"X-API-KEY": "owner-key"},
+    )
+    assert clear_res.status_code == 200
+    assert clear_res.json()["integration_key_configured"] is False

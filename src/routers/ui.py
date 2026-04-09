@@ -1505,6 +1505,11 @@ def project_settings_page(project_id: int = Path(..., ge=1)):
             <label>API Token:
               <input id="jiraApiToken" type="password" autocomplete="off" placeholder="(optional)" style="width:220px"/>
             </label>
+            <button id="clearJiraApiTokenBtn" class="btn btn-secondary" type="button">Clear Token</button>
+            <div class="status-inline"><strong>Stored token:</strong> <span id="jiraApiTokenStatus" class="muted">unknown</span></div>
+          </div>
+          <div class="muted">Leave the token blank to keep the current secret. Enter a new token to replace it.</div>
+          <div class="row">
             <label>Project Key:
               <input id="jiraProjectKey" placeholder="OPS" style="width:120px"/>
             </label>
@@ -1530,10 +1535,13 @@ def project_settings_page(project_id: int = Path(..., ge=1)):
           </div>
           <div class="row">
             <label>Integration Key:
-              <input id="pagerdutyIntegrationKey" placeholder="(optional)" style="width:260px"/>
+              <input id="pagerdutyIntegrationKey" type="password" autocomplete="off" placeholder="(optional)" style="width:260px"/>
             </label>
+            <button id="clearPagerdutyIntegrationKeyBtn" class="btn btn-secondary" type="button">Clear Key</button>
+            <div class="status-inline"><strong>Stored key:</strong> <span id="pagerdutyIntegrationKeyStatus" class="muted">unknown</span></div>
             <button id="sendPagerdutyTestBtn" class="btn btn-secondary">Send Test Delivery</button>
           </div>
+          <div class="muted">Leave the integration key blank to keep the current secret. Enter a new key to replace it.</div>
           <div class="row">
             <div class="status-inline"><strong>Inbound webhook:</strong> <code id="pagerdutyWebhookUrl">/integrations/pagerduty/webhook</code></div>
           </div>

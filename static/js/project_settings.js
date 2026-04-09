@@ -7,6 +7,9 @@ function headersSettings(){
   return headers;
 }
 
+let clearJiraApiTokenRequested = false;
+let clearPagerdutyIntegrationKeyRequested = false;
+
 function escapeHtml(value){
   return String(value ?? "")
     .replace(/&/g, "&amp;")
@@ -20,6 +23,42 @@ function formatPagerdutySync(settings){
   if(!settings || !settings.latest_sync_action) return "none yet";
   const ts = settings.latest_sync_at ? new Date(settings.latest_sync_at).toLocaleString() : "unknown time";
   return `${settings.latest_sync_action} at ${ts}`;
+}
+
+function syncSecretActionState(){
+  const jiraStatus = document.getElementById("jiraApiTokenStatus");
+  const jiraBtn = document.getElementById("clearJiraApiTokenBtn");
+  const jiraInput = document.getElementById("jiraApiToken");
+  if(jiraStatus){
+    const base = jiraStatus.dataset.configured === "true" ? "configured" : "not set";
+    jiraStatus.textContent = clearJiraApiTokenRequested ? "will be cleared on save" : base;
+  }
+  if(jiraBtn) jiraBtn.textContent = clearJiraApiTokenRequested ? "Keep Token" : "Clear Token";
+  if(jiraInput && clearJiraApiTokenRequested) jiraInput.value = "";
+
+  const pdStatus = document.getElementById("pagerdutyIntegrationKeyStatus");
+  const pdBtn = document.getElementById("clearPagerdutyIntegrationKeyBtn");
+  const pdInput = document.getElementById("pagerdutyIntegrationKey");
+  if(pdStatus){
+    const base = pdStatus.dataset.configured === "true" ? "configured" : "not set";
+    pdStatus.textContent = clearPagerdutyIntegrationKeyRequested ? "will be cleared on save" : base;
+  }
+  if(pdBtn) pdBtn.textContent = clearPagerdutyIntegrationKeyRequested ? "Keep Key" : "Clear Key";
+  if(pdInput && clearPagerdutyIntegrationKeyRequested) pdInput.value = "";
+}
+
+function setJiraTokenConfigured(configured){
+  const el = document.getElementById("jiraApiTokenStatus");
+  if(!el) return;
+  el.dataset.configured = configured ? "true" : "false";
+  syncSecretActionState();
+}
+
+function setPagerdutyKeyConfigured(configured){
+  const el = document.getElementById("pagerdutyIntegrationKeyStatus");
+  if(!el) return;
+  el.dataset.configured = configured ? "true" : "false";
+  syncSecretActionState();
 }
 
 function formatJiraState(settings){
@@ -173,13 +212,15 @@ async function loadSettings(){
       const jiraLastSync = document.getElementById("jiraLastSync");
       if(jiraBaseUrl) jiraBaseUrl.value = jira.base_url || "";
       if(jiraUserEmail) jiraUserEmail.value = jira.user_email || "";
-      if(jiraApiToken) jiraApiToken.value = jira.api_token || "";
+      if(jiraApiToken) jiraApiToken.value = "";
       if(jiraProjectKey) jiraProjectKey.value = jira.project_key || "";
       if(jiraIssueType) jiraIssueType.value = jira.issue_type || "Task";
       if(jiraWebhookUrl) jiraWebhookUrl.textContent = jira.inbound_webhook_url || "/integrations/jira/webhook";
       if(jiraSecretHeader) jiraSecretHeader.textContent = jira.inbound_secret_header || "X-Jira-Webhook-Secret";
       if(jiraSecretStatus) jiraSecretStatus.textContent = jira.inbound_secret_configured ? "configured" : "missing";
       if(jiraLastSync) jiraLastSync.textContent = formatJiraSync(jira);
+      clearJiraApiTokenRequested = false;
+      setJiraTokenConfigured(!!jira.api_token_configured);
       if(jiraSettingsHint) jiraSettingsHint.textContent = jira.configured
         ? `Jira ready for ${jira.project_key || "project"} ticket creation.`
         : "Create Jira issues directly from incident detail pages once project credentials are configured.";
@@ -190,12 +231,14 @@ async function loadSettings(){
       const pdSecret = document.getElementById("pagerdutySecretStatus");
       const pdLastSync = document.getElementById("pagerdutyLastSync");
       const pdTestResult = document.getElementById("pagerdutyTestResult");
-      if(pdKey) pdKey.value = pagerduty.integration_key || "";
+      if(pdKey) pdKey.value = "";
       if(pdUrl) pdUrl.textContent = pagerduty.inbound_webhook_url || "/integrations/pagerduty/webhook";
       if(pdHeader) pdHeader.textContent = pagerduty.inbound_secret_header || "X-PagerDuty-Webhook-Secret";
       if(pdSecret) pdSecret.textContent = pagerduty.inbound_secret_configured ? "configured" : "missing";
       if(pdLastSync) pdLastSync.textContent = formatPagerdutySync(pagerduty);
       if(pdTestResult) pdTestResult.textContent = "Use test delivery to send a trigger and immediate resolve event to PagerDuty.";
+      clearPagerdutyIntegrationKeyRequested = false;
+      setPagerdutyKeyConfigured(!!pagerduty.integration_key_configured);
 
       renderSettingsCards(shellData.checks, shellData.health, slo, alerts, pagerduty, jira);
       renderNotificationFailures(failures);
@@ -234,13 +277,17 @@ async function saveSettings(){
   const jiraPayload = {
     base_url: document.getElementById("jiraBaseUrl").value || null,
     user_email: document.getElementById("jiraUserEmail").value || null,
-    api_token: document.getElementById("jiraApiToken").value || null,
     project_key: document.getElementById("jiraProjectKey").value || null,
     issue_type: document.getElementById("jiraIssueType").value || null,
+    clear_api_token: clearJiraApiTokenRequested,
   };
+  const jiraTokenValue = document.getElementById("jiraApiToken").value || "";
+  if(jiraTokenValue) jiraPayload.api_token = jiraTokenValue;
   const pagerdutyPayload = {
-    integration_key: document.getElementById("pagerdutyIntegrationKey").value || null,
+    clear_integration_key: clearPagerdutyIntegrationKeyRequested,
   };
+  const pagerdutyKeyValue = document.getElementById("pagerdutyIntegrationKey").value || "";
+  if(pagerdutyKeyValue) pagerdutyPayload.integration_key = pagerdutyKeyValue;
 
   const [sloRes, alertRes, jiraRes, pagerdutyRes] = await Promise.all([
     fetch(`/projects/${pid}/slo`, {method: "POST", headers, body: JSON.stringify(sloPayload)}),
@@ -309,11 +356,21 @@ document.addEventListener("DOMContentLoaded", ()=>{
   const loadBtn = document.getElementById("loadBtn");
   const saveBtn = document.getElementById("saveBtn");
   const testBtn = document.getElementById("sendPagerdutyTestBtn");
+  const clearJiraBtn = document.getElementById("clearJiraApiTokenBtn");
+  const clearPdBtn = document.getElementById("clearPagerdutyIntegrationKeyBtn");
   const pid = document.getElementById("projectId");
 
   if(loadBtn) loadBtn.addEventListener("click", loadSettings);
   if(saveBtn) saveBtn.addEventListener("click", saveSettings);
   if(testBtn) testBtn.addEventListener("click", sendPagerdutyTest);
+  if(clearJiraBtn) clearJiraBtn.addEventListener("click", ()=>{
+    clearJiraApiTokenRequested = !clearJiraApiTokenRequested;
+    syncSecretActionState();
+  });
+  if(clearPdBtn) clearPdBtn.addEventListener("click", ()=>{
+    clearPagerdutyIntegrationKeyRequested = !clearPagerdutyIntegrationKeyRequested;
+    syncSecretActionState();
+  });
   if(pid) pid.addEventListener("change", loadSettings);
 
   loadSettings();

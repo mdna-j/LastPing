@@ -17,4 +17,11 @@ def isolate_database_engine():
         reset_request_metrics = getattr(runtime_metrics_module, "reset_request_metrics", None)
         if callable(reset_request_metrics):
             reset_request_metrics()
-    os.environ.pop("DATABASE_URL", None)
+    for env_name in (
+        "DATABASE_URL",
+        "BASE_URL",
+        "PAGERDUTY_WEBHOOK_SECRET",
+        "JIRA_WEBHOOK_SECRET",
+        "ADMIN_TOKEN",
+    ):
+        os.environ.pop(env_name, None)
