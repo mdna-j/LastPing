@@ -21,11 +21,6 @@ def test_worker_notifies_public_status_subscribers_for_open_and_resolve(tmp_path
         "send_email",
         lambda subject, body, to=None: deliveries.append(("email", subject, to, body)) or True,
     )
-    monkeypatch.setattr(
-        alerts,
-        "send_generic_webhook",
-        lambda url, payload: deliveries.append(("webhook", url, payload["event"])) or True,
-    )
 
     with Session(dbmod.engine) as session:
         project = Project(name="status-notify-project")
@@ -53,7 +48,7 @@ def test_worker_notifies_public_status_subscribers_for_open_and_resolve(tmp_path
         assert check.status == CheckStatus.DOWN
 
         assert any(item[0] == "email" and "incident opened" in item[1].lower() for item in deliveries)
-        assert any(item[0] == "webhook" and item[2] == "incident_opened" for item in deliveries)
+        assert not any(item[0] == "webhook" for item in deliveries)
 
         check.last_ping = datetime.utcnow()
         session.add(check)
@@ -64,4 +59,4 @@ def test_worker_notifies_public_status_subscribers_for_open_and_resolve(tmp_path
         assert check.status == CheckStatus.UP
 
         assert any(item[0] == "email" and "incident resolved" in item[1].lower() for item in deliveries)
-        assert any(item[0] == "webhook" and item[2] == "incident_resolved" for item in deliveries)
+        assert not any(item[0] == "webhook" for item in deliveries)

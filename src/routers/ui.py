@@ -1962,6 +1962,11 @@ def public_status_subscribe(
     payload: StatusSubscriptionCreate = Body(...),
     session: Session = Depends(get_session),
 ):
+    if payload.channel == "webhook":
+        raise HTTPException(
+            status_code=403,
+            detail="Webhook subscriptions are temporarily disabled pending verification hardening",
+        )
     project = session.get(Project, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")

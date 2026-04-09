@@ -220,7 +220,7 @@ function renderStatus(data) {
       <article class="card">
         <div class="section-head">
           <h3>Subscribe to updates</h3>
-          <div class="muted">Receive new incident and resolution notices by email or webhook.</div>
+          <div class="muted">Receive new incident and resolution notices by email.</div>
         </div>
         <form class="status-subscribe-form" data-status-subscribe data-channel="email">
           <label>Email updates</label>
@@ -229,14 +229,7 @@ function renderStatus(data) {
             <button class="btn" type="submit">Subscribe</button>
           </div>
         </form>
-        <form class="status-subscribe-form" data-status-subscribe data-channel="webhook">
-          <label>Webhook updates</label>
-          <div class="status-subscribe-row">
-            <input type="url" placeholder="https://example.com/status-webhook" />
-            <button class="btn btn-secondary" type="submit">Add webhook</button>
-          </div>
-        </form>
-        <div id="statusSubscribeFeedback" class="status-subscribe-feedback muted">Subscriptions are project-scoped and public to this page.</div>
+        <div id="statusSubscribeFeedback" class="status-subscribe-feedback muted">Subscriptions are project-scoped. Public webhook subscriptions are temporarily disabled while verification hardening is in progress.</div>
       </article>
     </section>
 

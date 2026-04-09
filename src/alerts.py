@@ -1297,18 +1297,12 @@ def notify_status_subscribers(session: Session, project, check, incident, *, eve
                     detail="public status email send failed",
                 ) or sent
             elif subscription.channel == "webhook":
-                sent = _track_notification_result(
-                    send_generic_webhook(subscription.target, payload),
-                    project=project,
-                    check=check,
-                    subscription=subscription,
-                    channel="webhook",
-                    event=f"status_{event}",
-                    target=subscription.target,
-                    detail="public status webhook send failed",
-                    retry_payload=payload,
-                    request_kind="json_post",
-                ) or sent
+                logger.info(
+                    "Skipping disabled public status webhook subscription id=%s project=%s",
+                    getattr(subscription, "id", None),
+                    getattr(project, "id", None),
+                )
+                continue
         except Exception:
             _record_notification_failure(
                 project=project,

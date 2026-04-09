@@ -137,11 +137,12 @@ def test_public_status_page_exposes_components_history_and_subscriptions(tmp_pat
     assert subscribe_again.status_code == 200
     assert "reactivated" in subscribe_again.json()["message"].lower()
 
-    bad_webhook = client.post(
+    disabled_webhook = client.post(
         f"/ui/status/{project_id}/subscribe",
-        json={"channel": "webhook", "target": "not-a-url"},
+        json={"channel": "webhook", "target": "https://example.com/status-webhook"},
     )
-    assert bad_webhook.status_code == 422
+    assert disabled_webhook.status_code == 403
+    assert "temporarily disabled" in disabled_webhook.json()["detail"].lower()
 
     with Session(dbmod.engine) as session:
         rows = session.exec(select(StatusSubscription).where(StatusSubscription.project_id == project_id)).all()
