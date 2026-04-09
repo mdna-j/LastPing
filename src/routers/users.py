@@ -86,15 +86,7 @@ def login(payload: LoginIn, session: Session = Depends(get_session)):
 
 @router.get("/me")
 def me(authorization: Optional[str] = Header(None), session: Session = Depends(get_session)):
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token")
-    token = authorization.split(None, 1)[1].strip()
-    ut = session.exec(select(UserToken).where(UserToken.token == token)).first()
-    if not ut:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-    if ut.expires_at and ut.expires_at < datetime.utcnow():
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
-    user = session.get(User, ut.user_id)
+    user = get_current_user(authorization=authorization, session=session)
     return {"id": user.id, "email": user.email}
 
 

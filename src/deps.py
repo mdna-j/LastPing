@@ -8,6 +8,7 @@ are authenticated using a project's API key. It accepts either an
 
 import importlib
 import os
+import secrets
 from datetime import datetime
 from typing import Optional
 
@@ -29,7 +30,7 @@ from .models import (
     UserToken,
     UserUsage,
 )
-from .security import verify_api_key
+from .security import fingerprint_token, hash_api_key, verify_api_key
 
 # Optional Redis support for distributed rate limiting
 _redis = None
@@ -78,9 +79,36 @@ def _get_cached_user_token(session: Session, token: str) -> Optional[UserToken]:
     cache_key = ("user_token", token)
     user_token = cache.get(cache_key, _CACHE_MISS)
     if user_token is _CACHE_MISS:
-        user_token = session.exec(select(UserToken).where(UserToken.token == token)).first()
+        token_fingerprint = fingerprint_token(token)
+        user_token = session.exec(
+            select(UserToken).where(UserToken.token_fingerprint == token_fingerprint)
+        ).first()
+        if user_token and _verify_user_token(token, user_token.token):
+            cache[cache_key] = user_token
+            return user_token
+
+        # Backward compatibility for legacy plaintext session rows. Upgrade
+        # the row in place once it is successfully matched.
+        legacy = session.exec(select(UserToken).where(UserToken.token == token)).first()
+        if legacy:
+            legacy.token = hash_api_key(token)
+            legacy.token_fingerprint = token_fingerprint
+            session.add(legacy)
+            session.commit()
+            session.refresh(legacy)
+            user_token = legacy
+        else:
+            user_token = None
         cache[cache_key] = user_token
     return user_token
+
+
+def _verify_user_token(raw_token: str, stored_token: str) -> bool:
+    if not raw_token or not stored_token:
+        return False
+    if stored_token.startswith("pbkdf2_sha256$"):
+        return verify_api_key(raw_token, stored_token)
+    return secrets.compare_digest(raw_token, stored_token)
 
 
 def _get_cached_user(session: Session, user_id: int) -> Optional[User]:

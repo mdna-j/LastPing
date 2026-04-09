@@ -11,7 +11,10 @@ from datetime import datetime
 from typing import List, Optional
 from enum import Enum
 
+from pydantic import root_validator
 from sqlmodel import Field, Relationship, SQLModel
+
+from .security import fingerprint_token, hash_api_key
 
 
 class Project(SQLModel, table=True):
@@ -294,10 +297,20 @@ class UserToken(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id")
     token: str = Field(index=True)
+    token_fingerprint: Optional[str] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     expires_at: Optional[datetime] = None
 
     user: Optional[User] = Relationship()
+
+    @root_validator(pre=False)
+    def _normalize_token_storage(cls, values):
+        token = values.get("token")
+        token_fingerprint = values.get("token_fingerprint")
+        if token and not token_fingerprint and not str(token).startswith("pbkdf2_sha256$"):
+            values["token_fingerprint"] = fingerprint_token(token)
+            values["token"] = hash_api_key(token)
+        return values
 
 
 class UptimeSnapshot(SQLModel, table=True):

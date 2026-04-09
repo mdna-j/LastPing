@@ -22,6 +22,10 @@ def _pbkdf2_hash(key: str, salt: bytes, iterations: int = 100_000) -> bytes:
     return hashlib.pbkdf2_hmac("sha256", key.encode("utf-8"), salt, iterations)
 
 
+def fingerprint_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
 def hash_api_key(key: str) -> str:
     salt = os.urandom(16)
     iterations = 100_000
