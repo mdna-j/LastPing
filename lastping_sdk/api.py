@@ -19,7 +19,7 @@ def send_event(base_url: str, api_key: str, project_id: int, check_name: str, ev
     url = f"{hb.base_url}/projects/{project_id}/webhook"
     import requests
 
-    resp = requests.post(url, headers={"Authorization": f"Bearer {api_key}"}, json=payload, timeout=hb.timeout)
+    resp = requests.post(url, headers={"X-API-KEY": api_key}, json=payload, timeout=hb.timeout)
     resp.raise_for_status()
     try:
         return resp.json()
@@ -32,7 +32,7 @@ def get_checks(base_url: str, api_key: str, project_id: int):
     import requests
 
     url = f"{base_url.rstrip('/')}/projects/{project_id}/checks/"
-    resp = requests.get(url, headers={"Authorization": f"Bearer {api_key}"}, timeout=5)
+    resp = requests.get(url, headers={"X-API-KEY": api_key}, timeout=5)
     resp.raise_for_status()
     return resp.json()
 
@@ -45,6 +45,6 @@ def create_incident(base_url: str, api_key: str, project_id: int, title: str, bo
     payload = {"title": title}
     if body:
         payload["body"] = body
-    resp = requests.post(url, headers={"Authorization": f"Bearer {api_key}"}, json=payload, timeout=5)
+    resp = requests.post(url, headers={"X-API-KEY": api_key}, json=payload, timeout=5)
     resp.raise_for_status()
     return resp.json()

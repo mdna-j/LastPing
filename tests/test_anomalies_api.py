@@ -73,7 +73,7 @@ def test_list_persisted_anomalies_endpoint(tmp_path):
         incident_id = inc.id
 
     client = TestClient(app)
-    headers = {"Authorization": "Bearer anomkey"}
+    headers = {"X-API-KEY": "anomkey"}
 
     resp = client.get(f"/projects/{project_id}/analytics/anomaly-events", headers=headers)
     assert resp.status_code == 200
@@ -91,4 +91,3 @@ def test_list_persisted_anomalies_endpoint(tmp_path):
     payload2 = resp2.json()
     assert payload2["count"] == 1
     assert payload2["anomalies"][0]["type"] == "latency_spike"
-

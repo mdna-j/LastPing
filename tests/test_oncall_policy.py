@@ -58,7 +58,7 @@ def test_oncall_preview_filters_event_types(tmp_path):
         project_id = project.id
 
     client = TestClient(app)
-    headers = {"Authorization": "Bearer oncallkey"}
+    headers = {"X-API-KEY": "oncallkey"}
     resp = client.get(f"/projects/{project_id}/oncall/escalations/preview?event_type=down", headers=headers)
     assert resp.status_code == 200
     data = resp.json()
@@ -124,7 +124,7 @@ def test_oncall_apply_template(tmp_path):
     )
     assert resp.status_code == 200
 
-    headers = {"Authorization": "Bearer tmplkey"}
+    headers = {"X-API-KEY": "tmplkey"}
     list_resp = client.get(f"/projects/{project_id}/oncall/escalations?check_id={check_id}", headers=headers)
     assert list_resp.status_code == 200
     rows = list_resp.json()

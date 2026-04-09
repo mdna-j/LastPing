@@ -29,12 +29,12 @@ def test_api_key_rate_limit(tmp_path):
         session.refresh(ak)
 
         # first call should succeed
-        res = limit_by_api_key(project.id, authorization=f"Bearer {plain}", x_api_key=None, x_admin_token=None, session=session)
+        res = limit_by_api_key(project.id, authorization=None, x_api_key=plain, x_admin_token=None, session=session)
         assert isinstance(res, ApiKey)
 
         # second call in same minute should raise 429
         with pytest.raises(Exception) as exc:
-            limit_by_api_key(project.id, authorization=f"Bearer {plain}", x_api_key=None, x_admin_token=None, session=session)
+            limit_by_api_key(project.id, authorization=None, x_api_key=plain, x_admin_token=None, session=session)
         # HTTPException has status_code attribute; ensure it's 429
         from fastapi import HTTPException
         assert isinstance(exc.value, HTTPException) and exc.value.status_code == 429

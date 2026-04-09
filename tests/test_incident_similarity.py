@@ -74,7 +74,7 @@ def test_incident_similarity_endpoint(tmp_path):
         similar_id = inc1.id
 
     client = TestClient(app)
-    headers = {"Authorization": "Bearer simkey"}
+    headers = {"X-API-KEY": "simkey"}
     resp = client.get(
         f"/projects/{project_id}/analytics/incident-similarity?incident_id={incident_id}&threshold=0.1",
         headers=headers,

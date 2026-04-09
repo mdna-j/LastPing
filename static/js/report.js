@@ -1,7 +1,7 @@
 function reportHeaders(){
   const apiKey = document.getElementById("apiKey").value || null;
   const headers = {};
-  if(apiKey) headers.Authorization = `Bearer ${apiKey}`;
+  if(apiKey) headers["X-API-KEY"] = apiKey;
   return headers;
 }
 
@@ -34,7 +34,7 @@ async function loadChecks(){
   if(!apiKey) return;
 
   try{
-    const res = await fetch(`/projects/${pid}/checks`, {headers: {Authorization: `Bearer ${apiKey}`}});
+    const res = await fetch(`/projects/${pid}/checks`, {headers: {"X-API-KEY": apiKey}});
     if(!res.ok) return;
     const checks = await res.json();
     for(const c of checks){

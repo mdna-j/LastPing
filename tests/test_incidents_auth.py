@@ -66,7 +66,7 @@ def test_incident_endpoints_require_valid_project_api_key_and_support_share_flow
 
     invalid = client.get(
         f"/projects/{project_id}/incidents",
-        headers={"Authorization": "Bearer wrong-key"},
+        headers={"X-API-KEY": "wrong-key"},
     )
     assert invalid.status_code == 403
 
@@ -83,7 +83,7 @@ def test_incident_endpoints_require_valid_project_api_key_and_support_share_flow
 
     detail = client.get(
         f"/projects/{project_id}/incidents/{incident_id}",
-        headers={"Authorization": f"Bearer {api_key}"},
+        headers={"X-API-KEY": api_key},
     )
     assert detail.status_code == 200
     payload = detail.json()

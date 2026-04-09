@@ -1,9 +1,8 @@
 """
-Dependency helpers for API key verification.
+Dependency helpers for request authentication and authorization.
 
-`require_project_api_key` is used by router endpoints to ensure requests
-are authenticated using a project's API key. It accepts either an
-`Authorization: Bearer <key>` header or `X-API-KEY` header.
+Project API keys are accepted only via `X-API-KEY`.
+User session tokens are accepted only via `Authorization: Bearer <token>`.
 """
 
 import importlib
@@ -293,19 +292,7 @@ def authorize_project_operation(
 
     bearer = _extract_bearer_token(authorization)
     if bearer:
-        matched, project_primary = _match_project_api_key(session, project_id, bearer)
-        if matched or project_primary:
-            role = Role.OWNER.value if project_primary else (matched.role or Role.OWNER.value)
-            if not _project_role_at_least(role, min_role):
-                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_role_required_detail(min_role))
-            return project
-
-        try:
-            ut = _get_valid_user_token(session, authorization)
-        except HTTPException as exc:
-            if exc.status_code == status.HTTP_401_UNAUTHORIZED:
-                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API key") from exc
-            raise
+        ut = _get_valid_user_token(session, authorization)
         role = get_effective_project_role(session, ut.user_id, project_id)
         if not role:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not a project member")
@@ -456,7 +443,8 @@ def require_admin_or_project_api_key(project_id: int, x_admin_token: Optional[st
     """Allow access when either a valid project API key is supplied or the admin token matches.
 
     - If `X-ADMIN-TOKEN` matches `ADMIN_TOKEN` env var, returns the project.
-    - Otherwise falls back to verifying the project's API key (same as `require_project_api_key`).
+    - Otherwise falls back to verifying the project's API key from `X-API-KEY`
+      (same as `require_project_api_key`).
     """
     admin_token = os.environ.get('ADMIN_TOKEN')
     if admin_token and x_admin_token and x_admin_token == admin_token:
@@ -482,13 +470,7 @@ def require_project_access(project_id: int, x_admin_token: Optional[str] = Heade
 
 
 def _extract_api_key(authorization: Optional[str], x_api_key: Optional[str]) -> Optional[str]:
-    """Extract API key from common header locations.
-
-    Supports `Authorization: Bearer <key>` and `X-API-KEY`.
-    """
-    if isinstance(authorization, str):
-        if authorization.lower().startswith("bearer "):
-            return authorization.split(None, 1)[1].strip()
+    """Extract a project API key from `X-API-KEY` only."""
     if isinstance(x_api_key, str) and x_api_key:
         return x_api_key
     return None
@@ -497,6 +479,7 @@ def _extract_api_key(authorization: Optional[str], x_api_key: Optional[str]) -> 
 def require_project_api_key(project_id: int, authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), session: Session = Depends(get_session)) -> Project:
     """FastAPI dependency that verifies a project's API key.
 
+    - Reads only `X-API-KEY`.
     - Raises 401 when missing.
     - Raises 403 when provided key does not match stored hash.
     - Returns `Project` on success for downstream use.
@@ -520,7 +503,9 @@ def limit_by_api_key(project_id: int, authorization: Optional[str] = Header(None
     """Enforce per-API-key rate limits for write endpoints.
 
     - Admin token bypasses rate limiting.
-    - Accepts either a project-scoped key in `api_key` table or the project's primary API key hash stored on `Project.api_key_hash`.
+    - Accepts a project-scoped key from `X-API-KEY` / `api_key` table or the
+      project's primary API key hash stored on `Project.api_key_hash`.
+    - Falls back to bearer user-token rate limits when a user session token is present.
       Raises 401/403 if missing/invalid.
     - Increments a per-minute counter stored in `ApiKeyUsage` and raises 429 when exceeded.
     Returns the matched `ApiKey` on success, or None for admin token.
@@ -529,118 +514,103 @@ def limit_by_api_key(project_id: int, authorization: Optional[str] = Header(None
     if admin_token and x_admin_token and x_admin_token == admin_token:
         return None
 
-    key = _extract_api_key(authorization, x_api_key)
-    if not key:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing API key")
-
     window_seconds = int(os.environ.get("API_RATE_LIMIT_WINDOW_SECONDS", "60"))
-    matched, project_primary = _match_project_api_key(session, project_id, key)
-    if not matched:
-        # Backwards compatibility: allow the project's primary API key stored on `Project.api_key_hash`
-        # even when no `ApiKey` rows exist yet.
-        if project_primary:
-            return None
+    key = _extract_api_key(authorization, x_api_key)
+    if key:
+        matched, project_primary = _match_project_api_key(session, project_id, key)
+        if not matched:
+            # Backwards compatibility: allow the project's primary API key stored
+            # on `Project.api_key_hash` even when no `ApiKey` rows exist yet.
+            if project_primary:
+                return None
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API key")
 
-        # If no API key matched, allow bearer user tokens and apply per-user rate limits.
-        token = _extract_bearer_token(authorization)
-        if token:
+        if not _project_role_at_least(getattr(matched, "role", Role.OWNER.value), Role.EDITOR.value):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="API key role does not allow write access")
+
+        limit = getattr(matched, 'rate_limit_per_minute', 0) or 0
+        if not limit:
+            return matched
+
+        # Prefer Redis for distributed counters when configured
+        if _redis is not None:
+            minute = datetime.utcnow().strftime('%Y%m%d%H%M')
+            rkey = f"apik:{matched.id}:{minute}"
             try:
-                ut = _get_valid_user_token(session, authorization)
-            except HTTPException as exc:
-                if exc.status_code == status.HTTP_401_UNAUTHORIZED:
-                    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API key") from exc
-                raise
-
-            # Rate limit per-user (configurable via env var USER_RATE_LIMIT_PER_MINUTE)
-            limit = int(os.environ.get('USER_RATE_LIMIT_PER_MINUTE', '60'))
-            if not limit:
-                return ut
-
-            # Prefer Redis when available
-            if _redis is not None:
-                minute = datetime.utcnow().strftime('%Y%m%d%H%M')
-                rkey = f"user:{ut.user_id}:{minute}"
-                try:
-                    val = _redis.incr(rkey)
-                    if val == 1:
-                        _redis.expire(rkey, 70)
-                    if val > limit:
-                        _raise_rate_limit(window_seconds)
-                    return ut
-                except HTTPException:
-                    raise
-                except Exception:
-                    pass
-
-            now = datetime.utcnow().replace(second=0, microsecond=0)
-            try:
-                uu = session.exec(select(UserUsage).where(UserUsage.user_id == ut.user_id, UserUsage.minute_start == now)).first()
-                if uu:
-                    if uu.count >= limit:
-                        _raise_rate_limit(window_seconds)
-                    uu.count = uu.count + 1
-                    session.add(uu)
-                    session.commit()
-                else:
-                    uu = UserUsage(user_id=ut.user_id, minute_start=now, count=1)
-                    session.add(uu)
-                    session.commit()
-                return ut
-            except Exception:
-                # fallback to in-memory counter if DB operations fail
-                minute = datetime.utcnow().strftime('%Y%m%d%H%M')
-                rkey = f"user:{ut.user_id}:{minute}"
-                cur = _user_counters.get(rkey, 0)
-                if cur >= limit:
+                val = _redis.incr(rkey)
+                if val == 1:
+                    _redis.expire(rkey, 70)
+                if val > limit:
                     _raise_rate_limit(window_seconds)
-                _user_counters[rkey] = cur + 1
-                if len(_user_counters) > 10000:
-                    _user_counters.clear()
-                return ut
+                return matched
+            except HTTPException:
+                raise
+            except Exception:
+                pass
 
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API key")
-
-    if not _project_role_at_least(getattr(matched, "role", Role.OWNER.value), Role.EDITOR.value):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="API key role does not allow write access")
-
-    limit = getattr(matched, 'rate_limit_per_minute', 0) or 0
-    if not limit:
+        now = datetime.utcnow().replace(second=0, microsecond=0)
+        us = session.exec(select(ApiKeyUsage).where(ApiKeyUsage.api_key_id == matched.id, ApiKeyUsage.minute_start == now)).first()
+        if us:
+            if us.count >= limit:
+                _raise_rate_limit(window_seconds)
+            us.count = us.count + 1
+            session.add(us)
+            session.commit()
+        else:
+            us = ApiKeyUsage(api_key_id=matched.id, minute_start=now, count=1)
+            session.add(us)
+            session.commit()
         return matched
 
-    # Prefer Redis for distributed counters when configured
-    if _redis is not None:
-        # key per api_key_id + minute window
-        minute = datetime.utcnow().strftime('%Y%m%d%H%M')
-        rkey = f"apik:{matched.id}:{minute}"
+    token = _extract_bearer_token(authorization)
+    if token:
+        ut = _get_valid_user_token(session, authorization)
+
+        limit = int(os.environ.get('USER_RATE_LIMIT_PER_MINUTE', '60'))
+        if not limit:
+            return ut
+
+        if _redis is not None:
+            minute = datetime.utcnow().strftime('%Y%m%d%H%M')
+            rkey = f"user:{ut.user_id}:{minute}"
+            try:
+                val = _redis.incr(rkey)
+                if val == 1:
+                    _redis.expire(rkey, 70)
+                if val > limit:
+                    _raise_rate_limit(window_seconds)
+                return ut
+            except HTTPException:
+                raise
+            except Exception:
+                pass
+
+        now = datetime.utcnow().replace(second=0, microsecond=0)
         try:
-            val = _redis.incr(rkey)
-            if val == 1:
-                # expire after 70 seconds to cover clock skew
-                _redis.expire(rkey, 70)
-            if val > limit:
-                _raise_rate_limit(window_seconds)
-            return matched
-        except HTTPException:
-            raise
+            uu = session.exec(select(UserUsage).where(UserUsage.user_id == ut.user_id, UserUsage.minute_start == now)).first()
+            if uu:
+                if uu.count >= limit:
+                    _raise_rate_limit(window_seconds)
+                uu.count = uu.count + 1
+                session.add(uu)
+                session.commit()
+            else:
+                uu = UserUsage(user_id=ut.user_id, minute_start=now, count=1)
+                session.add(uu)
+                session.commit()
+            return ut
         except Exception:
-            # fallback to DB if Redis fails
-            pass
+            minute = datetime.utcnow().strftime('%Y%m%d%H%M')
+            rkey = f"user:{ut.user_id}:{minute}"
+            cur = _user_counters.get(rkey, 0)
+            if cur >= limit:
+                _raise_rate_limit(window_seconds)
+            _user_counters[rkey] = cur + 1
+            if len(_user_counters) > 10000:
+                _user_counters.clear()
+            return ut
 
-    now = datetime.utcnow().replace(second=0, microsecond=0)
-    # find or create usage row
-    us = session.exec(select(ApiKeyUsage).where(ApiKeyUsage.api_key_id == matched.id, ApiKeyUsage.minute_start == now)).first()
-    if us:
-        if us.count >= limit:
-            _raise_rate_limit(window_seconds)
-        us.count = us.count + 1
-        session.add(us)
-        session.commit()
-    else:
-        us = ApiKeyUsage(api_key_id=matched.id, minute_start=now, count=1)
-        session.add(us)
-        session.commit()
-
-    return matched
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing credentials")
 
 
 def get_current_user(authorization: Optional[str] = Header(None), session: Session = Depends(get_session)) -> User:

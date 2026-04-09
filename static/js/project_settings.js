@@ -2,7 +2,7 @@ function headersSettings(){
   const apiKey = document.getElementById("apiKey").value || "";
   const admin = document.getElementById("adminToken").value || "";
   const headers = {"Content-Type": "application/json"};
-  if(apiKey) headers.Authorization = `Bearer ${apiKey}`;
+  if(apiKey) headers["X-API-KEY"] = apiKey;
   if(admin) headers["X-ADMIN-TOKEN"] = admin;
   return headers;
 }

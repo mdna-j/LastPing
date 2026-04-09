@@ -48,7 +48,7 @@ def test_incident_clusters_endpoint(tmp_path):
         inc2_id = inc2.id
 
     client = TestClient(app)
-    headers = {"Authorization": "Bearer ckey"}
+    headers = {"X-API-KEY": "ckey"}
     resp = client.get(f"/projects/{pid}/analytics/incident-clusters?threshold=0.1&min_cluster_size=2", headers=headers)
     assert resp.status_code == 200
     data = resp.json()
@@ -94,7 +94,7 @@ def test_anomaly_predictions_endpoint(tmp_path):
         cid = check.id
 
     client = TestClient(app)
-    headers = {"Authorization": "Bearer akey"}
+    headers = {"X-API-KEY": "akey"}
     resp = client.get(f"/projects/{pid}/analytics/anomalies?recent_hours={recent_hours}&z_threshold=0.5&min_events=1", headers=headers)
     assert resp.status_code == 200
     data = resp.json()
@@ -141,7 +141,7 @@ def test_predictive_model_training_and_ml_endpoint(tmp_path):
         cid = check.id
 
     client = TestClient(app)
-    headers = {"Authorization": "Bearer mkey"}
+    headers = {"X-API-KEY": "mkey"}
     train = client.post(
         f"/projects/{pid}/analytics/predictive/train",
         json={"days": 1, "min_events": 1},
@@ -200,7 +200,7 @@ def test_predictive_quality_monitoring_endpoints(tmp_path):
         cid = check.id
 
     client = TestClient(app)
-    headers = {"Authorization": "Bearer qkey"}
+    headers = {"X-API-KEY": "qkey"}
 
     train = client.post(
         f"/projects/{pid}/analytics/predictive/train",

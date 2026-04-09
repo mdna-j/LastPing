@@ -38,7 +38,7 @@ def test_uptime_and_mttr_endpoints(tmp_path, monkeypatch):
         now_val = now
 
     # uptime over last 1 day
-    headers = {"Authorization": f"Bearer {plain}"}
+    headers = {"X-API-KEY": plain}
     r = client.get(f"/projects/{p_id}/metrics/uptime?start={(now_val - timedelta(days=1)).isoformat()}&end={(now_val).isoformat()}", headers=headers)
     assert r.status_code == 200
     j = r.json()
@@ -82,7 +82,7 @@ def test_snapshots_endpoint(tmp_path):
         s.commit()
         p2_id = p.id
 
-    headers2 = {"Authorization": f"Bearer {plain2}"}
+    headers2 = {"X-API-KEY": plain2}
     r = client.get(f"/projects/{p2_id}/metrics/snapshots", headers=headers2)
     assert r.status_code == 200
     arr = r.json()
@@ -120,7 +120,7 @@ def test_availability_rollup_monthly(tmp_path):
         s.commit()
         pid = p.id
 
-    headers = {"Authorization": f"Bearer {plain}"}
+    headers = {"X-API-KEY": plain}
     end = datetime(2026, 3, 1, 0, 0, 0).isoformat()
     start = datetime(2025, 12, 1, 0, 0, 0).isoformat()
     r = client.get(f"/projects/{pid}/metrics/availability/rollup?period=month&start={start}&end={end}", headers=headers)
@@ -161,7 +161,7 @@ def test_error_budget_endpoint_reports_burn_rate(tmp_path):
         s.commit()
         pid = p.id
 
-    headers = {"Authorization": f"Bearer {plain}"}
+    headers = {"X-API-KEY": plain}
     resp = client.get(f"/projects/{pid}/metrics/error-budget?start={(now - timedelta(days=30)).isoformat()}&end={now.isoformat()}&short_window_minutes=60&long_window_minutes=360", headers=headers)
     assert resp.status_code == 200
     payload = resp.json()

@@ -1,7 +1,7 @@
 function snapshotHeaders(){
   const apiKey = document.getElementById("apiKey").value || null;
   const headers = {};
-  if(apiKey) headers.Authorization = `Bearer ${apiKey}`;
+  if(apiKey) headers["X-API-KEY"] = apiKey;
   return headers;
 }
 
@@ -65,7 +65,7 @@ async function loadChecks(){
   if(!apiKey) return;
 
   try{
-    const res = await fetch(`/projects/${pid}/checks`, {headers: {Authorization: `Bearer ${apiKey}`}});
+    const res = await fetch(`/projects/${pid}/checks`, {headers: {"X-API-KEY": apiKey}});
     if(!res.ok) return;
     const checks = await res.json();
     for(const c of checks){
@@ -217,7 +217,7 @@ function renderSnapshotChart(snaps){
 
 async function openAvailability(){
   const pid = document.getElementById("projectId").value || "1";
-  const {Authorization} = snapshotHeaders();
+  const {"X-API-KEY": apiKey} = snapshotHeaders();
   const start = document.getElementById("start").value || null;
   const end = document.getElementById("end").value || null;
   const root = document.getElementById("availability");
@@ -227,7 +227,7 @@ async function openAvailability(){
   if(start) params.set("start", start);
   if(end) params.set("end", end);
   const headers = {};
-  if(Authorization) headers.Authorization = Authorization;
+  if(apiKey) headers["X-API-KEY"] = apiKey;
   const res = await fetch(`/projects/${pid}/metrics/availability?${params.toString()}`, {headers});
   if(!res.ok){
     if(root) root.innerText = "Failed to load availability";

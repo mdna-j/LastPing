@@ -23,7 +23,7 @@ def test_webhook_creates_check_and_event(tmp_path):
         session.refresh(p)
         project_id = p.id
 
-    headers = {"Authorization": f"Bearer {api_key}"}
+    headers = {"X-API-KEY": api_key}
     payload = {"check_name": "webhook-check", "event": "down", "message": "failure via webhook"}
     r = client.post(f"/projects/{project_id}/webhook", json=payload, headers=headers)
     assert r.status_code in (200, 201, 202)
@@ -55,7 +55,7 @@ def test_webhook_heartbeat_updates_last_ping(tmp_path):
         session.refresh(p)
         project_id = p.id
 
-    headers = {"Authorization": f"Bearer {api_key}"}
+    headers = {"X-API-KEY": api_key}
     payload = {"check_name": "hb-check", "event": "heartbeat", "timestamp": datetime.utcnow().isoformat()}
     r = client.post(f"/projects/{project_id}/webhook", json=payload, headers=headers)
     assert r.status_code == 200
@@ -100,7 +100,7 @@ def test_webhook_ignores_stale_heartbeat_timestamp(tmp_path):
         check_id = chk.id
         expected_last_ping = chk.last_ping
 
-    headers = {"Authorization": f"Bearer {api_key}"}
+    headers = {"X-API-KEY": api_key}
     stale_ts = (expected_last_ping - timedelta(minutes=5)).isoformat()
     payload = {"check_name": "hb-stale-check", "event": "heartbeat", "timestamp": stale_ts}
     r = client.post(f"/projects/{project_id}/webhook", json=payload, headers=headers)
@@ -148,7 +148,7 @@ def test_heartbeat_endpoint_ignores_stale_timestamp(tmp_path):
         check_id = chk.id
         expected_last_ping = chk.last_ping
 
-    headers = {"Authorization": f"Bearer {api_key}"}
+    headers = {"X-API-KEY": api_key}
     stale_ts = (expected_last_ping - timedelta(minutes=10)).isoformat()
     payload = {"timestamp": stale_ts}
     r = client.post(f"/projects/{project_id}/heartbeat/hb-direct-stale", json=payload, headers=headers)

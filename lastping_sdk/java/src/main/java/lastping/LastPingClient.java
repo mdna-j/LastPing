@@ -130,7 +130,7 @@ public class LastPingClient {
         conn.setConnectTimeout(this.timeoutMillis);
         conn.setReadTimeout(this.timeoutMillis);
         conn.setRequestMethod("POST");
-        conn.setRequestProperty("Authorization", "Bearer " + this.apiKey);
+        conn.setRequestProperty("X-API-KEY", this.apiKey);
         conn.setRequestProperty("User-Agent", this.userAgent);
         conn.setRequestProperty("Content-Type", "application/json");
         conn.setDoOutput(true);

@@ -4,7 +4,7 @@ const DashboardShell = window.LastPingShell;
 function dashHeaders(){
   const apiKey = document.getElementById("apiKey").value || null;
   const headers = {};
-  if(apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
+  if(apiKey) headers["X-API-KEY"] = apiKey;
   return headers;
 }
 
@@ -269,7 +269,7 @@ async function loadHealthStrip(pid, checks, perf){
 async function exportAvailabilityCsv(){
   const pid = document.getElementById("projectId").value || "1";
   const headers = dashHeaders();
-  if(!headers.Authorization){
+  if(!headers["X-API-KEY"]){
     alert("API key required to export CSV");
     return;
   }
@@ -299,6 +299,7 @@ async function loadDashboard(){
   const perf = window.LastPingShell ? window.LastPingShell.createPerfTracker("Dashboard") : null;
   const pid = document.getElementById("projectId").value || "1";
   const headers = dashHeaders();
+  const hasApiKey = !!headers["X-API-KEY"];
   const {start, end} = getRange();
   const params = new URLSearchParams();
   if(start) params.set("start", start);
@@ -344,7 +345,7 @@ async function loadDashboard(){
       jsonFetch("snapshots", `/projects/${pid}/metrics/snapshots?limit=30`, {headers}),
       jsonFetch("trends", `/projects/${pid}/analytics/trends?days=7&interval=day`, {headers}),
     ];
-    if(headers.Authorization){
+    if(hasApiKey){
       reqs.push(jsonFetch("predictive", `/projects/${pid}/analytics/predictive?recent_hours=24`, {headers}));
       reqs.push(jsonFetch("anomalies", `/projects/${pid}/analytics/anomalies?recent_hours=24`, {headers}));
     }
@@ -368,7 +369,7 @@ async function loadDashboard(){
   // incidents (requires API key)
   const incidentsEl = document.getElementById("incidentsList");
   const incCountEl = document.getElementById("openIncidentsCount");
-  if(headers.Authorization){
+  if(hasApiKey){
     const incRes = perf && window.LastPingShell
       ? await perf.fetchJson("incidents", `/projects/${pid}/incidents?status=open`, {headers})
       : await fetch(`/projects/${pid}/incidents?status=open`, {headers}).then(async (res)=> ({ok: res.ok, status: res.status, data: res.ok ? await res.json() : null}));
@@ -399,7 +400,7 @@ async function loadDashboard(){
 
   const predEl = document.getElementById("predictiveList");
   if(predEl){
-    if(!headers.Authorization){
+    if(!hasApiKey){
       predEl.innerText = "Provide API key to load predictive alerts.";
     }else if(predictive && predictive.warnings){
       const modelNote = predictive.model_used ? `<div class="muted">Model: ${predictive.model_type || "trained"} (${predictive.model_count || 0})</div>` : "";
@@ -422,7 +423,7 @@ async function loadDashboard(){
 
   const anomEl = document.getElementById("anomalyList");
   if(anomEl){
-    if(!headers.Authorization){
+    if(!hasApiKey){
       anomEl.innerText = "Provide API key to load anomaly warnings.";
     }else if(anomalies && anomalies.warnings){
       if(!anomalies.warnings.length){
@@ -439,7 +440,7 @@ async function loadDashboard(){
     }
   }
   renderIntelligenceSummary({
-    hasApiKey: !!headers.Authorization,
+    hasApiKey,
     predictive,
     anomalies,
     checks
@@ -462,7 +463,7 @@ async function loadDashboard(){
     html += `<article id="checksKpiCard" class="card kpi-card ${checksStateClass}"><div class="metric-label">Checks</div><div class="metric-value">${total}</div><div class="metric-sub">${checksSub}</div></article>`;
     html += `<article id="uptimeKpiCard" class="card kpi-card ${uptimeStateClass}"><div class="metric-label">Uptime</div><div class="metric-value">${uptimePct !== null ? uptimePct.toFixed(2) + "%" : "n/a"}</div><div class="metric-sub">Selected range</div></article>`;
     html += `<article id="mttrKpiCard" class="card kpi-card ${mttrStateClass}"><div class="metric-label">MTTR</div><div class="metric-value">${mttrVal !== null ? mttrVal.toFixed(1) + "s" : "n/a"}</div><div class="metric-sub">Selected range</div></article>`;
-    html += `<article id="openIncidentsCard" class="card kpi-card ${openIncidentCardState}"><div class="metric-label">Open incidents</div><div class="metric-value" id="openIncidentsCount">${headers.Authorization ? "..." : "locked"}</div><div class="metric-sub">API key required</div></article>`;
+    html += `<article id="openIncidentsCard" class="card kpi-card ${openIncidentCardState}"><div class="metric-label">Open incidents</div><div class="metric-value" id="openIncidentsCount">${hasApiKey ? "..." : "locked"}</div><div class="metric-sub">API key required</div></article>`;
     html += '<article id="availabilityKpiCard" class="card kpi-card kpi-neutral"><div class="metric-label">Availability CSV</div><div><button id="exportAvailabilityCsvBtn" class="btn btn-secondary">Export</button></div><div class="metric-sub">Uses selected range</div></article>';
     cards.innerHTML = html;
     DashboardShell.setKpiState("openIncidentsCard", openIncidentCardState);

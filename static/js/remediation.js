@@ -2,7 +2,7 @@ function headersRemediation(){
   const apiKey = document.getElementById('apiKey').value;
   const admin = document.getElementById('adminToken').value;
   const h = {'Content-Type':'application/json'};
-  if(apiKey) h['Authorization'] = 'Bearer ' + apiKey;
+  if(apiKey) h['X-API-KEY'] = apiKey;
   if(admin) h['X-ADMIN-TOKEN'] = admin;
   return h;
 }

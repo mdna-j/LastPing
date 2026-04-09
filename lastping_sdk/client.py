@@ -24,7 +24,7 @@ class HeartbeatClient:
 
     def send(self, project_id: int, name: str, timestamp: Optional[datetime] = None) -> requests.Response:
         url = f"{self.base_url}/projects/{project_id}/heartbeat/{name}"
-        headers = {"Authorization": f"Bearer {self.api_key}"}
+        headers = {"X-API-KEY": self.api_key}
         payload = {}
 
         if timestamp is not None:
@@ -38,7 +38,7 @@ class HeartbeatClient:
 
     def send_event(self, project_id: int, check_name: str, event: str = "down", message: Optional[str] = None, timestamp: Optional[datetime] = None) -> Dict[str, Any]:
         url = f"{self.base_url}/projects/{project_id}/webhook"
-        headers = {"Authorization": f"Bearer {self.api_key}"}
+        headers = {"X-API-KEY": self.api_key}
         payload: Dict[str, Any] = {"check_name": check_name, "event": event}
         if message is not None:
             payload["message"] = message

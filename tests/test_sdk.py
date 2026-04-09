@@ -27,7 +27,7 @@ def test_send_heartbeat_calls_requests_post(monkeypatch):
     assert len(calls) == 1
     url, headers, json_body, timeout = calls[0]
     assert url == "http://example.com/projects/1/heartbeat/check1"
-    assert headers["Authorization"] == "Bearer key"
+    assert headers["X-API-KEY"] == "key"
     assert json_body["timestamp"] == "2020-01-01T00:00:00"
 
 

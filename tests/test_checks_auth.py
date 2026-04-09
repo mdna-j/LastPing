@@ -51,15 +51,23 @@ def test_check_write_endpoints_preserve_api_key_errors(tmp_path):
 
     missing = client.post(f"/projects/{project_id}/checks/", json=payload)
     assert missing.status_code == 401
-    assert missing.json()["detail"] == "Missing API key"
+    assert missing.json()["detail"] == "Missing credentials"
 
     invalid_bearer = client.post(
         f"/projects/{project_id}/checks/",
         json=payload,
         headers={"Authorization": "Bearer wrong-key"},
     )
-    assert invalid_bearer.status_code == 403
-    assert invalid_bearer.json()["detail"] == "Invalid API key"
+    assert invalid_bearer.status_code == 401
+    assert invalid_bearer.json()["detail"] == "Invalid token"
+
+    valid_api_key_in_bearer = client.post(
+        f"/projects/{project_id}/checks/",
+        json=payload,
+        headers={"Authorization": "Bearer valid-key"},
+    )
+    assert valid_api_key_in_bearer.status_code == 401
+    assert valid_api_key_in_bearer.json()["detail"] == "Invalid token"
 
     invalid_header = client.post(
         f"/projects/{project_id}/checks/",

@@ -46,7 +46,7 @@ def test_predictive_endpoint(tmp_path):
         check_id = check.id
 
     client = TestClient(app)
-    headers = {"Authorization": "Bearer predkey"}
+    headers = {"X-API-KEY": "predkey"}
     resp = client.get(
         f"/projects/{project_id}/analytics/predictive?recent_hours={recent_hours}&ratio_threshold=1.5&min_events=3",
         headers=headers,
