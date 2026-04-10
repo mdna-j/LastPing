@@ -1,14 +1,14 @@
-import hmac
 import json
 import os
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from fastapi import APIRouter, Body, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlmodel import Session, select
 
 from ..db import get_session
 from ..models import AuditLog, Incident, IncidentNote
+from ..webhook_security import parse_signed_json_body, register_webhook_receipt, verify_signed_webhook_request
 
 router = APIRouter(prefix="/integrations/pagerduty", tags=["pagerduty"])
 
@@ -285,21 +285,34 @@ def _apply_sync_event(session: Session, incident: Incident, event: dict) -> bool
 
 
 @router.post("/webhook")
-def receive_pagerduty_webhook(
-    payload: dict = Body(...),
-    x_pagerduty_webhook_secret: Optional[str] = Header(None),
-    x_lastping_webhook_secret: Optional[str] = Header(None),
+async def receive_pagerduty_webhook(
+    request: Request,
+    x_pagerduty_webhook_timestamp: Optional[str] = Header(None),
+    x_pagerduty_webhook_signature: Optional[str] = Header(None),
+    x_lastping_webhook_timestamp: Optional[str] = Header(None),
+    x_lastping_webhook_signature: Optional[str] = Header(None),
     session: Session = Depends(get_session),
 ):
     configured_secret = os.environ.get("PAGERDUTY_WEBHOOK_SECRET")
     if not configured_secret:
         raise HTTPException(status_code=503, detail="PagerDuty webhook sync is not configured")
 
-    provided_secret = x_pagerduty_webhook_secret or x_lastping_webhook_secret
-    if not provided_secret:
-        raise HTTPException(status_code=401, detail="Missing PagerDuty webhook secret")
-    if not hmac.compare_digest(provided_secret, configured_secret):
-        raise HTTPException(status_code=403, detail="Invalid PagerDuty webhook secret")
+    raw_body = await request.body()
+    payload = parse_signed_json_body(raw_body)
+    request_timestamp, normalized_signature = verify_signed_webhook_request(
+        source="PagerDuty",
+        secret=configured_secret,
+        timestamp=x_pagerduty_webhook_timestamp or x_lastping_webhook_timestamp,
+        signature=x_pagerduty_webhook_signature or x_lastping_webhook_signature,
+        raw_body=raw_body,
+    )
+    if not register_webhook_receipt(
+        session,
+        source="pagerduty",
+        signature=normalized_signature,
+        request_timestamp=request_timestamp,
+    ):
+        return {"accepted": True, "processed": 0, "changed": 0, "ignored": 0, "replayed": 1}
 
     events = _event_list(payload)
     if not events:

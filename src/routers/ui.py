@@ -1521,10 +1521,12 @@ def project_settings_page(project_id: int = Path(..., ge=1)):
             <div class="status-inline"><strong>Inbound webhook:</strong> <code id="jiraWebhookUrl">/integrations/jira/webhook</code></div>
           </div>
           <div class="row">
-            <div class="status-inline"><strong>Secret header:</strong> <code id="jiraSecretHeader">X-Jira-Webhook-Secret</code></div>
+            <div class="status-inline"><strong>Timestamp header:</strong> <code id="jiraTimestampHeader">X-Jira-Webhook-Timestamp</code></div>
+            <div class="status-inline"><strong>Signature header:</strong> <code id="jiraSignatureHeader">X-Jira-Webhook-Signature</code></div>
             <div class="status-inline"><strong>Webhook secret:</strong> <span id="jiraSecretStatus" class="muted">unknown</span></div>
             <div class="status-inline"><strong>Latest sync:</strong> <span id="jiraLastSync" class="muted">none yet</span></div>
           </div>
+          <div class="status-inline"><strong>Signing scheme:</strong> <code id="jiraSignatureScheme">HMAC-SHA256 over '&lt;timestamp&gt;.&lt;raw_body&gt;'</code></div>
           <div id="jiraSettingsHint" class="muted">Create Jira issues directly from incident detail pages once project credentials are configured.</div>
         </section>
 
@@ -1546,10 +1548,12 @@ def project_settings_page(project_id: int = Path(..., ge=1)):
             <div class="status-inline"><strong>Inbound webhook:</strong> <code id="pagerdutyWebhookUrl">/integrations/pagerduty/webhook</code></div>
           </div>
           <div class="row">
-            <div class="status-inline"><strong>Secret header:</strong> <code id="pagerdutySecretHeader">X-PagerDuty-Webhook-Secret</code></div>
+            <div class="status-inline"><strong>Timestamp header:</strong> <code id="pagerdutyTimestampHeader">X-PagerDuty-Webhook-Timestamp</code></div>
+            <div class="status-inline"><strong>Signature header:</strong> <code id="pagerdutySignatureHeader">X-PagerDuty-Webhook-Signature</code></div>
             <div class="status-inline"><strong>Webhook secret:</strong> <span id="pagerdutySecretStatus" class="muted">unknown</span></div>
             <div class="status-inline"><strong>Latest sync:</strong> <span id="pagerdutyLastSync" class="muted">none yet</span></div>
           </div>
+          <div class="status-inline"><strong>Signing scheme:</strong> <code id="pagerdutySignatureScheme">HMAC-SHA256 over '&lt;timestamp&gt;.&lt;raw_body&gt;'</code></div>
           <div id="pagerdutyTestResult" class="muted">Use test delivery to send a trigger and immediate resolve event to PagerDuty.</div>
         </section>
 

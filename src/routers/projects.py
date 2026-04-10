@@ -357,7 +357,9 @@ class PagerDutySettingsOut(BaseModel):
     integration_key_configured: bool
     inbound_webhook_url: str
     inbound_secret_configured: bool
-    inbound_secret_header: str
+    inbound_timestamp_header: str
+    inbound_signature_header: str
+    inbound_signature_scheme: str
     latest_sync_action: Optional[str] = None
     latest_sync_at: Optional[datetime] = None
 
@@ -387,7 +389,9 @@ class JiraSettingsOut(BaseModel):
     issue_type: Optional[str] = None
     inbound_webhook_url: str
     inbound_secret_configured: bool
-    inbound_secret_header: str
+    inbound_timestamp_header: str
+    inbound_signature_header: str
+    inbound_signature_scheme: str
     latest_sync_action: Optional[str] = None
     latest_sync_at: Optional[datetime] = None
     configured: bool
@@ -795,7 +799,9 @@ def _pagerduty_settings_out(session: Session, project: ProjectModel) -> PagerDut
         integration_key_configured=bool(project.pagerduty_integration_key),
         inbound_webhook_url=inbound_url,
         inbound_secret_configured=bool(os.environ.get("PAGERDUTY_WEBHOOK_SECRET")),
-        inbound_secret_header="X-PagerDuty-Webhook-Secret",
+        inbound_timestamp_header="X-PagerDuty-Webhook-Timestamp",
+        inbound_signature_header="X-PagerDuty-Webhook-Signature",
+        inbound_signature_scheme="HMAC-SHA256 over '<timestamp>.<raw_body>' using PAGERDUTY_WEBHOOK_SECRET",
         latest_sync_action=latest_sync.action if latest_sync else None,
         latest_sync_at=latest_sync.created_at if latest_sync else None,
     )
@@ -822,7 +828,9 @@ def _jira_settings_out(session: Session, project: ProjectModel) -> JiraSettingsO
         issue_type=project.jira_issue_type or "Task",
         inbound_webhook_url=inbound_url,
         inbound_secret_configured=bool(os.environ.get("JIRA_WEBHOOK_SECRET")),
-        inbound_secret_header="X-Jira-Webhook-Secret",
+        inbound_timestamp_header="X-Jira-Webhook-Timestamp",
+        inbound_signature_header="X-Jira-Webhook-Signature",
+        inbound_signature_scheme="HMAC-SHA256 over '<timestamp>.<raw_body>' using JIRA_WEBHOOK_SECRET",
         latest_sync_action=latest_sync.action if latest_sync else None,
         latest_sync_at=latest_sync.created_at if latest_sync else None,
         configured=jira_settings_ready(project),

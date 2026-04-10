@@ -532,6 +532,17 @@ class AuditLog(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+class WebhookReceipt(SQLModel, table=True):
+    __tablename__ = "webhook_receipt"
+    __table_args__ = (sa.UniqueConstraint("source", "signature", name="uq_webhook_receipt_source_signature"),)
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    source: str = Field(index=True)
+    signature: str = Field(index=True)
+    request_timestamp: datetime = Field(index=True)
+    received_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+
+
 class AdminCsrf(SQLModel, table=True):
     __tablename__ = "admin_csrf"
     id: Optional[int] = Field(default=None, primary_key=True)

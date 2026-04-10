@@ -8,9 +8,11 @@ serialized prefix `enc$fernet$...`.
 
 import base64
 import hashlib
+import hmac
 import os
 import secrets
 from functools import lru_cache
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -19,6 +21,7 @@ from sqlalchemy.types import TEXT, TypeDecorator
 
 _DEV_SECRET_ENCRYPTION_KEY = "lastping-dev-only-encryption-key"
 _ENCRYPTED_SECRET_PREFIX = "enc$fernet$"
+_WEBHOOK_SIG_PREFIX = "sha256="
 
 
 def generate_api_key() -> str:
@@ -97,6 +100,63 @@ class EncryptedString(TypeDecorator):
 
     def process_result_value(self, value, dialect):
         return decrypt_secret(value)
+
+
+def _parse_webhook_timestamp(timestamp: str) -> datetime:
+    text = str(timestamp or "").strip()
+    if not text:
+        raise ValueError("Missing webhook timestamp")
+    if text.isdigit():
+        return datetime.utcfromtimestamp(int(text))
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(text)
+    if parsed.tzinfo is not None:
+        return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def normalize_webhook_signature(signature: str) -> str:
+    raw = str(signature or "").strip()
+    if not raw:
+        raise ValueError("Missing webhook signature")
+    if raw.startswith(_WEBHOOK_SIG_PREFIX):
+        raw = raw[len(_WEBHOOK_SIG_PREFIX) :]
+    if len(raw) != 64:
+        raise ValueError("Webhook signature must be a sha256 hex digest")
+    try:
+        int(raw, 16)
+    except ValueError as exc:
+        raise ValueError("Webhook signature must be a sha256 hex digest") from exc
+    return raw.lower()
+
+
+def sign_webhook_payload(secret: str, timestamp: str, body: bytes) -> str:
+    payload = f"{timestamp}.".encode("utf-8") + body
+    digest = hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
+    return f"{_WEBHOOK_SIG_PREFIX}{digest}"
+
+
+def verify_signed_webhook(
+    *,
+    secret: str,
+    timestamp: str,
+    signature: str,
+    body: bytes,
+    max_skew_seconds: int = 300,
+    now: Optional[datetime] = None,
+) -> tuple[datetime, str]:
+    request_timestamp = _parse_webhook_timestamp(timestamp)
+    expected = normalize_webhook_signature(sign_webhook_payload(secret, timestamp, body))
+    provided = normalize_webhook_signature(signature)
+    if not secrets.compare_digest(provided, expected):
+        raise ValueError("Invalid webhook signature")
+
+    current = now or datetime.utcnow()
+    if abs(current - request_timestamp) > timedelta(seconds=max_skew_seconds):
+        raise ValueError("Webhook timestamp is outside the replay window")
+
+    return request_timestamp, provided
 
 
 def hash_api_key(key: str) -> str:
