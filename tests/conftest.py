@@ -25,5 +25,16 @@ def isolate_database_engine():
         "ADMIN_TOKEN",
         "OTEL_SERVICE_NAME",
         "LASTPING_SERVICE_NAME",
+        "OTEL_SERVICE_NAMESPACE",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_HEADERS",
+        "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+        "OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+        "OTEL_EXPORTER_OTLP_TIMEOUT",
+        "OTEL_METRIC_EXPORT_INTERVAL",
+        "ENV",
+        "LASTPING_ENV",
     ):
         os.environ.pop(env_name, None)

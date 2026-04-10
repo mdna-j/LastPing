@@ -22,7 +22,7 @@ PROFILE_REQUIRED = {
 }
 PROFILE_RECOMMENDED = {
     "staging": ("REDIS_URL",),
-    "production": ("DISCORD_WEBHOOK_URL", "SLACK_WEBHOOK_URL"),
+    "production": ("DISCORD_WEBHOOK_URL", "SLACK_WEBHOOK_URL", "OTEL_EXPORTER_OTLP_ENDPOINT"),
 }
 TWILIO_GROUP = ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM")
 
@@ -81,6 +81,11 @@ def _looks_like_database_url(value: str) -> bool:
     }
 
 
+def _looks_like_otlp_url(value: str) -> bool:
+    parsed = urlparse(value)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
 def _is_sqlite_url(value: str) -> bool:
     return value.startswith("sqlite:")
 
@@ -134,6 +139,18 @@ def validate_env_mapping(env: dict[str, str], profile: str) -> ValidationResult:
         value = (env.get(webhook_key) or "").strip()
         if value and not _looks_like_http_url(value):
             result.errors.append(f"{webhook_key} must be a valid http(s) URL.")
+
+    otlp_values = {
+        "OTEL_EXPORTER_OTLP_ENDPOINT": (env.get("OTEL_EXPORTER_OTLP_ENDPOINT") or "").strip(),
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": (env.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") or "").strip(),
+        "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": (env.get("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT") or "").strip(),
+    }
+    if any(otlp_values.values()):
+        for key, value in otlp_values.items():
+            if value and not _looks_like_otlp_url(value):
+                result.errors.append(f"{key} must be a valid http(s) OTLP endpoint.")
+        if not (env.get("OTEL_SERVICE_NAME") or "").strip():
+            result.warnings.append("OTEL_SERVICE_NAME is recommended when OTLP export is enabled.")
 
     script_executor = (env.get("SCRIPT_CHECK_EXECUTOR") or "").strip().lower()
     if normalized_profile in {"staging", "production"} and script_executor in {"host", "local"}:

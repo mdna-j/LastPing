@@ -49,6 +49,7 @@ Recommended protected settings:
 - `DEPLOY_TWILIO_ACCOUNT_SID`
 - `DEPLOY_TWILIO_AUTH_TOKEN`
 - `DEPLOY_TWILIO_FROM`
+- `DEPLOY_OTEL_EXPORTER_OTLP_HEADERS`
 
 ### Required environment variables
 
@@ -59,6 +60,14 @@ Recommended protected settings:
 
 - `LASTPING_NAMESPACE`
   Default: `lastping-staging` or `lastping-production`
+- `DEPLOY_OTEL_SERVICE_NAME`
+  Default: `lastping-api`
+- `DEPLOY_OTEL_SERVICE_NAMESPACE`
+  Default: `lastping`
+- `DEPLOY_OTEL_EXPORTER_OTLP_ENDPOINT`
+  Recommended for staging and production if you run an OpenTelemetry collector.
+- `DEPLOY_OTEL_METRIC_EXPORT_INTERVAL`
+  Default: `15000` ms
 
 ## Validate config locally
 
@@ -82,6 +91,45 @@ The validator checks:
 - Redis URL format
 - partial Twilio config
 - malformed webhook URLs
+- malformed OTLP collector URLs and missing `OTEL_SERVICE_NAME` when OTLP export is enabled
+
+## OTLP collector export
+
+LastPing can export real traces and metrics over OTLP/HTTP to an OpenTelemetry collector.
+
+Runtime knobs:
+
+- `OTEL_SERVICE_NAME`
+- `OTEL_SERVICE_NAMESPACE`
+- `OTEL_EXPORTER_OTLP_ENDPOINT`
+- `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`
+- `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`
+- `OTEL_EXPORTER_OTLP_HEADERS`
+- `OTEL_EXPORTER_OTLP_TRACES_HEADERS`
+- `OTEL_EXPORTER_OTLP_METRICS_HEADERS`
+- `OTEL_EXPORTER_OTLP_TIMEOUT`
+- `OTEL_METRIC_EXPORT_INTERVAL`
+
+If only `OTEL_EXPORTER_OTLP_ENDPOINT` is set, LastPing derives:
+
+- traces -> `/v1/traces`
+- metrics -> `/v1/metrics`
+
+Example:
+
+```bash
+OTEL_SERVICE_NAME=lastping-api
+OTEL_SERVICE_NAMESPACE=lastping
+OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector.staging.internal:4318
+OTEL_EXPORTER_OTLP_HEADERS=authorization=Bearer your-token
+OTEL_METRIC_EXPORT_INTERVAL=15000
+```
+
+You can verify runtime wiring through:
+
+- `GET /observability/prometheus`
+- `GET /observability/otel/config`
+- `GET /observability/otel/traces`
 
 ## Manual deploy flow
 

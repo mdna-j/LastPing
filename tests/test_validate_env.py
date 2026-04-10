@@ -111,3 +111,19 @@ def test_validate_env_requires_encryption_key_in_staging_and_production():
     assert any("LASTPING_ENCRYPTION_KEY is required" in error for error in staging.errors)
     assert not production.ok
     assert any("LASTPING_ENCRYPTION_KEY is required" in error for error in production.errors)
+
+
+def test_validate_env_accepts_otlp_http_export_and_recommends_service_name():
+    result = validate_env_mapping(
+        {
+            "DATABASE_URL": "postgresql://lastping:secret@db.internal:5432/lastping",
+            "BASE_URL": "https://staging.lastping.example.com",
+            "ADMIN_TOKEN": "super-secret-admin-token",
+            "LASTPING_ENCRYPTION_KEY": "staging-encryption-key",
+            "OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.internal:4318",
+        },
+        "staging",
+    )
+
+    assert result.ok
+    assert any("OTEL_SERVICE_NAME is recommended" in warning for warning in result.warnings)

@@ -125,6 +125,13 @@ def test_prometheus_export_requires_admin_and_exposes_platform_metrics(tmp_path)
     unauthorized = client.get(f"/observability/prometheus?project_id={project_id}")
     assert unauthorized.status_code == 401
 
+    config_resp = client.get(
+        "/observability/otel/config",
+        headers={"X-ADMIN-TOKEN": "observability-admin"},
+    )
+    assert config_resp.status_code == 200
+    assert config_resp.json()["enabled"] is False
+
     resp = client.get(
         f"/observability/prometheus?project_id={project_id}",
         headers={"X-ADMIN-TOKEN": "observability-admin"},
@@ -132,6 +139,7 @@ def test_prometheus_export_requires_admin_and_exposes_platform_metrics(tmp_path)
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/plain")
     assert "lastping_runtime_info{service=\"lastping-test\"} 1" in resp.text
+    assert "lastping_otel_export_enabled" in resp.text
     assert "lastping_api_requests_window_total" in resp.text
     assert "lastping_project_worker_overdue_checks" in resp.text
     assert "lastping_project_queue_pending_approvals" in resp.text

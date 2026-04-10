@@ -8,6 +8,7 @@ from sqlmodel import Session, select
 
 from ..db import get_session
 from ..models import Check, Project
+from ..otel_runtime import get_otel_runtime_state
 from ..runtime_metrics import snapshot_request_metrics, snapshot_traces
 from .ui import _build_platform_observability
 
@@ -77,6 +78,12 @@ def _project_observability_rows(session: Session, project_id: Optional[int]) -> 
     return rows
 
 
+@router.get("/otel/config")
+def otel_runtime_config(x_admin_token: Optional[str] = Header(None)):
+    _require_admin_token(x_admin_token)
+    return get_otel_runtime_state()
+
+
 @router.get("/prometheus", response_class=PlainTextResponse)
 def prometheus_export(
     project_id: Optional[int] = Query(None, ge=1),
@@ -87,6 +94,7 @@ def prometheus_export(
     _require_admin_token(x_admin_token)
 
     request_metrics = snapshot_request_metrics(window_seconds=window_seconds)
+    otel_state = get_otel_runtime_state()
     lines: list[str] = []
     _append_metric(
         lines,
@@ -94,6 +102,19 @@ def prometheus_export(
         "Static runtime info for the LastPing API process.",
         "gauge",
         _metric_line("lastping_runtime_info", 1, service=_service_name()),
+    )
+    _append_metric(
+        lines,
+        "lastping_otel_export_enabled",
+        "Whether OTLP export is enabled for this LastPing API process.",
+        "gauge",
+        _metric_line(
+            "lastping_otel_export_enabled",
+            1 if otel_state.get("enabled") else 0,
+            service=_service_name(),
+            traces_enabled=otel_state.get("traces_enabled"),
+            metrics_enabled=otel_state.get("metrics_enabled"),
+        ),
     )
     projects_total_line_index = len(lines) + 2
     _append_metric(lines, "lastping_projects_total", "Number of projects included in this export.", "gauge", _metric_line("lastping_projects_total", 0))
