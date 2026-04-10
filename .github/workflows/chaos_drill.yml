@@ -1,0 +1,75 @@
+name: Chaos Drill
+
+on:
+  schedule:
+    - cron: "35 7 * * 2"
+  workflow_dispatch:
+
+jobs:
+  chaos_drill:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Render compose env
+        run: |
+          cat > .env <<EOF
+          DATABASE_URL=postgresql://lastping:lastping@db:5432/lastping
+          REDIS_URL=redis://redis:6379/0
+          ADMIN_TOKEN=chaos-admin-token
+          ENV=staging
+          LASTPING_ENCRYPTION_KEY=chaos-drill-encryption-key
+          EOF
+
+      - name: Start compose stack
+        run: |
+          docker compose up -d --build api worker db redis
+
+      - name: Wait for API health
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8000/health >/dev/null; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::API did not become healthy in time."
+          docker compose logs --tail=200 api
+          exit 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m pip install -e .
+
+      - name: Run chaos and load drill
+        run: |
+          python scripts/chaos_load_drill.py \
+            --base-url http://127.0.0.1:8000 \
+            --admin-token chaos-admin-token \
+            --output-dir artifacts/chaos_drill \
+            --format github
+
+      - name: Publish summary
+        if: always()
+        run: |
+          if [ -f artifacts/chaos_drill/summary.md ]; then
+            cat artifacts/chaos_drill/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-drill-${{ github.run_id }}
+          path: artifacts/chaos_drill/
+
+      - name: Teardown stack
+        if: always()
+        run: docker compose down -v

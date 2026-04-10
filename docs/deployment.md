@@ -206,6 +206,18 @@ Recommended operating policy:
 
 Review the uploaded summary artifact after each scheduled run and keep the latest successful run ID in your ops notes or change-management record.
 
+## Scheduled chaos verification
+
+Use `.github/workflows/chaos_drill.yml` to run a recurring local-stack chaos drill that simulates:
+
+- worker failure
+- database lock contention / slowness
+- Redis loss
+- alert storms
+- integration outages
+
+The drill publishes `artifacts/chaos_drill/summary.json` and `summary.md` so you can review whether the platform degrades and recovers in the expected way.
+
 For multi-region validation, continue to use:
 
 - `multi_region.md`
