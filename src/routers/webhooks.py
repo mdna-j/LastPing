@@ -8,7 +8,7 @@ from sqlmodel import Session, select
 
 from ..db import get_session
 from ..models import Check as CheckModel, Event as EventModel, EventType, CheckType, Project
-from ..deps import require_project_api_key, limit_by_api_key
+from ..deps import require_project_api_key, limit_by_api_key, limit_webhook_requests
 from ..schemas import StrictBaseModel
 import logging
 
@@ -55,7 +55,7 @@ def _try_limit(project_id: int, authorization: Optional[str] = Header(None), x_a
 
 
 @router.post("/webhook")
-def receive_webhook(project_id: int = Path(..., ge=1), payload: Optional[WebhookIn] = Body(None), _proj: Project = Depends(require_project_api_key), _rl = Depends(_try_limit), session: Session = Depends(get_session)):
+def receive_webhook(project_id: int = Path(..., ge=1), payload: Optional[WebhookIn] = Body(None), _scope = Depends(limit_webhook_requests), _proj: Project = Depends(require_project_api_key), _rl = Depends(_try_limit), session: Session = Depends(get_session)):
     """Generic inbound webhook endpoint.
 
     Expected JSON payload (flexible):

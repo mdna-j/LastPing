@@ -23,7 +23,7 @@ from ..models import (
     RemediationApproval,
     StatusSubscription,
 )
-from ..deps import limit_public_requests
+from ..deps import limit_public_requests, limit_public_status_requests
 from ..runtime_metrics import snapshot_request_metrics
 from ..schemas import StrictBaseModel
 
@@ -1945,7 +1945,7 @@ def remediation_page(project_id: int = Path(..., ge=1)):
 
 
 @router.get("/status/{project_id}", response_class=HTMLResponse)
-def public_status_page(project_id: int = Path(..., ge=1)):
+def public_status_page(project_id: int = Path(..., ge=1), _scope = Depends(limit_public_status_requests)):
     return f"""
     <html>
     <head>
@@ -1972,7 +1972,7 @@ def public_status_page(project_id: int = Path(..., ge=1)):
 
 
 @router.get("/status/{project_id}/data")
-def public_status_data(project_id: int = Path(..., ge=1), session: Session = Depends(get_session)):
+def public_status_data(project_id: int = Path(..., ge=1), _scope = Depends(limit_public_status_requests), session: Session = Depends(get_session)):
     return _build_public_status_payload(session, project_id)
 
 
@@ -1980,6 +1980,7 @@ def public_status_data(project_id: int = Path(..., ge=1), session: Session = Dep
 def public_status_subscribe(
     project_id: int = Path(..., ge=1),
     payload: StatusSubscriptionCreate = Body(...),
+    _scope = Depends(limit_public_status_requests),
     session: Session = Depends(get_session),
 ):
     if payload.channel == "webhook":

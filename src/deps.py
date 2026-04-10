@@ -59,6 +59,10 @@ _ORG_ROLE_RANK = {
 }
 
 
+def _scope_env_int(scope: str, suffix: str, default: int) -> int:
+    return int(os.environ.get(f"{scope}_{suffix}", str(default)))
+
+
 def _deps_cache(session: Session) -> dict:
     return session.info.setdefault("deps_cache", {})
 
@@ -406,6 +410,69 @@ def _enforce_rate_limit(prefix: str, ident: str, limit: int, window_seconds: int
     _enforce_counter(_public_counters, rkey, limit, window_seconds)
 
 
+def _scoped_api_key_identifier(raw_key: str, project_id: Optional[int] = None) -> str:
+    fp = fingerprint_token(raw_key)
+    if project_id is None:
+        return fp
+    return f"{project_id}:{fp}"
+
+
+def _scoped_admin_identifier(x_admin_token: Optional[str]) -> Optional[str]:
+    if not x_admin_token:
+        return None
+    return fingerprint_token(x_admin_token)
+
+
+def _enforce_scope_limits(
+    *,
+    scope: str,
+    request: Optional[Request],
+    session: Session,
+    authorization: Optional[str] = None,
+    x_api_key: Optional[str] = None,
+    x_admin_token: Optional[str] = None,
+    include_ip: bool = True,
+    include_user: bool = False,
+    include_api_key: bool = False,
+    include_admin: bool = False,
+    ip_default: int = 0,
+    user_default: int = 0,
+    api_key_default: int = 0,
+    admin_default: int = 0,
+    window_default: int = 60,
+    project_id: Optional[int] = None,
+) -> None:
+    window = _scope_env_int(scope, "RATE_LIMIT_WINDOW_SECONDS", window_default)
+
+    if include_ip:
+        ip_limit = _scope_env_int(scope, "IP_RATE_LIMIT_PER_MINUTE", ip_default)
+        client_ip = _get_client_ip(request) if request else None
+        if client_ip:
+            _enforce_rate_limit(f"{scope.lower()}ip", client_ip, ip_limit, window)
+
+    if include_user:
+        user_limit = _scope_env_int(scope, "USER_RATE_LIMIT_PER_MINUTE", user_default)
+        token = _extract_bearer_token(authorization)
+        if token and user_limit > 0:
+            ut = _get_cached_user_token(session, token)
+            if ut and (not ut.expires_at or ut.expires_at >= datetime.utcnow()):
+                ident = f"{project_id}:{ut.user_id}" if project_id is not None else str(ut.user_id)
+                _enforce_rate_limit(f"{scope.lower()}user", ident, user_limit, window)
+
+    if include_api_key:
+        api_key_limit = _scope_env_int(scope, "API_KEY_RATE_LIMIT_PER_MINUTE", api_key_default)
+        raw_key = _extract_api_key(authorization, x_api_key)
+        if raw_key and api_key_limit > 0:
+            ident = _scoped_api_key_identifier(raw_key, project_id=project_id)
+            _enforce_rate_limit(f"{scope.lower()}apikey", ident, api_key_limit, window)
+
+    if include_admin:
+        admin_limit = _scope_env_int(scope, "ADMIN_RATE_LIMIT_PER_MINUTE", admin_default)
+        ident = _scoped_admin_identifier(x_admin_token)
+        if ident and admin_limit > 0:
+            _enforce_rate_limit(f"{scope.lower()}admin", ident, admin_limit, window)
+
+
 def limit_public_requests(
     request: Request,
     authorization: Optional[str] = Header(None),
@@ -437,6 +504,135 @@ def limit_public_requests(
         ut = _get_cached_user_token(session, token)
         if ut and (not ut.expires_at or ut.expires_at >= datetime.utcnow()):
             _enforce_rate_limit("pubuser", str(ut.user_id), user_limit, window)
+
+
+def limit_auth_requests(
+    request: Request,
+    session: Session = Depends(get_session),
+) -> None:
+    _enforce_scope_limits(
+        scope="AUTH",
+        request=request,
+        session=session,
+        include_ip=True,
+        ip_default=20,
+        window_default=60,
+    )
+
+
+def limit_public_status_requests(
+    request: Request,
+    session: Session = Depends(get_session),
+) -> None:
+    _enforce_scope_limits(
+        scope="PUBLIC_STATUS",
+        request=request,
+        session=session,
+        include_ip=True,
+        ip_default=90,
+        window_default=60,
+    )
+
+
+def limit_webhook_requests(
+    request: Request,
+    authorization: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    project_id: Optional[int] = None,
+    session: Session = Depends(get_session),
+) -> None:
+    _enforce_scope_limits(
+        scope="WEBHOOK",
+        request=request,
+        session=session,
+        authorization=authorization,
+        x_api_key=x_api_key,
+        x_admin_token=x_admin_token,
+        include_ip=True,
+        include_api_key=True,
+        include_admin=True,
+        ip_default=300,
+        api_key_default=120,
+        admin_default=120,
+        window_default=60,
+        project_id=project_id,
+    )
+
+
+def limit_admin_api_requests(
+    request: Request,
+    x_admin_token: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+) -> None:
+    _enforce_scope_limits(
+        scope="ADMIN_API",
+        request=request,
+        session=session,
+        x_admin_token=x_admin_token,
+        include_ip=True,
+        include_admin=True,
+        ip_default=60,
+        admin_default=60,
+        window_default=60,
+    )
+
+
+def limit_integration_action_requests(
+    request: Request,
+    authorization: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    project_id: Optional[int] = None,
+    session: Session = Depends(get_session),
+) -> None:
+    _enforce_scope_limits(
+        scope="INTEGRATION_ACTION",
+        request=request,
+        session=session,
+        authorization=authorization,
+        x_api_key=x_api_key,
+        x_admin_token=x_admin_token,
+        include_ip=True,
+        include_user=True,
+        include_api_key=True,
+        include_admin=True,
+        ip_default=45,
+        user_default=30,
+        api_key_default=30,
+        admin_default=45,
+        window_default=60,
+        project_id=project_id,
+    )
+
+
+def enforce_browser_check_request_limit(
+    *,
+    request: Optional[Request],
+    session: Session,
+    authorization: Optional[str] = None,
+    x_api_key: Optional[str] = None,
+    x_admin_token: Optional[str] = None,
+    project_id: Optional[int] = None,
+) -> None:
+    _enforce_scope_limits(
+        scope="BROWSER_CHECK",
+        request=request,
+        session=session,
+        authorization=authorization,
+        x_api_key=x_api_key,
+        x_admin_token=x_admin_token,
+        include_ip=True,
+        include_user=True,
+        include_api_key=True,
+        include_admin=True,
+        ip_default=30,
+        user_default=20,
+        api_key_default=20,
+        admin_default=30,
+        window_default=60,
+        project_id=project_id,
+    )
 
 
 def require_admin_or_project_api_key(project_id: int, x_admin_token: Optional[str] = Header(None), authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), session: Session = Depends(get_session)) -> Project:

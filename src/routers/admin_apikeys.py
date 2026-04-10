@@ -8,7 +8,7 @@ from datetime import datetime
 
 from ..db import get_session
 from ..models import ApiKey, Project, AuditLog
-from ..deps import get_audit_context
+from ..deps import get_audit_context, limit_admin_api_requests
 from ..security import generate_api_key, hash_api_key
 import os
 import secrets
@@ -17,7 +17,7 @@ from ..models import AdminCsrf
 from datetime import timedelta
 
 
-router = APIRouter(prefix="/admin/apikeys", tags=["admin_apikeys"])
+router = APIRouter(prefix="/admin/apikeys", tags=["admin_apikeys"], dependencies=[Depends(limit_admin_api_requests)])
 
 
 class ApiKeyRead(BaseModel):

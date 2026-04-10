@@ -16,7 +16,7 @@ from sqlmodel import Session, select
 
 from ..db import get_session
 from ..models import Check as CheckModel, CheckType, CheckStatus, Project, AuditLog, Role
-from ..deps import authorize_project_operation, limit_by_api_key, get_audit_context, limit_public_requests
+from ..deps import authorize_project_operation, enforce_browser_check_request_limit, limit_by_api_key, get_audit_context, limit_public_requests
 from ..schemas import StrictBaseModel
 
 
@@ -281,6 +281,15 @@ def create_check(project_id: int = Path(..., ge=1), payload: CheckCreate = Body(
         x_api_key=x_api_key,
         session=session,
     )
+    if payload.type == CheckType.BROWSER:
+        enforce_browser_check_request_limit(
+            request=request,
+            session=session,
+            authorization=authorization,
+            x_api_key=x_api_key,
+            x_admin_token=x_admin_token,
+            project_id=project_id,
+        )
 
     # ensure name uniqueness within project
     existing = session.exec(select(CheckModel).where(CheckModel.project_id == project_id, CheckModel.name == payload.name)).first()
@@ -403,6 +412,15 @@ def update_check(project_id: int = Path(..., ge=1), check_id: int = Path(..., ge
     check = session.get(CheckModel, check_id)
     if not check or check.project_id != project_id:
         raise HTTPException(status_code=404, detail="Check not found")
+    if check.type == CheckType.BROWSER:
+        enforce_browser_check_request_limit(
+            request=request,
+            session=session,
+            authorization=authorization,
+            x_api_key=x_api_key,
+            x_admin_token=x_admin_token,
+            project_id=project_id,
+        )
 
     # Script checks are intentionally constrained: you can only point at an on-disk script
     # under CUSTOM_CHECKS_DIR. We reject script fields on non-script checks to prevent

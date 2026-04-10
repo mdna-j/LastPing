@@ -10,7 +10,7 @@ from sqlmodel import Session, select
 from ..db import get_session
 from ..models import User, UserToken, ProjectMembership, Project, AuditLog, Role
 from ..security import hash_password, verify_password
-from ..deps import get_current_user, get_effective_project_role, limit_public_requests, get_audit_context, require_project_role
+from ..deps import get_current_user, get_effective_project_role, limit_public_requests, limit_auth_requests, get_audit_context, require_project_role
 from ..schemas import StrictBaseModel
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -32,7 +32,7 @@ class TokenOut(BaseModel):
     expires_at: Optional[datetime]
 
 
-@router.post("/create", response_model=dict, dependencies=[Depends(limit_public_requests)])
+@router.post("/create", response_model=dict, dependencies=[Depends(limit_public_requests), Depends(limit_auth_requests)])
 def create_user(payload: CreateUserIn, request: Request = None, x_admin_token: Optional[str] = Header(None), session: Session = Depends(get_session)):
     admin_token = os.environ.get('ADMIN_TOKEN')
     if not admin_token or x_admin_token != admin_token:
@@ -56,7 +56,7 @@ def create_user(payload: CreateUserIn, request: Request = None, x_admin_token: O
     return {"id": u.id, "email": u.email}
 
 
-@router.post("/login", response_model=TokenOut, dependencies=[Depends(limit_public_requests)])
+@router.post("/login", response_model=TokenOut, dependencies=[Depends(limit_public_requests), Depends(limit_auth_requests)])
 def login(payload: LoginIn, session: Session = Depends(get_session)):
     user = session.exec(select(User).where(User.email == payload.email)).first()
     if not user or not verify_password(payload.password, user.hashed_password):

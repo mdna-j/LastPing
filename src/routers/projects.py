@@ -19,7 +19,7 @@ from ..jira import jira_settings_ready
 from ..models import AuditLog, ApiKey, OrgRole, Project as ProjectModel, ProjectMembership, Role
 from ..security import generate_api_key, hash_api_key
 from ..alerts import retry_notification_failure_payload, send_pagerduty_event
-from ..deps import authorize_org_operation, authorize_project_operation, get_audit_context, get_current_user, limit_public_requests
+from ..deps import authorize_org_operation, authorize_project_operation, get_audit_context, get_current_user, limit_integration_action_requests, limit_public_requests
 from ..schemas import StrictBaseModel
 import os
 import json
@@ -940,6 +940,7 @@ def set_project_pagerduty_settings(
 def send_project_pagerduty_test(
     project_id: int = Path(..., ge=1),
     request: Request = None,
+    _scope = Depends(limit_integration_action_requests),
     authorization: Optional[str] = Header(None),
     x_admin_token: Optional[str] = Header(None),
     x_api_key: Optional[str] = Header(None),
@@ -1144,6 +1145,7 @@ def retry_project_notification_failure(
     project_id: int = Path(..., ge=1),
     failure_id: int = Path(..., ge=1),
     request: Request = None,
+    _scope = Depends(limit_integration_action_requests),
     authorization: Optional[str] = Header(None),
     x_admin_token: Optional[str] = Header(None),
     x_api_key: Optional[str] = Header(None),

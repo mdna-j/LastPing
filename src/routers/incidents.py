@@ -15,6 +15,7 @@ from ..db import get_session
 from ..deps import (
     get_audit_context,
     limit_public_requests,
+    limit_integration_action_requests,
     require_admin_or_owner,
     require_project_access,
 )
@@ -421,6 +422,7 @@ def create_incident_jira_ticket(
     project_id: int = Path(..., ge=1),
     incident_id: int = Path(..., ge=1),
     request: Request = None,
+    _scope = Depends(limit_integration_action_requests),
     session: Session = Depends(get_session),
     _proj: Project = Depends(require_admin_or_owner),
     x_admin_token: Optional[str] = Header(None),

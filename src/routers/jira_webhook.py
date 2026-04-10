@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlmodel import Session, select
 
 from ..db import get_session
+from ..deps import limit_webhook_requests
 from ..models import AuditLog, Incident, IncidentNote
 from ..webhook_security import parse_signed_json_body, register_webhook_receipt, verify_signed_webhook_request
 
@@ -223,6 +224,7 @@ async def receive_jira_webhook(
     x_lastping_webhook_secret: Optional[str] = Header(None),
     x_lastping_webhook_timestamp: Optional[str] = Header(None),
     x_lastping_webhook_signature: Optional[str] = Header(None),
+    _scope = Depends(limit_webhook_requests),
     session: Session = Depends(get_session),
 ):
     configured_secret = os.environ.get("JIRA_WEBHOOK_SECRET")
