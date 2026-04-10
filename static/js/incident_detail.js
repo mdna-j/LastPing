@@ -95,6 +95,31 @@ function renderNotes(notes){
   `).join("");
 }
 
+function renderArtifacts(artifacts){
+  const artifactsEl = document.getElementById("incidentArtifacts");
+  if(!artifactsEl) return;
+  if(!artifacts || !artifacts.length){
+    artifactsEl.innerHTML = `<div class="muted">No browser artifacts linked yet.</div>`;
+    return;
+  }
+  artifactsEl.innerHTML = artifacts.map((artifact)=> `
+    <div class="card incident-note-card">
+      <div class="incident-card-head">
+        <strong>${escapeHtml(artifact.artifact_type || "artifact")}</strong>
+        <span class="muted">${formatTimestamp(artifact.created_at)}</span>
+      </div>
+      <div class="incident-meta-grid">
+        <div><span class="muted">File</span><div>${escapeHtml(artifact.file_name || "artifact")}</div></div>
+        <div><span class="muted">Size</span><div>${artifact.size_bytes ? `${artifact.size_bytes} bytes` : "n/a"}</div></div>
+        <div><span class="muted">Check Result</span><div>${artifact.check_result_id || "n/a"}</div></div>
+      </div>
+      <div style="margin-top:8px">
+        <a class="btn btn-secondary" href="${escapeHtml(artifact.download_url)}">Download</a>
+      </div>
+    </div>
+  `).join("");
+}
+
 function renderIncidentSummary(incident){
   const summaryEl = document.getElementById("incidentSummary");
   const actionsEl = document.getElementById("incidentActions");
@@ -177,6 +202,7 @@ async function loadIncidentDetail(){
   renderIncidentSummary(json.incident);
   renderEvents(json);
   renderNotes(json.notes || []);
+  renderArtifacts(json.artifacts || []);
   renderTimeline(json.timeline || [], json.timeline_stats || null);
   const shareInfo = document.getElementById("shareInfo");
   if(shareInfo){

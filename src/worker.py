@@ -5,6 +5,8 @@ import json
 import re
 import math
 import fnmatch
+import mimetypes
+import shutil
 import subprocess
 import sys
 import signal
@@ -22,14 +24,14 @@ from datetime import datetime, timedelta, timezone
 import urllib.request
 import urllib.error
 import socket
-from typing import Tuple, Optional
+from typing import Any, Dict, List, Tuple, Optional
 
 from sqlmodel import Session, select
 from sqlalchemy import update, or_, and_, func, delete
 from sqlalchemy.exc import IntegrityError
 
 from .db import engine
-from .models import Check, CheckType, CheckStatus, Event, EventType, Project, Incident, CheckResult
+from .models import Check, CheckType, CheckStatus, Event, EventType, Project, Incident, CheckResult, BrowserCheckArtifact
 from .alerts import notify_down, notify_recovery, notify_degraded, notify_status_subscribers, send_email, send_sms
 from .models import UptimeSnapshot, AvailabilityRollup, CheckLease, RemediationHook, RemediationLog, RemediationApproval, OnCallAlert, OnCallEscalation, OnCallRotation, OnCallMember, AuditLog, Anomaly, Heartbeat
 from .analytics_ml import find_similar_incidents
@@ -45,6 +47,7 @@ _LAST_ARCHIVE_RUN: Optional[datetime] = None
 _LAST_QUARTERLY_RUN: Optional[datetime] = None
 _LAST_RAW_RETENTION_RUN: Optional[datetime] = None
 _LAST_BURN_RATE_RUN: Optional[datetime] = None
+_LAST_BROWSER_ARTIFACT_RETENTION_RUN: Optional[datetime] = None
 
 
 def _now() -> datetime:
@@ -162,11 +165,11 @@ def _record_check_result(
     created_at: datetime,
     lease_owner: Optional[str] = None,
     lease_fence: Optional[int] = None,
-) -> None:
+) -> Optional[CheckResult]:
     """Persist canonical execution evidence for a check run."""
     try:
         if not _lease_fence_allows_write(session, check.id, lease_owner, lease_fence):
-            return
+            return None
         if run_key:
             with session.no_autoflush:
                 exists = session.exec(
@@ -176,7 +179,7 @@ def _record_check_result(
                     )
                 ).first()
             if exists is not None:
-                return
+                return session.get(CheckResult, exists)
         with session.begin_nested():
             row = CheckResult(
                 check_id=check.id,
@@ -190,11 +193,13 @@ def _record_check_result(
             )
             session.add(row)
             session.flush()
+            return row
     except IntegrityError:
         # Unique (check_id, run_key) collisions are expected on retries.
-        return
+        return None
     except Exception:
         logger.exception("Error recording check evidence for check %s", getattr(check, "id", None))
+        return None
 
 
 def _record_event(
@@ -924,23 +929,138 @@ def _browser_step_timeout_ms(step: dict, default_timeout_ms: int) -> int:
         return default_timeout_ms
 
 
-def _browser_artifact_dir(project: Project, check: Check) -> Path:
+def _browser_artifact_root() -> Path:
     base = Path(os.environ.get("BROWSER_CHECK_ARTIFACT_DIR") or os.path.join(os.getcwd(), "artifacts", "browser_checks"))
+    base.mkdir(parents=True, exist_ok=True)
+    return base.resolve()
+
+
+def _browser_artifact_dir(project: Project, check: Check) -> Path:
+    base = _browser_artifact_root()
     path = base / f"project-{getattr(project, 'id', 'unknown')}" / f"check-{getattr(check, 'id', 'unknown')}"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
-def _capture_browser_failure_screenshot(page, project: Project, check: Check) -> Optional[str]:
+def _browser_artifact_path_allowed(path: Path) -> bool:
     try:
-        artifact_dir = _browser_artifact_dir(project, check)
-        stamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S%f")
-        target = artifact_dir / f"{stamp}.png"
+        path.resolve().relative_to(_browser_artifact_root())
+        return True
+    except Exception:
+        return False
+
+
+def _browser_run_artifact_dir(project: Project, check: Check, *, suffix: str) -> Path:
+    path = _browser_artifact_dir(project, check) / suffix
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _cleanup_browser_artifact_path(path: Optional[Path], *, prune_empty: bool = True) -> None:
+    if path is None:
+        return
+    try:
+        resolved = path.resolve()
+    except Exception:
+        resolved = path
+    if not _browser_artifact_path_allowed(resolved):
+        return
+    try:
+        if resolved.is_dir():
+            shutil.rmtree(resolved, ignore_errors=True)
+        elif resolved.exists():
+            resolved.unlink()
+    except Exception:
+        logger.exception("Failed cleaning browser artifact path %s", resolved)
+        return
+    if not prune_empty:
+        return
+    root = _browser_artifact_root()
+    parent = resolved.parent
+    while parent != root and root in parent.parents:
+        try:
+            parent.rmdir()
+        except OSError:
+            break
+        parent = parent.parent
+
+
+def _browser_capture_enabled(env_name: str, default: str = "1") -> bool:
+    raw = (os.environ.get(env_name, default) or default).strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _browser_artifact_content_type(path: Path) -> str:
+    guessed, _ = mimetypes.guess_type(str(path))
+    return guessed or "application/octet-stream"
+
+
+def _browser_artifact_entry(artifact_type: str, path: Optional[Path]) -> Optional[Dict[str, Any]]:
+    if path is None:
+        return None
+    try:
+        resolved = path.resolve()
+    except Exception:
+        resolved = path
+    if not resolved.exists() or not _browser_artifact_path_allowed(resolved):
+        return None
+    return {
+        "artifact_type": artifact_type,
+        "file_path": str(resolved),
+        "content_type": _browser_artifact_content_type(resolved),
+        "size_bytes": int(resolved.stat().st_size),
+    }
+
+
+def _capture_browser_failure_screenshot(page, project: Project, check: Check, *, run_dir: Optional[Path] = None) -> Optional[Path]:
+    try:
+        artifact_dir = run_dir or _browser_artifact_dir(project, check)
+        target = artifact_dir / "failure.png"
         page.screenshot(path=str(target), full_page=True)
-        return str(target)
+        return target
     except Exception:
         logger.exception("Failed to capture browser screenshot for check_id=%s", getattr(check, "id", None))
         return None
+
+
+def _record_browser_artifacts(
+    session: Session,
+    check: Check,
+    *,
+    check_result: Optional[CheckResult],
+    incident_id: Optional[int],
+    artifacts: List[Dict[str, Any]],
+    created_at: datetime,
+) -> int:
+    if not artifacts:
+        return 0
+    if check_result is not None:
+        existing = session.exec(
+            select(BrowserCheckArtifact.id).where(BrowserCheckArtifact.check_result_id == check_result.id)
+        ).first()
+        if existing is not None:
+            return 0
+    count = 0
+    for artifact in artifacts:
+        file_path = artifact.get("file_path")
+        artifact_type = artifact.get("artifact_type")
+        if not file_path or not artifact_type:
+            continue
+        session.add(
+            BrowserCheckArtifact(
+                project_id=check.project_id,
+                check_id=check.id,
+                check_result_id=(check_result.id if check_result is not None else None),
+                incident_id=incident_id,
+                artifact_type=str(artifact_type),
+                file_path=str(file_path),
+                content_type=artifact.get("content_type"),
+                size_bytes=artifact.get("size_bytes"),
+                created_at=created_at,
+            )
+        )
+        count += 1
+    return count
 
 
 def _run_browser_step(page, step: dict, *, default_timeout_ms: int) -> None:
@@ -980,29 +1100,33 @@ def _run_browser_step(page, step: dict, *, default_timeout_ms: int) -> None:
     raise ValueError(f"unsupported_browser_action:{action}")
 
 
-def _browser_check(check: Check, project: Project, timeout: int, retries: int) -> Tuple[bool, str, Optional[float]]:
-    """Execute a Playwright browser scenario and capture screenshots on failure."""
+def _browser_check(check: Check, project: Project, timeout: int, retries: int) -> Tuple[bool, str, Optional[float], List[Dict[str, Any]]]:
+    """Execute a Playwright browser scenario and capture failure artifacts."""
     steps = _parse_browser_steps(getattr(check, "browser_steps", None))
     if not getattr(check, "url", None):
-        return False, "browser_url_missing", None
+        return False, "browser_url_missing", None, []
     if not steps:
-        return False, "browser_steps_missing", None
+        return False, "browser_steps_missing", None, []
 
     try:
         start_url = _expand_browser_template(check.url)
     except ValueError as exc:
-        return False, str(exc), None
+        return False, str(exc), None, []
 
     try:
         from playwright.sync_api import sync_playwright
     except Exception:
-        return False, "playwright_not_available:install 'playwright' and run 'playwright install chromium'", None
+        return False, "playwright_not_available:install 'playwright' and run 'playwright install chromium'", None, []
 
     default_timeout_ms = _browser_default_timeout_ms(timeout)
     headless = (os.environ.get("PLAYWRIGHT_HEADLESS", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
     ignore_https_errors = (os.environ.get("BROWSER_CHECK_IGNORE_HTTPS_ERRORS", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
     capture_screenshot = bool(getattr(check, "browser_capture_screenshot", True))
+    capture_video = _browser_capture_enabled("BROWSER_CHECK_CAPTURE_VIDEO", "1")
+    capture_har = _browser_capture_enabled("BROWSER_CHECK_CAPTURE_HAR", "1")
     last_reason = "browser_check_failed"
+    last_artifacts: List[Dict[str, Any]] = []
+    last_run_dir: Optional[Path] = None
 
     for attempt in range(max(1, int(retries or 1))):
         browser = None
@@ -1011,25 +1135,42 @@ def _browser_check(check: Check, project: Project, timeout: int, retries: int) -
         playwright = None
         step_index = -1
         step_action = "goto"
+        failure_screenshot: Optional[Path] = None
+        video_handle = None
+        failed = False
+        stamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S%f")
+        run_dir = _browser_run_artifact_dir(project, check, suffix=f"{stamp}-attempt{attempt + 1}")
+        har_path = run_dir / "network.har"
+        video_dir = run_dir / "video"
         try:
             start = time.time()
             playwright = sync_playwright().start()
             browser = playwright.chromium.launch(headless=headless)
-            context = browser.new_context(ignore_https_errors=ignore_https_errors)
+            context_kwargs: Dict[str, Any] = {"ignore_https_errors": ignore_https_errors}
+            if capture_har:
+                context_kwargs["record_har_path"] = str(har_path)
+            if capture_video:
+                video_dir.mkdir(parents=True, exist_ok=True)
+                context_kwargs["record_video_dir"] = str(video_dir)
+            context = browser.new_context(**context_kwargs)
             page = context.new_page()
+            video_handle = getattr(page, "video", None)
             page.set_default_timeout(default_timeout_ms)
             page.goto(start_url, wait_until="domcontentloaded", timeout=default_timeout_ms)
             for step_index, step in enumerate(steps):
                 step_action = str(step.get("action") or "unknown")
                 _run_browser_step(page, step, default_timeout_ms=default_timeout_ms)
             latency_ms = (time.time() - start) * 1000.0
-            return True, "browser_ok", latency_ms
+            if last_run_dir is not None:
+                _cleanup_browser_artifact_path(last_run_dir)
+                last_run_dir = None
+                last_artifacts = []
+            return True, "browser_ok", latency_ms, []
         except Exception as exc:
+            failed = True
             last_reason = f"browser_step_failed:{step_index}:{step_action}:{_truncate(str(exc), 300)}"
             if capture_screenshot and page is not None:
-                screenshot_path = _capture_browser_failure_screenshot(page, project, check)
-                if screenshot_path:
-                    last_reason = f"{last_reason} screenshot={screenshot_path}"
+                failure_screenshot = _capture_browser_failure_screenshot(page, project, check, run_dir=run_dir)
         finally:
             try:
                 if context is not None:
@@ -1046,11 +1187,42 @@ def _browser_check(check: Check, project: Project, timeout: int, retries: int) -
                     playwright.stop()
             except Exception:
                 pass
+            if failed:
+                attempt_artifacts: List[Dict[str, Any]] = []
+                screenshot_entry = _browser_artifact_entry("screenshot", failure_screenshot)
+                if screenshot_entry is not None:
+                    attempt_artifacts.append(screenshot_entry)
+                if capture_har:
+                    har_entry = _browser_artifact_entry("har", har_path)
+                    if har_entry is not None:
+                        attempt_artifacts.append(har_entry)
+                if capture_video and video_handle is not None:
+                    try:
+                        raw_video_path = Path(video_handle.path())
+                        target_video_path = run_dir / "session.webm"
+                        if raw_video_path.exists():
+                            if raw_video_path.resolve() != target_video_path.resolve():
+                                target_video_path.parent.mkdir(parents=True, exist_ok=True)
+                                shutil.move(str(raw_video_path), str(target_video_path))
+                            video_entry = _browser_artifact_entry("video", target_video_path)
+                            if video_entry is not None:
+                                attempt_artifacts.append(video_entry)
+                    except Exception:
+                        logger.exception("Failed collecting browser video for check_id=%s", getattr(check, "id", None))
+                if attempt_artifacts:
+                    if last_run_dir is not None and last_run_dir != run_dir:
+                        _cleanup_browser_artifact_path(last_run_dir)
+                    last_run_dir = run_dir
+                    last_artifacts = attempt_artifacts
+                else:
+                    _cleanup_browser_artifact_path(run_dir)
+            else:
+                _cleanup_browser_artifact_path(run_dir)
 
         if attempt < max(1, int(retries or 1)) - 1:
             time.sleep(0.5)
 
-    return False, last_reason, None
+    return False, last_reason, None, last_artifacts
 
 
 def _project_is_throttled(session: Session, project: Project, now: datetime) -> bool:
@@ -1723,6 +1895,103 @@ def _maybe_prune_raw_data(session: Session, now: datetime) -> None:
     except Exception:
         session.rollback()
         logger.exception("Failed to persist raw retention audit log")
+
+
+def _maybe_prune_browser_artifacts(session: Session, now: datetime) -> None:
+    if os.environ.get("BROWSER_ARTIFACT_RETENTION_ENABLED", "1") != "1":
+        return
+
+    interval = _retention_int("BROWSER_ARTIFACT_RETENTION_INTERVAL_SECONDS", 86400, minimum=0)
+    global _LAST_BROWSER_ARTIFACT_RETENTION_RUN
+    if _LAST_BROWSER_ARTIFACT_RETENTION_RUN and (now - _LAST_BROWSER_ARTIFACT_RETENTION_RUN).total_seconds() < interval:
+        return
+    _LAST_BROWSER_ARTIFACT_RETENTION_RUN = now
+
+    retention_days = _retention_days("BROWSER_ARTIFACT_RETENTION_DAYS", 14)
+    if retention_days <= 0:
+        return
+
+    cutoff = now - timedelta(days=retention_days)
+    batch_size = _retention_int("BROWSER_ARTIFACT_RETENTION_DELETE_BATCH_SIZE", 200, minimum=1)
+    max_batches = _retention_int("BROWSER_ARTIFACT_RETENTION_MAX_BATCHES", 50, minimum=1)
+    deleted_rows = 0
+    deleted_files = 0
+    missing_files = 0
+    truncated = False
+
+    for batch_index in range(max_batches):
+        rows = session.exec(
+            select(BrowserCheckArtifact)
+            .where(BrowserCheckArtifact.created_at < cutoff)
+            .order_by(BrowserCheckArtifact.id)
+            .limit(batch_size)
+        ).all()
+        if not rows:
+            break
+        if len(rows) == batch_size and batch_index == max_batches - 1:
+            truncated = True
+        for row in rows:
+            path = Path(row.file_path)
+            if _browser_artifact_path_allowed(path):
+                try:
+                    existed = path.exists()
+                except Exception:
+                    existed = False
+                _cleanup_browser_artifact_path(path)
+                if existed:
+                    deleted_files += 1
+                else:
+                    missing_files += 1
+            else:
+                logger.warning(
+                    "Skipping browser artifact retention delete for path outside root: artifact_id=%s path=%s",
+                    getattr(row, "id", None),
+                    row.file_path,
+                )
+            session.delete(row)
+            deleted_rows += 1
+        try:
+            session.commit()
+        except Exception:
+            session.rollback()
+            logger.exception("Failed deleting browser artifact retention batch")
+            break
+        if len(rows) < batch_size:
+            break
+
+    if deleted_rows <= 0:
+        return
+
+    try:
+        details = json.dumps(
+            {
+                "deleted_rows": deleted_rows,
+                "deleted_files": deleted_files,
+                "missing_files": missing_files,
+                "retention_days": retention_days,
+                "cutoff": cutoff.isoformat(),
+                "batch_size": batch_size,
+                "max_batches": max_batches,
+                "truncated": truncated,
+                "artifact_root": str(_browser_artifact_root()),
+                "ran_at": now.isoformat(),
+            }
+        )
+        session.add(
+            AuditLog(
+                actor="worker",
+                action="browser_artifact_retention_pruned",
+                target_type="system",
+                target_id=None,
+                details=details,
+                actor_ip=None,
+                user_agent=None,
+            )
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        logger.exception("Failed to persist browser artifact retention audit log")
 
 
 def _compute_early_warnings(session: Session, project_id: int, now: datetime, recent_hours: int, baseline_days: int, min_events: int, z_threshold: float, ratio_threshold: float):
@@ -3088,6 +3357,7 @@ def scan_checks_once(session: Session):
             ok = False
             reason = "unknown"
             latency_ms = None
+            browser_artifacts: List[Dict[str, Any]] = []
             evidence_status = CheckStatus.UP
             evidence_error: Optional[str] = None
             evidence_incident_id: Optional[int] = None
@@ -3106,7 +3376,11 @@ def scan_checks_once(session: Session):
             elif check.type == CheckType.SCRIPT:
                 ok, reason, latency_ms = _script_check(check, project, timeout, retries)
             elif check.type == CheckType.BROWSER:
-                ok, reason, latency_ms = _browser_check(check, project, timeout, retries)
+                browser_result = _browser_check(check, project, timeout, retries)
+                if len(browser_result) >= 4:
+                    ok, reason, latency_ms, browser_artifacts = browser_result
+                else:
+                    ok, reason, latency_ms = browser_result
 
             if ok:
                 check.last_ping = now
@@ -3329,7 +3603,7 @@ def scan_checks_once(session: Session):
                         lease_owner=lease_owner,
                         lease_fence=lease_fence,
                     )
-                    _record_check_result(
+                    result_row = _record_check_result(
                         session,
                         check,
                         run_key=run_key,
@@ -3341,6 +3615,15 @@ def scan_checks_once(session: Session):
                         lease_owner=lease_owner,
                         lease_fence=lease_fence,
                     )
+                    if browser_artifacts:
+                        _record_browser_artifacts(
+                            session,
+                            check,
+                            check_result=result_row,
+                            incident_id=open_inc.id,
+                            artifacts=browser_artifacts,
+                            created_at=now,
+                        )
                     rem_event = EventType.DOWN if event_type == EventType.HTTP_FAILURE else event_type
                     if not maintenance:
                         _trigger_remediation(session, project, check, rem_event, reason, now)
@@ -3386,7 +3669,7 @@ def scan_checks_once(session: Session):
                         session.add(check)
                         session.commit()
                 else:
-                    _record_check_result(
+                    result_row = _record_check_result(
                         session,
                         check,
                         run_key=run_key,
@@ -3398,6 +3681,15 @@ def scan_checks_once(session: Session):
                         lease_owner=lease_owner,
                         lease_fence=lease_fence,
                     )
+                    if browser_artifacts:
+                        _record_browser_artifacts(
+                            session,
+                            check,
+                            check_result=result_row,
+                            incident_id=evidence_incident_id,
+                            artifacts=browser_artifacts,
+                            created_at=now,
+                        )
                     should_alert = check.alert_enabled and (check.consecutive_failures >= (check.alert_after or 1))
                     silenced = _incident_notifications_silenced(open_inc, now)
                     flapping_suppressed = False
@@ -3476,6 +3768,10 @@ def scan_checks_once(session: Session):
         _maybe_prune_raw_data(session, now)
     except Exception:
         logger.exception("Error pruning raw retention data")
+    try:
+        _maybe_prune_browser_artifacts(session, now)
+    except Exception:
+        logger.exception("Error pruning browser artifacts")
     try:
         _maybe_log_rollup_archive_health(session, now, project_ids)
     except Exception:

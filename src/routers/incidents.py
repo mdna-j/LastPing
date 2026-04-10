@@ -1,9 +1,11 @@
 import os
+import os
+from pathlib import Path as FilePath
 from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Header, Request, Path, Body
-from fastapi.responses import PlainTextResponse, Response
+from fastapi.responses import FileResponse, PlainTextResponse, Response
 from pydantic import constr, root_validator
 from sqlalchemy import update as sa_update
 from sqlmodel import Session, select
@@ -17,7 +19,7 @@ from ..deps import (
     require_project_access,
 )
 from ..jira import create_jira_issue, jira_settings_ready
-from ..models import AuditLog, Check, Event, Incident, IncidentNote, Project
+from ..models import AuditLog, BrowserCheckArtifact, Check, Event, Incident, IncidentNote, Project
 from ..postmortems import (
     build_incident_timeline,
     render_incident_postmortem_markdown,
@@ -36,6 +38,37 @@ def _serialize_note(note: IncidentNote) -> dict:
         "author": note.author,
         "body": note.body,
         "created_at": note.created_at.isoformat(),
+    }
+
+
+def _artifact_root() -> FilePath:
+    base = FilePath(
+        os.environ.get("BROWSER_CHECK_ARTIFACT_DIR")
+        or os.path.join(os.getcwd(), "artifacts", "browser_checks")
+    )
+    return base.resolve()
+
+
+def _artifact_path_allowed(path: FilePath) -> bool:
+    try:
+        path.resolve().relative_to(_artifact_root())
+        return True
+    except Exception:
+        return False
+
+
+def _serialize_browser_artifact(project_id: int, incident_id: int, artifact: BrowserCheckArtifact) -> dict:
+    file_path = FilePath(artifact.file_path)
+    return {
+        "id": artifact.id,
+        "artifact_type": artifact.artifact_type,
+        "content_type": artifact.content_type,
+        "size_bytes": artifact.size_bytes,
+        "created_at": artifact.created_at.isoformat(),
+        "check_id": artifact.check_id,
+        "check_result_id": artifact.check_result_id,
+        "file_name": file_path.name,
+        "download_url": f"/projects/{project_id}/incidents/{incident_id}/artifacts/{artifact.id}",
     }
 
 
@@ -217,6 +250,11 @@ def get_incident(
     notes = session.exec(
         select(IncidentNote).where(IncidentNote.incident_id == incident_id).order_by(IncidentNote.created_at)
     ).all()
+    artifacts = session.exec(
+        select(BrowserCheckArtifact)
+        .where(BrowserCheckArtifact.incident_id == incident_id)
+        .order_by(BrowserCheckArtifact.created_at.desc(), BrowserCheckArtifact.id.desc())
+    ).all()
     timeline = build_incident_timeline(session, incident)
     return {
         "incident": _serialize_incident(incident, note_count=len(notes)),
@@ -225,6 +263,7 @@ def get_incident(
             for event in events
         ],
         "notes": [_serialize_note(note) for note in notes],
+        "artifacts": [_serialize_browser_artifact(project_id, incident_id, artifact) for artifact in artifacts],
         "timeline": timeline["timeline"],
         "timeline_stats": timeline["stats"],
         "postmortem": {
@@ -244,6 +283,32 @@ def get_incident_timeline(
 ):
     incident = _get_incident_or_404(session, project_id, incident_id)
     return build_incident_timeline(session, incident)
+
+
+@router.get("/incidents/{incident_id}/artifacts/{artifact_id}")
+def download_incident_artifact(
+    project_id: int = Path(..., ge=1),
+    incident_id: int = Path(..., ge=1),
+    artifact_id: int = Path(..., ge=1),
+    session: Session = Depends(get_session),
+    _proj: Project = Depends(require_project_access),
+):
+    incident = _get_incident_or_404(session, project_id, incident_id)
+    artifact = session.get(BrowserCheckArtifact, artifact_id)
+    if (
+        artifact is None
+        or artifact.project_id != project_id
+        or artifact.incident_id != incident.id
+    ):
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    path = FilePath(artifact.file_path)
+    if not _artifact_path_allowed(path) or not path.exists():
+        raise HTTPException(status_code=404, detail="Artifact file not found")
+    return FileResponse(
+        path=path,
+        media_type=artifact.content_type or "application/octet-stream",
+        filename=path.name,
+    )
 
 
 @router.get("/incidents/{incident_id}/postmortem.md", response_class=PlainTextResponse)

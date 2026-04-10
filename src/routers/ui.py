@@ -836,6 +836,14 @@ def incident_detail_page(incident_id: int = Path(..., ge=1)):
 
         <section class="card">
           <div class="section-head">
+            <h3>Browser Artifacts</h3>
+            <div class="muted">Failure screenshots, videos, and HAR captures linked to this incident.</div>
+          </div>
+          <div id="incidentArtifacts" class="muted">No browser artifacts linked yet.</div>
+        </section>
+
+        <section class="card">
+          <div class="section-head">
             <h3>Notes</h3>
             <div class="muted">Capture investigation context, handoffs, and remediation steps.</div>
           </div>
