@@ -112,6 +112,61 @@ Run a restore drill in staging on a schedule:
 3. run `python -m pytest -q` against a throwaway database when practical
 4. verify `/health` and `/ui/status/{project_id}`
 
+## Automated backup verification and restore drill
+
+This repo now includes a scheduled GitHub Actions workflow:
+
+- `.github/workflows/backup_restore_drill.yml`
+
+Required GitHub Environment / repository secret:
+
+- `BACKUP_DRILL_SOURCE_DATABASE_URL`
+
+What the workflow does:
+
+1. starts an isolated PostgreSQL service on the runner
+2. takes a logical backup from `BACKUP_DRILL_SOURCE_DATABASE_URL`
+3. restores that dump into the isolated PostgreSQL target
+4. runs `python -m alembic upgrade head` against the restored database
+5. compares high-signal table counts before and after restore
+6. uploads proof artifacts without uploading the live database dump itself
+
+Artifact output:
+
+- `artifacts/backup_restore_drill/summary.json`
+- `artifacts/backup_restore_drill/summary.md`
+
+The summary records:
+
+- redacted source / restore database URLs
+- backup sha256 and size
+- backup / restore / migration durations
+- verification table counts before / after restore
+- any mismatched counts
+- detected Alembic head after restore
+
+### Local restore drill
+
+For SQLite:
+
+```bash
+python scripts/backup_restore_drill.py \
+  --source-url "sqlite:///./dev.db" \
+  --restore-url "sqlite:///./restore-drill.db" \
+  --output-dir artifacts/backup_restore_drill
+```
+
+For PostgreSQL:
+
+```bash
+python scripts/backup_restore_drill.py \
+  --source-url "$DATABASE_URL" \
+  --restore-url "postgresql://postgres:postgres@localhost:5432/lastping_restore" \
+  --output-dir artifacts/backup_restore_drill
+```
+
+Use `--keep-backup` only for controlled local debugging. The scheduled workflow deletes the dump after hashing it and only keeps summary evidence.
+
 ## Secrets and compliance notes
 
 - Never commit real `deploy.runtime.env` files.

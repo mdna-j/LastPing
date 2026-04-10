@@ -15,4 +15,5 @@ Developer notes:
 - See the project `README.md` for quickstart and environment variables.
 - CI: `.github/workflows/ci.yml` runs linting and tests.
 - Deployments: `.github/workflows/deploy.yml` validates runtime env and rolls out the Helm chart in `deploy/helm/lastping`.
+- Restore drills: `.github/workflows/backup_restore_drill.yml` verifies that backups can be restored and migrated successfully.
 - Consider adding Sphinx or MkDocs if you want user-facing documentation pages.

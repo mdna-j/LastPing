@@ -50,6 +50,8 @@ Recommended protected settings:
 - `DEPLOY_TWILIO_AUTH_TOKEN`
 - `DEPLOY_TWILIO_FROM`
 - `DEPLOY_OTEL_EXPORTER_OTLP_HEADERS`
+- `BACKUP_DRILL_SOURCE_DATABASE_URL`
+  Recommended so `.github/workflows/backup_restore_drill.yml` can run scheduled restore verification against a real environment backup source.
 
 ### Required environment variables
 
@@ -185,6 +187,24 @@ curl -fsS https://status.lastping.example.com/health
 - dashboard loads
 - public status page loads
 - background alerts / retention / model ops are not erroring
+
+## Scheduled restore verification
+
+Backups should be proven, not assumed.
+
+Use `.github/workflows/backup_restore_drill.yml` to run a recurring restore drill against a disposable PostgreSQL target. The workflow:
+
+- creates a logical backup from `BACKUP_DRILL_SOURCE_DATABASE_URL`
+- restores it into an isolated database
+- runs `python -m alembic upgrade head`
+- publishes `summary.json` / `summary.md` evidence artifacts
+
+Recommended operating policy:
+
+- staging: at least weekly
+- production: at least weekly, and always before major schema or platform changes
+
+Review the uploaded summary artifact after each scheduled run and keep the latest successful run ID in your ops notes or change-management record.
 
 For multi-region validation, continue to use:
 
