@@ -23,5 +23,7 @@ def isolate_database_engine():
         "PAGERDUTY_WEBHOOK_SECRET",
         "JIRA_WEBHOOK_SECRET",
         "ADMIN_TOKEN",
+        "OTEL_SERVICE_NAME",
+        "LASTPING_SERVICE_NAME",
     ):
         os.environ.pop(env_name, None)

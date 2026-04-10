@@ -217,8 +217,10 @@ def _apply_sync_event(session: Session, incident: Incident, payload: dict) -> in
 @router.post("/webhook")
 async def receive_jira_webhook(
     request: Request,
+    x_jira_webhook_secret: Optional[str] = Header(None),
     x_jira_webhook_timestamp: Optional[str] = Header(None),
     x_jira_webhook_signature: Optional[str] = Header(None),
+    x_lastping_webhook_secret: Optional[str] = Header(None),
     x_lastping_webhook_timestamp: Optional[str] = Header(None),
     x_lastping_webhook_signature: Optional[str] = Header(None),
     session: Session = Depends(get_session),
@@ -229,20 +231,29 @@ async def receive_jira_webhook(
 
     raw_body = await request.body()
     payload = parse_signed_json_body(raw_body)
-    request_timestamp, normalized_signature = verify_signed_webhook_request(
-        source="Jira",
-        secret=configured_secret,
-        timestamp=x_jira_webhook_timestamp or x_lastping_webhook_timestamp,
-        signature=x_jira_webhook_signature or x_lastping_webhook_signature,
-        raw_body=raw_body,
-    )
-    if not register_webhook_receipt(
-        session,
-        source="jira",
-        signature=normalized_signature,
-        request_timestamp=request_timestamp,
-    ):
-        return {"accepted": True, "processed": 0, "changed": 0, "ignored": 0, "replayed": 1}
+    signed_timestamp = x_jira_webhook_timestamp or x_lastping_webhook_timestamp
+    signed_signature = x_jira_webhook_signature or x_lastping_webhook_signature
+    if signed_timestamp or signed_signature:
+        request_timestamp, normalized_signature = verify_signed_webhook_request(
+            source="Jira",
+            secret=configured_secret,
+            timestamp=signed_timestamp,
+            signature=signed_signature,
+            raw_body=raw_body,
+        )
+        if not register_webhook_receipt(
+            session,
+            source="jira",
+            signature=normalized_signature,
+            request_timestamp=request_timestamp,
+        ):
+            return {"accepted": True, "processed": 0, "changed": 0, "ignored": 0, "replayed": 1}
+    else:
+        legacy_secret = x_jira_webhook_secret or x_lastping_webhook_secret
+        if not legacy_secret:
+            raise HTTPException(status_code=401, detail="Missing Jira webhook secret")
+        if legacy_secret != configured_secret:
+            raise HTTPException(status_code=403, detail="Invalid Jira webhook secret")
 
     issue_key = _issue_key(payload)
     if not issue_key:

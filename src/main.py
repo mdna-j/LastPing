@@ -1,11 +1,12 @@
 import time
+from datetime import datetime
 
 from fastapi import FastAPI, Depends, Request
 from fastapi.staticfiles import StaticFiles
 
 from . import db as dbmod
 from .db import create_db_and_tables
-from .runtime_metrics import record_request
+from .runtime_metrics import format_traceparent, generate_trace_context, record_request, record_trace
 from .routers.projects import router as projects_router
 from .routers.checks import router as checks_router
 from .routers.heartbeats import router as heartbeats_router
@@ -21,6 +22,7 @@ from .routers.jira_webhook import router as jira_webhook_router
 from .routers.analytics import router as analytics_router
 from .routers.oncall import router as oncall_router
 from .routers.orgs import router as orgs_router
+from .routers.observability import router as observability_router
 from .routers.remediation import router as remediation_router
 from .deps import limit_public_requests
 
@@ -34,12 +36,46 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 @app.middleware("http")
 async def track_request_latency(request: Request, call_next):
     started = time.perf_counter()
+    started_at = datetime.utcnow()
+    trace_context = generate_trace_context(request.headers.get("traceparent"))
+    request.state.trace_id = trace_context["trace_id"]
+    request.state.span_id = trace_context["span_id"]
+    request.state.parent_span_id = trace_context["parent_span_id"]
+    request.state.traceparent = format_traceparent(
+        trace_context["trace_id"],
+        trace_context["span_id"],
+        trace_context["trace_flags"],
+    )
     try:
         response = await call_next(request)
     except Exception:
-        record_request(request.url.path, request.method, 500, (time.perf_counter() - started) * 1000.0)
+        duration_ms = (time.perf_counter() - started) * 1000.0
+        record_request(request.url.path, request.method, 500, duration_ms)
+        record_trace(
+            request.url.path,
+            request.method,
+            500,
+            duration_ms,
+            trace_id=trace_context["trace_id"],
+            span_id=trace_context["span_id"],
+            parent_span_id=trace_context["parent_span_id"],
+            started_at=started_at,
+        )
         raise
-    record_request(request.url.path, request.method, response.status_code, (time.perf_counter() - started) * 1000.0)
+    duration_ms = (time.perf_counter() - started) * 1000.0
+    record_request(request.url.path, request.method, response.status_code, duration_ms)
+    record_trace(
+        request.url.path,
+        request.method,
+        response.status_code,
+        duration_ms,
+        trace_id=trace_context["trace_id"],
+        span_id=trace_context["span_id"],
+        parent_span_id=trace_context["parent_span_id"],
+        started_at=started_at,
+    )
+    response.headers["traceparent"] = request.state.traceparent
+    response.headers["X-Trace-Id"] = trace_context["trace_id"]
     return response
 
 
@@ -78,4 +114,5 @@ app.include_router(jira_webhook_router)
 app.include_router(analytics_router)
 app.include_router(oncall_router)
 app.include_router(orgs_router)
+app.include_router(observability_router)
 app.include_router(remediation_router)
