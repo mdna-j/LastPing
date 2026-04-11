@@ -1,18 +1,21 @@
 import time
 from datetime import datetime
 
-from fastapi import FastAPI, Depends, Request
+from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.staticfiles import StaticFiles
 
 from . import db as dbmod
 from .db import create_db_and_tables
 from .otel_runtime import configure_opentelemetry, finish_http_span, record_http_metrics, shutdown_opentelemetry, start_http_span
 from .runtime_metrics import format_traceparent, generate_trace_context, record_request, record_trace
+from .security_ops import audit_http_exception
 from .routers.projects import router as projects_router
 from .routers.checks import router as checks_router
 from .routers.heartbeats import router as heartbeats_router
 from .routers.alerts import router as alerts_router
 from .routers.admin_apikeys import router as admin_apikeys_router
+from .routers.admin_security import router as admin_security_router
 from .routers.users import router as users_router
 from .routers.metrics import router as metrics_router
 from .routers.incidents import router as incidents_router, public_router as incidents_public_router
@@ -32,6 +35,12 @@ app = FastAPI(title="LastPing API")
 
 # Serve static assets (JS/CSS) from ./static
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+
+@app.exception_handler(HTTPException)
+async def record_security_http_exception(request: Request, exc: HTTPException):
+    audit_http_exception(request, exc)
+    return await http_exception_handler(request, exc)
 
 
 @app.middleware("http")
@@ -122,6 +131,7 @@ app.include_router(checks_router)
 app.include_router(heartbeats_router)
 app.include_router(alerts_router)
 app.include_router(admin_apikeys_router)
+app.include_router(admin_security_router)
 app.include_router(users_router)
 app.include_router(metrics_router)
 app.include_router(incidents_router)
