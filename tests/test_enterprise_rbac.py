@@ -160,3 +160,81 @@ def test_scoped_project_tokens_and_audit_filters(tmp_path):
     )
     assert audit_rows.status_code == 200, audit_rows.text
     assert audit_rows.json()["total"] >= 2
+
+
+def test_scoped_project_token_rotation_with_grace_and_expiry(tmp_path):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_enterprise_rbac_rotate.sqlite'}"
+
+    from src import db as dbmod
+    from src.main import app
+    from src.models import ApiKey
+    from src.security import hash_password
+
+    dbmod.create_db_and_tables()
+    client = TestClient(app)
+
+    with Session(dbmod.engine) as session:
+        owner, owner_token = _create_user_with_token(session, email="owner@example.com", password_hash=hash_password("pw"))
+
+    owner_headers = {"Authorization": f"Bearer {owner_token}"}
+
+    created_project = client.post("/projects/", json={"name": "Rotating Tokens"}, headers=owner_headers)
+    assert created_project.status_code == 201, created_project.text
+    project_id = created_project.json()["project"]["id"]
+
+    created_token = client.post(
+        f"/projects/{project_id}/tokens",
+        json={
+            "name": "writer",
+            "role": "editor",
+            "expires_at": (datetime.utcnow() + timedelta(days=2)).isoformat(),
+            "rotation_interval_days": 7,
+        },
+        headers=owner_headers,
+    )
+    assert created_token.status_code == 201, created_token.text
+    old_token_id = created_token.json()["token"]["id"]
+    old_key = created_token.json()["api_key"]
+
+    rotated = client.post(
+        f"/projects/{project_id}/tokens/{old_token_id}/rotate",
+        json={"grace_seconds": 300, "rotation_interval_days": 14},
+        headers=owner_headers,
+    )
+    assert rotated.status_code == 201, rotated.text
+    new_key = rotated.json()["api_key"]
+    assert rotated.json()["token"]["rotation_interval_days"] == 14
+
+    old_during_grace = client.post(
+        f"/projects/{project_id}/checks/",
+        json={"name": "old-key-during-grace", "type": "heartbeat"},
+        headers={"X-API-KEY": old_key},
+    )
+    assert old_during_grace.status_code == 201, old_during_grace.text
+
+    with Session(dbmod.engine) as session:
+        old_token = session.get(ApiKey, old_token_id)
+        old_token.expires_at = datetime.utcnow() - timedelta(seconds=1)
+        session.add(old_token)
+        session.commit()
+
+    old_after_expiry = client.post(
+        f"/projects/{project_id}/checks/",
+        json={"name": "old-key-after-expiry", "type": "heartbeat"},
+        headers={"X-API-KEY": old_key},
+    )
+    assert old_after_expiry.status_code == 403
+    assert "expired" in old_after_expiry.json()["detail"].lower()
+
+    new_after_rotate = client.post(
+        f"/projects/{project_id}/checks/",
+        json={"name": "new-key-after-rotate", "type": "heartbeat"},
+        headers={"X-API-KEY": new_key},
+    )
+    assert new_after_rotate.status_code == 201, new_after_rotate.text
+
+    listed_tokens = client.get(f"/projects/{project_id}/tokens", headers=owner_headers)
+    assert listed_tokens.status_code == 200, listed_tokens.text
+    rows = {row["id"]: row for row in listed_tokens.json()}
+    assert rows[old_token_id]["last_used_at"] is not None
+    assert rows[old_token_id]["replaced_by_api_key_id"] is not None

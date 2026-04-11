@@ -1,4 +1,5 @@
 import os
+from datetime import datetime, timedelta
 
 from fastapi.testclient import TestClient
 
@@ -38,6 +39,8 @@ def test_project_jira_settings_roundtrip(tmp_path):
             "api_token": "jira-token",
             "project_key": "ops",
             "issue_type": "Bug",
+            "rotation_interval_days": 14,
+            "expires_at": (datetime.utcnow() + timedelta(days=30)).isoformat(),
         },
         headers={"X-API-KEY": "owner-key"},
     )
@@ -47,6 +50,7 @@ def test_project_jira_settings_roundtrip(tmp_path):
     assert body["project_key"] == "OPS"
     assert body["issue_type"] == "Bug"
     assert body["api_token_configured"] is True
+    assert body["secret_lifecycle"]["rotation_interval_days"] == 14
     assert "api_token" not in body
 
     get_after_res = client.get(f"/projects/{project_id}/jira-settings", headers={"X-API-KEY": "owner-key"})
@@ -99,3 +103,76 @@ def test_project_jira_settings_clear_token_flow(tmp_path):
     assert clear_res.status_code == 200
     assert clear_res.json()["api_token_configured"] is False
     assert clear_res.json()["configured"] is False
+
+
+def test_project_jira_rotation_grace_falls_back_to_previous_token(tmp_path, monkeypatch):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_jira_rotation.sqlite'}"
+    os.environ["ADMIN_TOKEN"] = "jira-admin"
+
+    from sqlmodel import Session
+    from src import db as dbmod
+    from src.main import app
+    from src.models import Check, Incident, Project
+    from src.security import hash_api_key
+
+    dbmod.create_db_and_tables()
+    client = TestClient(app)
+
+    with Session(dbmod.engine) as session:
+        project = Project(
+            name="jira-rotation-project",
+            api_key_hash=hash_api_key("owner-key"),
+            jira_base_url="https://lastping.atlassian.net",
+            jira_user_email="ops@example.com",
+            jira_api_token="old-jira-token",
+            jira_project_key="OPS",
+            jira_issue_type="Bug",
+        )
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        check = Check(project_id=project.id, name="jira-check", type="heartbeat")
+        session.add(check)
+        session.commit()
+        session.refresh(check)
+
+        incident = Incident(project_id=project.id, check_id=check.id, status="open")
+        session.add(incident)
+        session.commit()
+        session.refresh(incident)
+
+        project_id = project.id
+        incident_id = incident.id
+
+    rotate_res = client.post(
+        f"/projects/{project_id}/jira-settings",
+        json={"api_token": "new-jira-token", "grace_seconds": 300},
+        headers={"X-ADMIN-TOKEN": "jira-admin"},
+    )
+    assert rotate_res.status_code == 200, rotate_res.text
+    assert rotate_res.json()["secret_lifecycle"]["rollover_active_until"] is not None
+
+    attempted_tokens = []
+
+    def fake_create_jira_issue(*, api_token, **kwargs):
+        attempted_tokens.append(api_token)
+        if api_token == "new-jira-token":
+            raise RuntimeError("new token not propagated yet")
+        return {"key": "OPS-123", "url": "https://lastping.atlassian.net/browse/OPS-123"}
+
+    monkeypatch.setattr("src.routers.incidents.create_jira_issue", fake_create_jira_issue)
+
+    ticket_res = client.post(
+        f"/projects/{project_id}/incidents/{incident_id}/jira-ticket",
+        headers={"X-ADMIN-TOKEN": "jira-admin"},
+    )
+    assert ticket_res.status_code == 200, ticket_res.text
+    assert attempted_tokens == ["new-jira-token", "old-jira-token"]
+    assert ticket_res.json()["issue_key"] == "OPS-123"
+
+    get_res = client.get(f"/projects/{project_id}/jira-settings", headers={"X-ADMIN-TOKEN": "jira-admin"})
+    assert get_res.status_code == 200
+    body = get_res.json()
+    assert body["secret_lifecycle"]["last_used_at"] is not None
+    assert body["secret_lifecycle"]["rollover_active_until"] is not None

@@ -6,8 +6,7 @@ configuration and API keys. `create_project` returns a plaintext API
 key once; the server stores only the PBKDF2 hash.
 """
 
-from datetime import datetime
-import secrets
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status, Header, Request, Path, Body
@@ -15,9 +14,24 @@ from pydantic import BaseModel, EmailStr, AnyHttpUrl, confloat, constr, root_val
 from sqlmodel import select, Session
 
 from ..db import get_session
-from ..jira import jira_settings_ready
 from ..models import AuditLog, ApiKey, OrgRole, Project as ProjectModel, ProjectMembership, Role
 from ..security import generate_api_key, hash_api_key
+from ..secret_lifecycle import (
+    SECRET_DISCORD_WEBHOOK_URL,
+    SECRET_GENERIC_WEBHOOK_URL,
+    SECRET_JIRA_API_TOKEN,
+    SECRET_PAGERDUTY_INTEGRATION_KEY,
+    SECRET_SLACK_WEBHOOK_URL,
+    UNSET,
+    active_project_secret_candidates,
+    api_key_rotation_due_at,
+    api_key_rotation_required,
+    clear_project_secret_lifecycle,
+    project_secret_lifecycle_payload,
+    rotate_project_secret,
+    touch_project_secret_last_used,
+    update_project_secret_policy,
+)
 from ..alerts import retry_notification_failure_payload, send_pagerduty_event
 from ..deps import authorize_org_operation, authorize_project_operation, get_audit_context, get_current_user, limit_integration_action_requests, limit_public_requests
 from ..schemas import StrictBaseModel
@@ -64,6 +78,14 @@ def _diff_details(before: dict, after: dict) -> Optional[str]:
         return str(changes)
 
 
+def _normalize_utc_naive(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
+        return None
+    if value.tzinfo is not None:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
+
+
 class ProjectCreate(StrictBaseModel):
     name: constr(min_length=1, max_length=120)
     owner_email: Optional[EmailStr] = None
@@ -88,6 +110,48 @@ class ProjectTokenCreate(StrictBaseModel):
     name: constr(min_length=1, max_length=120)
     role: constr(regex=r"^(owner|admin|editor|viewer)$") = Role.EDITOR.value
     rate_limit_per_minute: Optional[int] = 0
+    expires_at: Optional[datetime] = None
+    rotation_interval_days: Optional[int] = None
+
+    @root_validator
+    def _validate_lifecycle(cls, values):
+        expires_at = _normalize_utc_naive(values.get("expires_at"))
+        rotation_interval_days = values.get("rotation_interval_days")
+        values["expires_at"] = expires_at
+        if expires_at and expires_at <= datetime.utcnow():
+            raise ValueError("expires_at must be in the future")
+        if rotation_interval_days is not None and int(rotation_interval_days) <= 0:
+            raise ValueError("rotation_interval_days must be positive")
+        return values
+
+
+class ProjectTokenLifecycleUpdate(StrictBaseModel):
+    expires_at: Optional[datetime] = None
+    clear_expiry: bool = False
+    rotation_interval_days: Optional[int] = None
+    clear_rotation_policy: bool = False
+
+    @root_validator
+    def _validate_lifecycle(cls, values):
+        expires_at = _normalize_utc_naive(values.get("expires_at"))
+        rotation_interval_days = values.get("rotation_interval_days")
+        values["expires_at"] = expires_at
+        if expires_at and expires_at <= datetime.utcnow():
+            raise ValueError("expires_at must be in the future")
+        if rotation_interval_days is not None and int(rotation_interval_days) <= 0:
+            raise ValueError("rotation_interval_days must be positive")
+        return values
+
+
+class ProjectTokenRotateRequest(ProjectTokenLifecycleUpdate):
+    grace_seconds: int = 3600
+
+    @root_validator
+    def _validate_grace(cls, values):
+        grace_seconds = int(values.get("grace_seconds") or 0)
+        if grace_seconds < 0 or grace_seconds > 604800:
+            raise ValueError("grace_seconds must be between 0 and 604800")
+        return values
 
 
 class ProjectTokenRead(BaseModel):
@@ -99,10 +163,85 @@ class ProjectTokenRead(BaseModel):
     revoked_at: Optional[datetime]
     rate_limit_per_minute: Optional[int]
     created_by_user_id: Optional[int]
+    last_used_at: Optional[datetime]
+    expires_at: Optional[datetime]
+    last_rotated_at: datetime
+    rotation_interval_days: Optional[int]
+    rotation_due_at: Optional[datetime]
+    rotation_required: bool
+    replaced_by_api_key_id: Optional[int]
+    is_primary: bool
     created_at: datetime
 
     class Config:
         orm_mode = True
+
+
+class SecretLifecycleRead(BaseModel):
+    last_used_at: Optional[datetime] = None
+    expires_at: Optional[datetime] = None
+    last_rotated_at: Optional[datetime] = None
+    rotation_interval_days: Optional[int] = None
+    rotation_due_at: Optional[datetime] = None
+    rotation_required: bool = False
+    rollover_active_until: Optional[datetime] = None
+    usable_now: bool = False
+
+
+def _token_lifecycle_update_kwargs(payload: ProjectTokenLifecycleUpdate) -> dict:
+    expires_at = UNSET
+    rotation_interval_days = UNSET
+    if payload.clear_expiry:
+        expires_at = None
+    elif "expires_at" in getattr(payload, "__fields_set__", set()):
+        expires_at = _normalize_utc_naive(payload.expires_at)
+    if payload.clear_rotation_policy:
+        rotation_interval_days = None
+    elif "rotation_interval_days" in getattr(payload, "__fields_set__", set()):
+        rotation_interval_days = payload.rotation_interval_days
+    return {
+        "expires_at": expires_at,
+        "rotation_interval_days": rotation_interval_days,
+    }
+
+
+def _serialize_project_token(token: ApiKey, project: ProjectModel) -> ProjectTokenRead:
+    return ProjectTokenRead(
+        id=token.id,
+        project_id=token.project_id,
+        name=token.name,
+        role=token.role,
+        is_active=token.is_active,
+        revoked_at=token.revoked_at,
+        rate_limit_per_minute=token.rate_limit_per_minute,
+        created_by_user_id=token.created_by_user_id,
+        last_used_at=token.last_used_at,
+        expires_at=token.expires_at,
+        last_rotated_at=token.last_rotated_at or token.created_at,
+        rotation_interval_days=token.rotation_interval_days,
+        rotation_due_at=api_key_rotation_due_at(token),
+        rotation_required=api_key_rotation_required(token),
+        replaced_by_api_key_id=token.replaced_by_api_key_id,
+        is_primary=bool(project.api_key_hash and token.key_hash == project.api_key_hash),
+        created_at=token.created_at,
+    )
+
+
+def _secret_lifecycle_update_kwargs(payload) -> dict:
+    expires_at = UNSET
+    rotation_interval_days = UNSET
+    if getattr(payload, "clear_expiry", False):
+        expires_at = None
+    elif "expires_at" in getattr(payload, "__fields_set__", set()):
+        expires_at = _normalize_utc_naive(getattr(payload, "expires_at", None))
+    if getattr(payload, "clear_rotation_policy", False):
+        rotation_interval_days = None
+    elif "rotation_interval_days" in getattr(payload, "__fields_set__", set()):
+        rotation_interval_days = getattr(payload, "rotation_interval_days", None)
+    return {
+        "expires_at": expires_at,
+        "rotation_interval_days": rotation_interval_days,
+    }
 
 
 def _project_scope_kwargs(project: ProjectModel) -> dict:
@@ -200,7 +339,7 @@ def list_project_tokens(
     x_api_key: Optional[str] = Header(None),
     session: Session = Depends(get_session),
 ):
-    authorize_project_operation(
+    project = authorize_project_operation(
         project_id,
         min_role=Role.OWNER.value,
         x_admin_token=x_admin_token,
@@ -209,7 +348,7 @@ def list_project_tokens(
         session=session,
     )
     rows = session.exec(select(ApiKey).where(ApiKey.project_id == project_id).order_by(ApiKey.created_at.desc())).all()
-    return [ProjectTokenRead.from_orm(row) for row in rows]
+    return [_serialize_project_token(row, project) for row in rows]
 
 
 @router.post("/{project_id}/tokens", status_code=status.HTTP_201_CREATED)
@@ -244,6 +383,9 @@ def create_project_token(
         role=payload.role,
         rate_limit_per_minute=payload.rate_limit_per_minute or 0,
         created_by_user_id=creator.id if creator else None,
+        expires_at=payload.expires_at,
+        rotation_interval_days=payload.rotation_interval_days,
+        last_rotated_at=datetime.utcnow(),
     )
     session.add(token)
     session.commit()
@@ -265,7 +407,7 @@ def create_project_token(
         session.commit()
     except Exception:
         session.rollback()
-    return {"token": ProjectTokenRead.from_orm(token), "api_key": plain}
+    return {"token": _serialize_project_token(token, project), "api_key": plain}
 
 
 @router.post("/{project_id}/tokens/{api_key_id}/revoke", response_model=ProjectTokenRead)
@@ -289,7 +431,7 @@ def revoke_project_token(
     token = session.get(ApiKey, api_key_id)
     if not token or token.project_id != project_id:
         raise HTTPException(status_code=404, detail="API token not found")
-    if token.key_hash == project.api_key_hash or token.name == "primary":
+    if token.key_hash == project.api_key_hash:
         raise HTTPException(status_code=400, detail="Use rotate-key for the primary project token")
     token.is_active = False
     token.revoked_at = datetime.utcnow()
@@ -313,7 +455,135 @@ def revoke_project_token(
         session.commit()
     except Exception:
         session.rollback()
-    return ProjectTokenRead.from_orm(token)
+    return _serialize_project_token(token, project)
+
+
+@router.post("/{project_id}/tokens/{api_key_id}/policy", response_model=ProjectTokenRead)
+def update_project_token_policy(
+    project_id: int = Path(..., ge=1),
+    api_key_id: int = Path(..., ge=1),
+    payload: ProjectTokenLifecycleUpdate = Body(...),
+    request: Request = None,
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    project = authorize_project_operation(
+        project_id,
+        min_role=Role.OWNER.value,
+        x_admin_token=x_admin_token,
+        authorization=authorization,
+        x_api_key=x_api_key,
+        session=session,
+    )
+    token = session.get(ApiKey, api_key_id)
+    if not token or token.project_id != project_id:
+        raise HTTPException(status_code=404, detail="API token not found")
+    update_kwargs = _token_lifecycle_update_kwargs(payload)
+    if update_kwargs["expires_at"] is not UNSET:
+        token.expires_at = update_kwargs["expires_at"]
+    if update_kwargs["rotation_interval_days"] is not UNSET:
+        token.rotation_interval_days = update_kwargs["rotation_interval_days"]
+    session.add(token)
+    session.commit()
+    session.refresh(token)
+    try:
+        actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
+        session.add(
+            AuditLog(
+                actor=actor,
+                action="update_project_token_policy",
+                target_type="api_key",
+                target_id=token.id,
+                details=json.dumps(
+                    {
+                        "expires_at": token.expires_at.isoformat() if token.expires_at else None,
+                        "rotation_interval_days": token.rotation_interval_days,
+                    }
+                ),
+                actor_ip=actor_ip,
+                user_agent=user_agent,
+                **_project_scope_kwargs(project),
+            )
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+    return _serialize_project_token(token, project)
+
+
+@router.post("/{project_id}/tokens/{api_key_id}/rotate", status_code=status.HTTP_201_CREATED)
+def rotate_project_token(
+    project_id: int = Path(..., ge=1),
+    api_key_id: int = Path(..., ge=1),
+    payload: Optional[ProjectTokenRotateRequest] = Body(None),
+    request: Request = None,
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    project = authorize_project_operation(
+        project_id,
+        min_role=Role.OWNER.value,
+        x_admin_token=x_admin_token,
+        authorization=authorization,
+        x_api_key=x_api_key,
+        session=session,
+    )
+    token = session.get(ApiKey, api_key_id)
+    if not token or token.project_id != project_id:
+        raise HTTPException(status_code=404, detail="API token not found")
+    if token.key_hash == project.api_key_hash:
+        raise HTTPException(status_code=400, detail="Use rotate-key for the primary project token")
+
+    payload = payload or ProjectTokenRotateRequest()
+    plain = generate_api_key()
+    update_kwargs = _token_lifecycle_update_kwargs(payload)
+    new_token = ApiKey(
+        project_id=project_id,
+        key_hash=hash_api_key(plain),
+        name=token.name,
+        role=token.role,
+        rate_limit_per_minute=token.rate_limit_per_minute or 0,
+        created_by_user_id=token.created_by_user_id,
+        expires_at=update_kwargs["expires_at"] if update_kwargs["expires_at"] is not UNSET else token.expires_at,
+        rotation_interval_days=update_kwargs["rotation_interval_days"] if update_kwargs["rotation_interval_days"] is not UNSET else token.rotation_interval_days,
+        last_rotated_at=datetime.utcnow(),
+    )
+    session.add(new_token)
+    session.flush()
+
+    token.expires_at = datetime.utcnow() + timedelta(seconds=int(payload.grace_seconds or 0))
+    token.replaced_by_api_key_id = new_token.id
+    session.add(token)
+    session.commit()
+    session.refresh(token)
+    session.refresh(new_token)
+    try:
+        actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
+        session.add(
+            AuditLog(
+                actor=actor,
+                action="rotate_scoped_project_token",
+                target_type="api_key",
+                target_id=new_token.id,
+                details=json.dumps(
+                    {
+                        "replaced_api_key_id": token.id,
+                        "grace_seconds": int(payload.grace_seconds or 0),
+                    }
+                ),
+                actor_ip=actor_ip,
+                user_agent=user_agent,
+                **_project_scope_kwargs(project),
+            )
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+    return {"token": _serialize_project_token(new_token, project), "api_key": plain}
 
 
 class WebhookUpdate(StrictBaseModel):
@@ -351,10 +621,30 @@ class AlertSettings(StrictBaseModel):
 class PagerDutySettingsIn(StrictBaseModel):
     integration_key: Optional[constr(max_length=128)] = None
     clear_integration_key: bool = False
+    expires_at: Optional[datetime] = None
+    clear_expiry: bool = False
+    rotation_interval_days: Optional[int] = None
+    clear_rotation_policy: bool = False
+    grace_seconds: int = 3600
+
+    @root_validator
+    def _validate_lifecycle(cls, values):
+        expires_at = _normalize_utc_naive(values.get("expires_at"))
+        rotation_interval_days = values.get("rotation_interval_days")
+        grace_seconds = int(values.get("grace_seconds") or 0)
+        values["expires_at"] = expires_at
+        if expires_at and expires_at <= datetime.utcnow():
+            raise ValueError("expires_at must be in the future")
+        if rotation_interval_days is not None and int(rotation_interval_days) <= 0:
+            raise ValueError("rotation_interval_days must be positive")
+        if grace_seconds < 0 or grace_seconds > 604800:
+            raise ValueError("grace_seconds must be between 0 and 604800")
+        return values
 
 
 class PagerDutySettingsOut(BaseModel):
     integration_key_configured: bool
+    secret_lifecycle: SecretLifecycleRead
     inbound_webhook_url: str
     inbound_secret_configured: bool
     inbound_timestamp_header: str
@@ -379,12 +669,32 @@ class JiraSettingsIn(StrictBaseModel):
     project_key: Optional[constr(max_length=64)] = None
     issue_type: Optional[constr(max_length=120)] = None
     clear_api_token: bool = False
+    expires_at: Optional[datetime] = None
+    clear_expiry: bool = False
+    rotation_interval_days: Optional[int] = None
+    clear_rotation_policy: bool = False
+    grace_seconds: int = 3600
+
+    @root_validator
+    def _validate_lifecycle(cls, values):
+        expires_at = _normalize_utc_naive(values.get("expires_at"))
+        rotation_interval_days = values.get("rotation_interval_days")
+        grace_seconds = int(values.get("grace_seconds") or 0)
+        values["expires_at"] = expires_at
+        if expires_at and expires_at <= datetime.utcnow():
+            raise ValueError("expires_at must be in the future")
+        if rotation_interval_days is not None and int(rotation_interval_days) <= 0:
+            raise ValueError("rotation_interval_days must be positive")
+        if grace_seconds < 0 or grace_seconds > 604800:
+            raise ValueError("grace_seconds must be between 0 and 604800")
+        return values
 
 
 class JiraSettingsOut(BaseModel):
     base_url: Optional[str] = None
     user_email: Optional[str] = None
     api_token_configured: bool
+    secret_lifecycle: SecretLifecycleRead
     project_key: Optional[str] = None
     issue_type: Optional[str] = None
     inbound_webhook_url: str
@@ -481,22 +791,39 @@ def update_project_webhooks(project_id: int = Path(..., ge=1), payload: WebhookU
     fields_set = getattr(payload, "__fields_set__", set())
     if payload.clear_discord_webhook_url:
         project.discord_webhook_url = None
+        clear_project_secret_lifecycle(session, project_id, SECRET_DISCORD_WEBHOOK_URL)
     elif payload.discord_webhook_url:
-        project.discord_webhook_url = str(payload.discord_webhook_url)
+        discord_value = str(payload.discord_webhook_url)
+        if discord_value != project.discord_webhook_url:
+            rotate_project_secret(session, project, SECRET_DISCORD_WEBHOOK_URL, new_value=discord_value, grace_seconds=0)
     if payload.clear_slack_webhook_url:
         project.slack_webhook_url = None
+        clear_project_secret_lifecycle(session, project_id, SECRET_SLACK_WEBHOOK_URL)
     elif payload.slack_webhook_url:
-        project.slack_webhook_url = str(payload.slack_webhook_url)
+        slack_value = str(payload.slack_webhook_url)
+        if slack_value != project.slack_webhook_url:
+            rotate_project_secret(session, project, SECRET_SLACK_WEBHOOK_URL, new_value=slack_value, grace_seconds=0)
     if "slack_channel" in fields_set:
         project.slack_channel = payload.slack_channel
     if payload.clear_pagerduty_integration_key:
         project.pagerduty_integration_key = None
+        clear_project_secret_lifecycle(session, project_id, SECRET_PAGERDUTY_INTEGRATION_KEY)
     elif payload.pagerduty_integration_key:
-        project.pagerduty_integration_key = payload.pagerduty_integration_key
+        if payload.pagerduty_integration_key != project.pagerduty_integration_key:
+            rotate_project_secret(
+                session,
+                project,
+                SECRET_PAGERDUTY_INTEGRATION_KEY,
+                new_value=payload.pagerduty_integration_key,
+                grace_seconds=0,
+            )
     if payload.clear_generic_webhook_url:
         project.generic_webhook_url = None
+        clear_project_secret_lifecycle(session, project_id, SECRET_GENERIC_WEBHOOK_URL)
     elif payload.generic_webhook_url:
-        project.generic_webhook_url = str(payload.generic_webhook_url)
+        generic_value = str(payload.generic_webhook_url)
+        if generic_value != project.generic_webhook_url:
+            rotate_project_secret(session, project, SECRET_GENERIC_WEBHOOK_URL, new_value=generic_value, grace_seconds=0)
     session.add(project)
     session.commit()
     session.refresh(project)
@@ -559,7 +886,15 @@ def set_project_maintenance(project_id: int = Path(..., ge=1), payload: Maintena
 
 
 @router.post("/{project_id}/rotate-key")
-def rotate_api_key(project_id: int = Path(..., ge=1), request: Request = None, authorization: Optional[str] = Header(None), x_admin_token: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None), session: Session = Depends(get_session)):
+def rotate_api_key(
+    project_id: int = Path(..., ge=1),
+    payload: Optional[ProjectTokenRotateRequest] = Body(None),
+    request: Request = None,
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
     project = authorize_project_operation(
         project_id,
         min_role=Role.OWNER.value,
@@ -568,23 +903,53 @@ def rotate_api_key(project_id: int = Path(..., ge=1), request: Request = None, a
         x_api_key=x_api_key,
         session=session,
     )
+    payload = payload or ProjectTokenRotateRequest()
+    lifecycle_kwargs = _token_lifecycle_update_kwargs(payload)
+    now = datetime.utcnow()
     new_key = generate_api_key()
     old_hash = getattr(project, "api_key_hash", None)
     new_hash = hash_api_key(new_key)
+    current_primary = None
+    if old_hash:
+        current_primary = session.exec(
+            select(ApiKey).where(ApiKey.project_id == project_id, ApiKey.key_hash == old_hash).order_by(ApiKey.created_at.desc())
+        ).first()
+
+    new_primary = ApiKey(
+        project_id=project_id,
+        key_hash=new_hash,
+        name="primary",
+        role=Role.OWNER.value,
+        rate_limit_per_minute=(current_primary.rate_limit_per_minute if current_primary else 0) or 0,
+        created_by_user_id=current_primary.created_by_user_id if current_primary else None,
+        expires_at=lifecycle_kwargs["expires_at"] if lifecycle_kwargs["expires_at"] is not UNSET else None,
+        rotation_interval_days=lifecycle_kwargs["rotation_interval_days"] if lifecycle_kwargs["rotation_interval_days"] is not UNSET else (current_primary.rotation_interval_days if current_primary else None),
+        last_rotated_at=now,
+    )
+    session.add(new_primary)
+    session.flush()
+
+    grace_until = now + timedelta(seconds=int(payload.grace_seconds or 0))
+    if current_primary:
+        current_primary.name = "primary-rollover"
+        current_primary.expires_at = grace_until
+        current_primary.replaced_by_api_key_id = new_primary.id
+        session.add(current_primary)
+    elif old_hash:
+        session.add(
+            ApiKey(
+                project_id=project_id,
+                key_hash=old_hash,
+                name="primary-rollover",
+                role=Role.OWNER.value,
+                rate_limit_per_minute=0,
+                expires_at=grace_until,
+                last_rotated_at=now,
+                replaced_by_api_key_id=new_primary.id,
+            )
+        )
+
     project.api_key_hash = new_hash
-    # Keep `api_key` table in sync for the primary key.
-    try:
-        if old_hash:
-            ak = session.exec(select(ApiKey).where(ApiKey.project_id == project_id, ApiKey.key_hash == old_hash)).first()
-        else:
-            ak = None
-        if ak:
-            ak.key_hash = new_hash
-            session.add(ak)
-        else:
-            session.add(ApiKey(project_id=project_id, key_hash=new_hash, name="primary", role=Role.OWNER.value, rate_limit_per_minute=0))
-    except Exception:
-        pass
     # Email the new key to the project owner when configured. This is
     # the safe most practical delivery mechanism for production usage.
     from ..alerts import send_email
@@ -599,16 +964,26 @@ def rotate_api_key(project_id: int = Path(..., ge=1), request: Request = None, a
     session.add(project)
     session.commit()
     session.refresh(project)
+    session.refresh(new_primary)
     # audit
     try:
         from ..models import AuditLog
         actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
-        al = AuditLog(actor=actor or "project_api", action="rotate_primary_api_key", target_type="project", target_id=project_id, details=None, actor_ip=actor_ip, user_agent=user_agent, **_project_scope_kwargs(project))
+        al = AuditLog(
+            actor=actor or "project_api",
+            action="rotate_primary_api_key",
+            target_type="project",
+            target_id=project_id,
+            details=json.dumps({"grace_seconds": int(payload.grace_seconds or 0), "new_api_key_id": new_primary.id}),
+            actor_ip=actor_ip,
+            user_agent=user_agent,
+            **_project_scope_kwargs(project),
+        )
         session.add(al)
         session.commit()
     except Exception:
         pass
-    return {"api_key": new_key}
+    return {"api_key": new_key, "token": _serialize_project_token(new_primary, project)}
 
 
 @router.post('/rotate-all-keys')
@@ -630,20 +1005,44 @@ def rotate_all_keys(request: Request = None, x_admin_token: Optional[str] = Head
         old_hash = getattr(p, "api_key_hash", None)
         new_key = generate_api_key()
         new_hash = hash_api_key(new_key)
+        now = datetime.utcnow()
+        current_primary = None
+        if old_hash:
+            current_primary = session.exec(
+                select(ApiKey).where(ApiKey.project_id == p.id, ApiKey.key_hash == old_hash).order_by(ApiKey.created_at.desc())
+            ).first()
+        new_primary = ApiKey(
+            project_id=p.id,
+            key_hash=new_hash,
+            name="primary",
+            role=Role.OWNER.value,
+            rate_limit_per_minute=(current_primary.rate_limit_per_minute if current_primary else 0) or 0,
+            created_by_user_id=current_primary.created_by_user_id if current_primary else None,
+            rotation_interval_days=current_primary.rotation_interval_days if current_primary else None,
+            last_rotated_at=now,
+        )
+        session.add(new_primary)
+        session.flush()
         p.api_key_hash = new_hash
-        # Keep `api_key` table in sync for the primary key.
-        try:
-            if old_hash:
-                ak = session.exec(select(ApiKey).where(ApiKey.project_id == p.id, ApiKey.key_hash == old_hash)).first()
-            else:
-                ak = None
-            if ak:
-                ak.key_hash = new_hash
-                session.add(ak)
-            else:
-                session.add(ApiKey(project_id=p.id, key_hash=new_hash, name="primary", role=Role.OWNER.value, rate_limit_per_minute=0))
-        except Exception:
-            pass
+        grace_until = now + timedelta(hours=1)
+        if current_primary:
+            current_primary.name = "primary-rollover"
+            current_primary.expires_at = grace_until
+            current_primary.replaced_by_api_key_id = new_primary.id
+            session.add(current_primary)
+        elif old_hash:
+            session.add(
+                ApiKey(
+                    project_id=p.id,
+                    key_hash=old_hash,
+                    name="primary-rollover",
+                    role=Role.OWNER.value,
+                    rate_limit_per_minute=0,
+                    expires_at=grace_until,
+                    last_rotated_at=now,
+                    replaced_by_api_key_id=new_primary.id,
+                )
+            )
         session.add(p)
         result[p.id] = new_key
         # email rotated key to owner when available
@@ -797,6 +1196,7 @@ def _pagerduty_settings_out(session: Session, project: ProjectModel) -> PagerDut
     ).first()
     return PagerDutySettingsOut(
         integration_key_configured=bool(project.pagerduty_integration_key),
+        secret_lifecycle=SecretLifecycleRead(**project_secret_lifecycle_payload(session, project, SECRET_PAGERDUTY_INTEGRATION_KEY)),
         inbound_webhook_url=inbound_url,
         inbound_secret_configured=bool(os.environ.get("PAGERDUTY_WEBHOOK_SECRET")),
         inbound_timestamp_header="X-PagerDuty-Webhook-Timestamp",
@@ -824,6 +1224,7 @@ def _jira_settings_out(session: Session, project: ProjectModel) -> JiraSettingsO
         base_url=project.jira_base_url,
         user_email=project.jira_user_email,
         api_token_configured=bool(project.jira_api_token),
+        secret_lifecycle=SecretLifecycleRead(**project_secret_lifecycle_payload(session, project, SECRET_JIRA_API_TOKEN)),
         project_key=project.jira_project_key,
         issue_type=project.jira_issue_type or "Task",
         inbound_webhook_url=inbound_url,
@@ -833,7 +1234,7 @@ def _jira_settings_out(session: Session, project: ProjectModel) -> JiraSettingsO
         inbound_signature_scheme="HMAC-SHA256 over '<timestamp>.<raw_body>' using JIRA_WEBHOOK_SECRET",
         latest_sync_action=latest_sync.action if latest_sync else None,
         latest_sync_at=latest_sync.created_at if latest_sync else None,
-        configured=jira_settings_ready(project),
+        configured=bool(project.jira_base_url and project.jira_user_email and project.jira_project_key and active_project_secret_candidates(project, SECRET_JIRA_API_TOKEN, session=session)),
     )
 
 
@@ -908,10 +1309,37 @@ def set_project_pagerduty_settings(
         session=session,
     )
     before = {"pagerduty_integration_key": project.pagerduty_integration_key}
+    lifecycle_kwargs = _secret_lifecycle_update_kwargs(payload)
     if payload.clear_integration_key:
         project.pagerduty_integration_key = None
+        clear_project_secret_lifecycle(session, project_id, SECRET_PAGERDUTY_INTEGRATION_KEY)
     elif payload.integration_key:
-        project.pagerduty_integration_key = payload.integration_key
+        if payload.integration_key != project.pagerduty_integration_key:
+            rotate_project_secret(
+                session,
+                project,
+                SECRET_PAGERDUTY_INTEGRATION_KEY,
+                new_value=payload.integration_key,
+                grace_seconds=int(payload.grace_seconds or 0),
+                expires_at=lifecycle_kwargs["expires_at"],
+                rotation_interval_days=lifecycle_kwargs["rotation_interval_days"],
+            )
+        else:
+            update_project_secret_policy(
+                session,
+                project_id,
+                SECRET_PAGERDUTY_INTEGRATION_KEY,
+                expires_at=lifecycle_kwargs["expires_at"],
+                rotation_interval_days=lifecycle_kwargs["rotation_interval_days"],
+            )
+    else:
+        update_project_secret_policy(
+            session,
+            project_id,
+            SECRET_PAGERDUTY_INTEGRATION_KEY,
+            expires_at=lifecycle_kwargs["expires_at"],
+            rotation_interval_days=lifecycle_kwargs["rotation_interval_days"],
+        )
     session.add(project)
     session.commit()
     session.refresh(project)
@@ -954,29 +1382,35 @@ def send_project_pagerduty_test(
         x_api_key=x_api_key,
         session=session,
     )
-    routing_key = (project.pagerduty_integration_key or "").strip()
-    if not routing_key:
+    routing_keys = active_project_secret_candidates(project, SECRET_PAGERDUTY_INTEGRATION_KEY, session=session)
+    if not routing_keys:
         raise HTTPException(status_code=400, detail="PagerDuty integration key is not configured")
 
     dedup_key = f"lastping:test:{project.id}:{int(datetime.utcnow().timestamp())}"
-    trigger_sent = send_pagerduty_event(
-        routing_key,
-        f"LastPing test incident for project {project.name}",
-        "info",
-        event_action="trigger",
-        dedup_key=dedup_key,
-        source=project.name,
-        component="project-settings",
-        custom_details={
-            "project_id": project.id,
-            "project_name": project.name,
-            "test_delivery": True,
-        },
-    )
-    resolve_sent = False
-    if trigger_sent:
-        resolve_sent = send_pagerduty_event(
+    trigger_sent = False
+    matched_key = None
+    for routing_key in routing_keys:
+        trigger_sent = send_pagerduty_event(
             routing_key,
+            f"LastPing test incident for project {project.name}",
+            "info",
+            event_action="trigger",
+            dedup_key=dedup_key,
+            source=project.name,
+            component="project-settings",
+            custom_details={
+                "project_id": project.id,
+                "project_name": project.name,
+                "test_delivery": True,
+            },
+        )
+        if trigger_sent:
+            matched_key = routing_key
+            break
+    resolve_sent = False
+    if trigger_sent and matched_key:
+        resolve_sent = send_pagerduty_event(
+            matched_key,
             f"LastPing test incident resolved for project {project.name}",
             "info",
             event_action="resolve",
@@ -989,6 +1423,7 @@ def send_project_pagerduty_test(
                 "test_delivery": True,
             },
         )
+        touch_project_secret_last_used(project.id, SECRET_PAGERDUTY_INTEGRATION_KEY, session=session)
 
     actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
     session.add(
@@ -1068,14 +1503,41 @@ def set_project_jira_settings(
         "jira_issue_type": project.jira_issue_type,
     }
     fields_set = getattr(payload, "__fields_set__", set())
+    lifecycle_kwargs = _secret_lifecycle_update_kwargs(payload)
     if "base_url" in fields_set:
         project.jira_base_url = str(payload.base_url) if payload.base_url is not None else None
     if "user_email" in fields_set:
         project.jira_user_email = str(payload.user_email) if payload.user_email is not None else None
     if payload.clear_api_token:
         project.jira_api_token = None
+        clear_project_secret_lifecycle(session, project_id, SECRET_JIRA_API_TOKEN)
     elif payload.api_token:
-        project.jira_api_token = payload.api_token
+        if payload.api_token != project.jira_api_token:
+            rotate_project_secret(
+                session,
+                project,
+                SECRET_JIRA_API_TOKEN,
+                new_value=payload.api_token,
+                grace_seconds=int(payload.grace_seconds or 0),
+                expires_at=lifecycle_kwargs["expires_at"],
+                rotation_interval_days=lifecycle_kwargs["rotation_interval_days"],
+            )
+        else:
+            update_project_secret_policy(
+                session,
+                project_id,
+                SECRET_JIRA_API_TOKEN,
+                expires_at=lifecycle_kwargs["expires_at"],
+                rotation_interval_days=lifecycle_kwargs["rotation_interval_days"],
+            )
+    else:
+        update_project_secret_policy(
+            session,
+            project_id,
+            SECRET_JIRA_API_TOKEN,
+            expires_at=lifecycle_kwargs["expires_at"],
+            rotation_interval_days=lifecycle_kwargs["rotation_interval_days"],
+        )
     if "project_key" in fields_set:
         project.jira_project_key = payload.project_key.upper() if payload.project_key else None
     if "issue_type" in fields_set:

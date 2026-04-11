@@ -192,6 +192,11 @@ class ApiKey(SQLModel, table=True):
     revoked_at: Optional[datetime] = Field(default=None, index=True)
     created_by_user_id: Optional[int] = Field(default=None, foreign_key="user.id", index=True)
     rate_limit_per_minute: Optional[int] = Field(default=0, description="requests per minute allowed for this key; 0 = unlimited")
+    last_used_at: Optional[datetime] = Field(default=None, index=True)
+    expires_at: Optional[datetime] = Field(default=None, index=True)
+    last_rotated_at: datetime = Field(default_factory=datetime.utcnow)
+    rotation_interval_days: Optional[int] = Field(default=None, description="recommended forced-rotation interval in days")
+    replaced_by_api_key_id: Optional[int] = Field(default=None, foreign_key="api_key.id", index=True)
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
     project: Optional[Project] = Relationship(back_populates="api_keys")
@@ -393,6 +398,25 @@ class PredictiveModelQuality(SQLModel, table=True):
     status: str = Field(default="ok", index=True, description="ok, drift, insufficient_data")
     metrics_json: Optional[str] = Field(default=None, description="JSON-encoded monitoring details")
     created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+
+
+class ProjectSecretLifecycle(SQLModel, table=True):
+    __tablename__ = "project_secret_lifecycle"
+    __table_args__ = (
+        sa.UniqueConstraint("project_id", "secret_name", name="uq_project_secret_lifecycle_project_secret"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    secret_name: str = Field(index=True, description="project secret field name, e.g. jira_api_token")
+    last_used_at: Optional[datetime] = Field(default=None, index=True)
+    expires_at: Optional[datetime] = Field(default=None, index=True)
+    last_rotated_at: Optional[datetime] = Field(default=None)
+    rotation_interval_days: Optional[int] = Field(default=None, description="recommended forced-rotation interval in days")
+    previous_secret_value: Optional[str] = _encrypted_field(description="previous secret retained during rollover grace")
+    previous_secret_expires_at: Optional[datetime] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 class ApiKeyUsage(SQLModel, table=True):

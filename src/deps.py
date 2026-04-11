@@ -30,6 +30,7 @@ from .models import (
     UserUsage,
 )
 from .security import fingerprint_token, hash_api_key, verify_api_key
+from .secret_lifecycle import api_key_is_expired, touch_api_key_last_used
 
 # Optional Redis support for distributed rate limiting
 _redis = None
@@ -286,7 +287,9 @@ def authorize_project_operation(
         return project
 
     if x_api_key:
-        matched, project_primary = _match_project_api_key(session, project_id, x_api_key)
+        matched, project_primary, expired = _match_project_api_key(session, project_id, x_api_key)
+        if expired:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="API key expired")
         if not matched and not project_primary:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API key")
         role = Role.OWNER.value if project_primary else (matched.role or Role.OWNER.value)
@@ -325,7 +328,7 @@ def _get_valid_user_token(session: Session, authorization: Optional[str]) -> Use
     return ut
 
 
-def _match_project_api_key(session: Session, project_id: int, key: str) -> tuple[Optional[ApiKey], bool]:
+def _match_project_api_key(session: Session, project_id: int, key: str) -> tuple[Optional[ApiKey], bool, bool]:
     cache = _deps_cache(session)
     cache_key = ("project_api_key_match", project_id, key)
     cached = cache.get(cache_key, _CACHE_MISS)
@@ -344,11 +347,15 @@ def _match_project_api_key(session: Session, project_id: int, key: str) -> tuple
             matched = api_key
             break
     if matched:
-        result = (matched, False)
+        if api_key_is_expired(matched):
+            result = (None, False, True)
+        else:
+            touch_api_key_last_used(session, matched)
+            result = (matched, False, False)
     else:
         project = _get_cached_project(session, project_id)
         project_primary = bool(project and getattr(project, "api_key_hash", None) and verify_api_key(key, project.api_key_hash))
-        result = (None, project_primary)
+        result = (None, project_primary, False)
 
     cache[cache_key] = result
     return result
@@ -688,7 +695,9 @@ def require_project_api_key(project_id: int, authorization: Optional[str] = Head
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
-    matched_api_key, project_primary = _match_project_api_key(session, project_id, key)
+    matched_api_key, project_primary, expired = _match_project_api_key(session, project_id, key)
+    if expired:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="API key expired")
     if matched_api_key or project_primary:
         return project
 
@@ -713,7 +722,9 @@ def limit_by_api_key(project_id: int, authorization: Optional[str] = Header(None
     window_seconds = int(os.environ.get("API_RATE_LIMIT_WINDOW_SECONDS", "60"))
     key = _extract_api_key(authorization, x_api_key)
     if key:
-        matched, project_primary = _match_project_api_key(session, project_id, key)
+        matched, project_primary, expired = _match_project_api_key(session, project_id, key)
+        if expired:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="API key expired")
         if not matched:
             # Backwards compatibility: allow the project's primary API key stored
             # on `Project.api_key_hash` even when no `ApiKey` rows exist yet.

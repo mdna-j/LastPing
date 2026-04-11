@@ -22,6 +22,7 @@ from sqlmodel import Session, select
 
 from .db import ensure_engine
 from .models import AuditLog, Incident, StatusSubscription
+from .secret_lifecycle import SECRET_PAGERDUTY_INTEGRATION_KEY, active_project_secret_candidates, touch_project_secret_last_used
 
 logger = logging.getLogger("lastping.alerts")
 
@@ -111,6 +112,33 @@ def _slack_bot_token() -> Optional[str]:
 
 def _pagerduty_key(project, check=None) -> Optional[str]:
     return getattr(check, "alert_pagerduty_integration_key", None) or getattr(project, "pagerduty_integration_key", None)
+
+
+def _pagerduty_keys(project, check=None) -> list[str]:
+    override = getattr(check, "alert_pagerduty_integration_key", None) if check is not None else None
+    if override:
+        return [override]
+    if getattr(project, "id", None) is None:
+        current = getattr(project, "pagerduty_integration_key", None)
+        return [current] if current else []
+    return active_project_secret_candidates(project, SECRET_PAGERDUTY_INTEGRATION_KEY)
+
+
+def _send_pagerduty_event_for_project(
+    project,
+    summary: str,
+    severity: str = "critical",
+    *,
+    check=None,
+    **kwargs,
+) -> bool:
+    used_project_secret = check is None or not getattr(check, "alert_pagerduty_integration_key", None)
+    for routing_key in _pagerduty_keys(project, check):
+        if send_pagerduty_event(routing_key, summary, severity, **kwargs):
+            if used_project_secret and getattr(project, "id", None) is not None:
+                touch_project_secret_last_used(project.id, SECRET_PAGERDUTY_INTEGRATION_KEY)
+            return True
+    return False
 
 
 def _pagerduty_dedup_key(project, check=None, incident: Optional[Incident] = None) -> Optional[str]:
@@ -569,8 +597,7 @@ def notify_down(check, project, reason: str = None, incident: Optional[Incident]
             ) or sent
 
         # PagerDuty: use existing helper which builds proper event payload
-        pd_key = _pagerduty_key(project, check)
-        if pd_key and _check_channel_enabled(check, "alert_pagerduty_enabled"):
+        if _pagerduty_keys(project, check) and _check_channel_enabled(check, "alert_pagerduty_enabled"):
             # include check/project context in PagerDuty event details
             pd_details = details.copy()
             if project_url:
@@ -581,10 +608,11 @@ def notify_down(check, project, reason: str = None, incident: Optional[Incident]
             if incident is not None:
                 _remember_incident_pagerduty_dedup_key(incident, dedup_key=dedup_key, session=session)
             sent = _track_notification_result(
-                send_pagerduty_event(
-                    pd_key,
+                _send_pagerduty_event_for_project(
+                    project,
                     summary,
                     "critical",
+                    check=check,
                     event_action="trigger",
                     dedup_key=dedup_key,
                     source=project.name,
@@ -870,8 +898,7 @@ def notify_recovery(check, project, incident: Optional[Incident] = None, session
                 retry_payload={"attachments": [attachment]},
                 request_kind="json_post" if isinstance(slack_target, str) and slack_target.startswith(("http://", "https://")) else None,
             ) or sent
-        pd_key = _pagerduty_key(project, check)
-        if pd_key and _check_channel_enabled(check, "alert_pagerduty_enabled"):
+        if _pagerduty_keys(project, check) and _check_channel_enabled(check, "alert_pagerduty_enabled"):
             pd_details = details.copy()
             if project_url:
                 pd_details["project_url"] = project_url
@@ -879,10 +906,11 @@ def notify_recovery(check, project, incident: Optional[Incident] = None, session
                 pd_details["check_url"] = check_url
             dedup_key = _pagerduty_dedup_key(project, check, incident)
             sent = _track_notification_result(
-                send_pagerduty_event(
-                    pd_key,
+                _send_pagerduty_event_for_project(
+                    project,
                     summary,
                     "info",
+                    check=check,
                     event_action="resolve",
                     dedup_key=dedup_key,
                     source=project.name,
@@ -1008,18 +1036,18 @@ def notify_incident_pagerduty_update(
     severity: str = "critical",
     custom_details: Optional[dict] = None,
 ) -> bool:
-    pd_key = _pagerduty_key(project, check)
-    if not pd_key or not _check_channel_enabled(check, "alert_pagerduty_enabled"):
+    if not _pagerduty_keys(project, check) or not _check_channel_enabled(check, "alert_pagerduty_enabled"):
         return False
     dedup_key = _pagerduty_dedup_key(project, check, incident)
     if not dedup_key:
         return False
     _remember_incident_pagerduty_dedup_key(incident, dedup_key=dedup_key, session=session)
     return _track_notification_result(
-        send_pagerduty_event(
-            pd_key,
+        _send_pagerduty_event_for_project(
+            project,
             summary,
             severity,
+            check=check,
             event_action=event_action,
             dedup_key=dedup_key,
             source=getattr(project, "name", "lastping"),
@@ -1125,21 +1153,18 @@ def notify_escalation(project, reason: str, check=None):
             request_kind="json_post",
         ) or sent
 
-    pd_key = _pagerduty_key(project, check)
-    if pd_key and _check_channel_enabled(check, "alert_pagerduty_enabled"):
-        pd_payload = {
-            "routing_key": pd_key,
-            "event_action": "trigger",
-            "payload": {
-                "summary": summary,
-                "severity": "critical",
-                "source": project.name,
-                "timestamp": now_iso,
-                "custom_details": details,
-            },
-        }
+    if _pagerduty_keys(project, check) and _check_channel_enabled(check, "alert_pagerduty_enabled"):
         sent = _track_notification_result(
-            _post_json("https://events.pagerduty.com/v2/enqueue", pd_payload),
+            _send_pagerduty_event_for_project(
+                project,
+                summary,
+                "critical",
+                check=check,
+                event_action="trigger",
+                source=project.name,
+                component=getattr(check, "name", None),
+                custom_details=details,
+            ),
             project=project,
             check=check,
             channel="pagerduty",

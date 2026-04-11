@@ -27,6 +27,7 @@ from ..postmortems import (
     render_incident_postmortem_pdf,
 )
 from ..schemas import StrictBaseModel
+from ..secret_lifecycle import SECRET_JIRA_API_TOKEN, active_project_secret_candidates, touch_project_secret_last_used
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["incidents"])
 
@@ -436,23 +437,31 @@ def create_incident_jira_ticket(
             "issue_url": incident.jira_issue_url,
             "incident": _serialize_incident(incident),
         }
-    if not jira_settings_ready(_proj):
+    jira_token_candidates = active_project_secret_candidates(_proj, SECRET_JIRA_API_TOKEN, session=session)
+    if not (_proj.jira_base_url and _proj.jira_user_email and _proj.jira_project_key and jira_token_candidates):
         raise HTTPException(status_code=400, detail="Jira settings are incomplete for this project")
     check = session.get(Check, incident.check_id)
     summary = f"[LastPing] Incident #{incident.id}: {(check.name if check else f'check {incident.check_id}')} {incident.status}"
-    try:
-        result = create_jira_issue(
-            base_url=_proj.jira_base_url or "",
-            email=_proj.jira_user_email or "",
-            api_token=_proj.jira_api_token or "",
-            project_key=_proj.jira_project_key or "",
-            issue_type=_proj.jira_issue_type or "Task",
-            summary=summary,
-            description=_incident_jira_description(session, _proj, incident),
-            labels=["lastping", "incident"],
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    result = None
+    last_error = None
+    for jira_token in jira_token_candidates:
+        try:
+            result = create_jira_issue(
+                base_url=_proj.jira_base_url or "",
+                email=_proj.jira_user_email or "",
+                api_token=jira_token or "",
+                project_key=_proj.jira_project_key or "",
+                issue_type=_proj.jira_issue_type or "Task",
+                summary=summary,
+                description=_incident_jira_description(session, _proj, incident),
+                labels=["lastping", "incident"],
+            )
+            touch_project_secret_last_used(project_id, SECRET_JIRA_API_TOKEN, session=session)
+            break
+        except Exception as exc:
+            last_error = exc
+    if result is None:
+        raise HTTPException(status_code=502, detail=str(last_error or "Jira issue creation failed"))
 
     issue_key = result.get("key")
     issue_url = result.get("url")

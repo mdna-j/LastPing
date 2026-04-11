@@ -25,6 +25,40 @@ function formatPagerdutySync(settings){
   return `${settings.latest_sync_action} at ${ts}`;
 }
 
+function formatSecretTimestamp(value, empty = "none"){
+  if(!value) return empty;
+  const dt = new Date(value);
+  if(Number.isNaN(dt.getTime())) return value;
+  return dt.toLocaleString();
+}
+
+function formatSecretInputValue(value){
+  if(!value) return "";
+  const dt = new Date(value);
+  if(Number.isNaN(dt.getTime())) return value;
+  return dt.toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
+function renderSecretLifecycle(prefix, lifecycle){
+  const data = lifecycle || {};
+  const expiresInput = document.getElementById(`${prefix}ExpiresAt`);
+  const intervalInput = document.getElementById(`${prefix}RotationIntervalDays`);
+  const lastUsedEl = document.getElementById(`${prefix}LastUsedAt`);
+  const lastRotatedEl = document.getElementById(`${prefix}LastRotatedAt`);
+  const dueEl = document.getElementById(`${prefix}RotationDueAt`);
+  const rolloverEl = document.getElementById(`${prefix}RolloverUntil`);
+
+  if(expiresInput) expiresInput.value = formatSecretInputValue(data.expires_at);
+  if(intervalInput) intervalInput.value = data.rotation_interval_days ?? "";
+  if(lastUsedEl) lastUsedEl.textContent = formatSecretTimestamp(data.last_used_at, "never");
+  if(lastRotatedEl) lastRotatedEl.textContent = formatSecretTimestamp(data.last_rotated_at, "unknown");
+  if(dueEl){
+    const base = formatSecretTimestamp(data.rotation_due_at, "none");
+    dueEl.textContent = data.rotation_required && base !== "none" ? `${base} (overdue)` : base;
+  }
+  if(rolloverEl) rolloverEl.textContent = formatSecretTimestamp(data.rollover_active_until, "none");
+}
+
 function syncSecretActionState(){
   const jiraStatus = document.getElementById("jiraApiTokenStatus");
   const jiraBtn = document.getElementById("clearJiraApiTokenBtn");
@@ -219,6 +253,7 @@ async function loadSettings(){
       if(jiraSecretHeader) jiraSecretHeader.textContent = jira.inbound_secret_header || "X-Jira-Webhook-Secret";
       if(jiraSecretStatus) jiraSecretStatus.textContent = jira.inbound_secret_configured ? "configured" : "missing";
       if(jiraLastSync) jiraLastSync.textContent = formatJiraSync(jira);
+      renderSecretLifecycle("jiraToken", jira.secret_lifecycle);
       clearJiraApiTokenRequested = false;
       setJiraTokenConfigured(!!jira.api_token_configured);
       if(jiraSettingsHint) jiraSettingsHint.textContent = jira.configured
@@ -237,6 +272,7 @@ async function loadSettings(){
       if(pdSecret) pdSecret.textContent = pagerduty.inbound_secret_configured ? "configured" : "missing";
       if(pdLastSync) pdLastSync.textContent = formatPagerdutySync(pagerduty);
       if(pdTestResult) pdTestResult.textContent = "Use test delivery to send a trigger and immediate resolve event to PagerDuty.";
+      renderSecretLifecycle("pagerduty", pagerduty.secret_lifecycle);
       clearPagerdutyIntegrationKeyRequested = false;
       setPagerdutyKeyConfigured(!!pagerduty.integration_key_configured);
 
@@ -280,14 +316,24 @@ async function saveSettings(){
     project_key: document.getElementById("jiraProjectKey").value || null,
     issue_type: document.getElementById("jiraIssueType").value || null,
     clear_api_token: clearJiraApiTokenRequested,
+    clear_expiry: !document.getElementById("jiraTokenExpiresAt").value,
+    clear_rotation_policy: !document.getElementById("jiraTokenRotationIntervalDays").value,
+    grace_seconds: Math.max(0, parseInt(document.getElementById("jiraTokenGraceMinutes").value || "60", 10) || 0) * 60,
   };
   const jiraTokenValue = document.getElementById("jiraApiToken").value || "";
   if(jiraTokenValue) jiraPayload.api_token = jiraTokenValue;
+  if(document.getElementById("jiraTokenExpiresAt").value) jiraPayload.expires_at = document.getElementById("jiraTokenExpiresAt").value;
+  if(document.getElementById("jiraTokenRotationIntervalDays").value) jiraPayload.rotation_interval_days = parseInt(document.getElementById("jiraTokenRotationIntervalDays").value, 10);
   const pagerdutyPayload = {
     clear_integration_key: clearPagerdutyIntegrationKeyRequested,
+    clear_expiry: !document.getElementById("pagerdutyExpiresAt").value,
+    clear_rotation_policy: !document.getElementById("pagerdutyRotationIntervalDays").value,
+    grace_seconds: Math.max(0, parseInt(document.getElementById("pagerdutyGraceMinutes").value || "60", 10) || 0) * 60,
   };
   const pagerdutyKeyValue = document.getElementById("pagerdutyIntegrationKey").value || "";
   if(pagerdutyKeyValue) pagerdutyPayload.integration_key = pagerdutyKeyValue;
+  if(document.getElementById("pagerdutyExpiresAt").value) pagerdutyPayload.expires_at = document.getElementById("pagerdutyExpiresAt").value;
+  if(document.getElementById("pagerdutyRotationIntervalDays").value) pagerdutyPayload.rotation_interval_days = parseInt(document.getElementById("pagerdutyRotationIntervalDays").value, 10);
 
   const [sloRes, alertRes, jiraRes, pagerdutyRes] = await Promise.all([
     fetch(`/projects/${pid}/slo`, {method: "POST", headers, body: JSON.stringify(sloPayload)}),

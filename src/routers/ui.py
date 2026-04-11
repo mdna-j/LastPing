@@ -1518,6 +1518,23 @@ def project_settings_page(project_id: int = Path(..., ge=1)):
           </div>
           <div class="muted">Leave the token blank to keep the current secret. Enter a new token to replace it.</div>
           <div class="row">
+            <label>Token expires at:
+              <input id="jiraTokenExpiresAt" placeholder="YYYY-MM-DDTHH:MM:SSZ" style="width:220px"/>
+            </label>
+            <label>Rotate every (days):
+              <input id="jiraTokenRotationIntervalDays" placeholder="30" style="width:120px"/>
+            </label>
+            <label>Grace (minutes):
+              <input id="jiraTokenGraceMinutes" value="60" style="width:110px"/>
+            </label>
+          </div>
+          <div class="row">
+            <div class="status-inline"><strong>Last used:</strong> <span id="jiraTokenLastUsedAt" class="muted">never</span></div>
+            <div class="status-inline"><strong>Last rotated:</strong> <span id="jiraTokenLastRotatedAt" class="muted">unknown</span></div>
+            <div class="status-inline"><strong>Rotation due:</strong> <span id="jiraTokenRotationDueAt" class="muted">none</span></div>
+            <div class="status-inline"><strong>Rollover until:</strong> <span id="jiraTokenRolloverUntil" class="muted">none</span></div>
+          </div>
+          <div class="row">
             <label>Project Key:
               <input id="jiraProjectKey" placeholder="OPS" style="width:120px"/>
             </label>
@@ -1552,6 +1569,23 @@ def project_settings_page(project_id: int = Path(..., ge=1)):
             <button id="sendPagerdutyTestBtn" class="btn btn-secondary">Send Test Delivery</button>
           </div>
           <div class="muted">Leave the integration key blank to keep the current secret. Enter a new key to replace it.</div>
+          <div class="row">
+            <label>Key expires at:
+              <input id="pagerdutyExpiresAt" placeholder="YYYY-MM-DDTHH:MM:SSZ" style="width:220px"/>
+            </label>
+            <label>Rotate every (days):
+              <input id="pagerdutyRotationIntervalDays" placeholder="30" style="width:120px"/>
+            </label>
+            <label>Grace (minutes):
+              <input id="pagerdutyGraceMinutes" value="60" style="width:110px"/>
+            </label>
+          </div>
+          <div class="row">
+            <div class="status-inline"><strong>Last used:</strong> <span id="pagerdutyLastUsedAt" class="muted">never</span></div>
+            <div class="status-inline"><strong>Last rotated:</strong> <span id="pagerdutyLastRotatedAt" class="muted">unknown</span></div>
+            <div class="status-inline"><strong>Rotation due:</strong> <span id="pagerdutyRotationDueAt" class="muted">none</span></div>
+            <div class="status-inline"><strong>Rollover until:</strong> <span id="pagerdutyRolloverUntil" class="muted">none</span></div>
+          </div>
           <div class="row">
             <div class="status-inline"><strong>Inbound webhook:</strong> <code id="pagerdutyWebhookUrl">/integrations/pagerduty/webhook</code></div>
           </div>

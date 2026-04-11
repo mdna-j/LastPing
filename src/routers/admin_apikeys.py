@@ -4,12 +4,13 @@ from fastapi import APIRouter, Depends, Header, HTTPException, status, Response,
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlmodel import Session, select
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from ..db import get_session
 from ..models import ApiKey, Project, AuditLog
 from ..deps import get_audit_context, limit_admin_api_requests
 from ..security import generate_api_key, hash_api_key
+from ..secret_lifecycle import api_key_rotation_due_at, api_key_rotation_required
 import os
 import secrets
 from sqlmodel import Session
@@ -29,6 +30,13 @@ class ApiKeyRead(BaseModel):
     revoked_at: Optional[datetime]
     rate_limit_per_minute: Optional[int]
     created_by_user_id: Optional[int]
+    last_used_at: Optional[datetime]
+    expires_at: Optional[datetime]
+    last_rotated_at: datetime
+    rotation_interval_days: Optional[int]
+    rotation_due_at: Optional[datetime]
+    rotation_required: bool
+    replaced_by_api_key_id: Optional[int]
     created_at: datetime
 
     class Config:
@@ -43,7 +51,26 @@ def list_apikeys(x_admin_token: Optional[str] = Header(None), session: Session =
     rows = session.exec(select(ApiKey)).all()
     out: Dict[int, list] = {}
     for a in rows:
-        out.setdefault(a.project_id, []).append(ApiKeyRead.from_orm(a))
+        out.setdefault(a.project_id, []).append(
+            ApiKeyRead(
+                id=a.id,
+                project_id=a.project_id,
+                name=a.name,
+                role=a.role,
+                is_active=a.is_active,
+                revoked_at=a.revoked_at,
+                rate_limit_per_minute=a.rate_limit_per_minute,
+                created_by_user_id=a.created_by_user_id,
+                last_used_at=a.last_used_at,
+                expires_at=a.expires_at,
+                last_rotated_at=a.last_rotated_at or a.created_at,
+                rotation_interval_days=a.rotation_interval_days,
+                rotation_due_at=api_key_rotation_due_at(a),
+                rotation_required=api_key_rotation_required(a),
+                replaced_by_api_key_id=a.replaced_by_api_key_id,
+                created_at=a.created_at,
+            )
+        )
     return out
 
 
@@ -71,7 +98,14 @@ def create_apikey(project_id: int = Query(..., ge=1), name: Optional[str] = Quer
         except Exception:
             pass
     plain = generate_api_key()
-    ak = ApiKey(project_id=project_id, key_hash=hash_api_key(plain), name=name, role=role, rate_limit_per_minute=rate_limit_per_minute or 0)
+    ak = ApiKey(
+        project_id=project_id,
+        key_hash=hash_api_key(plain),
+        name=name,
+        role=role,
+        rate_limit_per_minute=rate_limit_per_minute or 0,
+        last_rotated_at=datetime.utcnow(),
+    )
     session.add(ak)
     session.commit()
     session.refresh(ak)
@@ -177,7 +211,7 @@ def search_audit(
 
 
 @router.post('/rotate-project')
-def rotate_project_key(project_id: int = Query(..., ge=1), request: Request = None, x_admin_token: Optional[str] = Header(None), x_csrf_token: Optional[str] = Header(None), admin_csrf: Optional[str] = Cookie(None), session: Session = Depends(get_session)):
+def rotate_project_key(project_id: int = Query(..., ge=1), grace_seconds: int = Query(3600, ge=0, le=604800), request: Request = None, x_admin_token: Optional[str] = Header(None), x_csrf_token: Optional[str] = Header(None), admin_csrf: Optional[str] = Cookie(None), session: Session = Depends(get_session)):
     admin_token = os.environ.get('ADMIN_TOKEN')
     if not admin_token or x_admin_token != admin_token:
         raise HTTPException(status_code=403, detail="Admin token required")
@@ -200,25 +234,49 @@ def rotate_project_key(project_id: int = Query(..., ge=1), request: Request = No
     old_hash = getattr(project, "api_key_hash", None)
     new = generate_api_key()
     new_hash = hash_api_key(new)
+    now = datetime.utcnow()
+    current_primary = None
+    if old_hash:
+        current_primary = session.exec(
+            select(ApiKey).where(ApiKey.project_id == project_id, ApiKey.key_hash == old_hash).order_by(ApiKey.created_at.desc())
+        ).first()
+    new_primary = ApiKey(
+        project_id=project_id,
+        key_hash=new_hash,
+        name="primary",
+        role="owner",
+        rate_limit_per_minute=(current_primary.rate_limit_per_minute if current_primary else 0) or 0,
+        created_by_user_id=current_primary.created_by_user_id if current_primary else None,
+        rotation_interval_days=current_primary.rotation_interval_days if current_primary else None,
+        last_rotated_at=now,
+    )
+    session.add(new_primary)
+    session.flush()
     project.api_key_hash = new_hash
-    # Keep `api_key` table in sync for the primary key.
-    try:
-        if old_hash:
-            ak = session.exec(select(ApiKey).where(ApiKey.project_id == project_id, ApiKey.key_hash == old_hash)).first()
-        else:
-            ak = None
-        if ak:
-            ak.key_hash = new_hash
-            session.add(ak)
-        else:
-            session.add(ApiKey(project_id=project_id, key_hash=new_hash, rate_limit_per_minute=0))
-    except Exception:
-        pass
+    grace_until = now + timedelta(seconds=int(grace_seconds or 0))
+    if current_primary:
+        current_primary.name = "primary-rollover"
+        current_primary.expires_at = grace_until
+        current_primary.replaced_by_api_key_id = new_primary.id
+        session.add(current_primary)
+    elif old_hash:
+        session.add(
+            ApiKey(
+                project_id=project_id,
+                key_hash=old_hash,
+                name="primary-rollover",
+                role="owner",
+                rate_limit_per_minute=0,
+                expires_at=grace_until,
+                last_rotated_at=now,
+                replaced_by_api_key_id=new_primary.id,
+            )
+        )
     session.add(project)
     session.commit()
     # audit
     actor, actor_ip, user_agent = get_audit_context(request, None, x_admin_token, session)
-    al = AuditLog(actor=actor, action="rotate_project_key", target_type="project", target_id=project_id, details=None, actor_ip=actor_ip, user_agent=user_agent)
+    al = AuditLog(actor=actor, action="rotate_project_key", target_type="project", target_id=project_id, details=f"grace_seconds={int(grace_seconds or 0)}", actor_ip=actor_ip, user_agent=user_agent)
     session.add(al)
     session.commit()
     return {"api_key": new}
