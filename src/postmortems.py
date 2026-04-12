@@ -86,6 +86,8 @@ def _audit_title(action: str) -> str:
         "assign_incident": "Incident assigned",
         "ack_incident": "Incident acknowledged",
         "clear_incident_ack": "Incident acknowledgement cleared",
+        "resolve_incident": "Incident manually resolved",
+        "reopen_incident": "Incident reopened",
         "silence_incident": "Incident silenced",
         "clear_incident_silence": "Incident silence cleared",
         "merge_incident": "Incident merged",
@@ -156,6 +158,12 @@ def _response_summary(payload: dict, incident: Incident) -> list[str]:
         summary.append(
             f"Acknowledged at {_format_timestamp(incident.acknowledged_at)} by {incident.acknowledged_by or 'unknown'}."
         )
+    if incident.resolved_at:
+        summary.append(
+            f"Resolved at {_format_timestamp(incident.resolved_at)} by {incident.resolved_by or 'system'}."
+        )
+    if incident.resolution_summary:
+        summary.append(f"Resolution summary: {incident.resolution_summary}")
     alert_titles = _timeline_titles(payload, "alert")
     if alert_titles:
         summary.append(f"Alerting recorded: {', '.join(alert_titles[:2])}.")
@@ -200,12 +208,16 @@ def build_incident_timeline(session: Session, incident: Incident) -> dict:
         )
     )
     if incident.resolved_at:
+        resolved_summary = f"Incident {incident.id} resolved after {_format_duration(incident.started_at, incident.resolved_at)}."
+        if incident.resolution_summary:
+            resolved_summary = f"{resolved_summary} Summary: {incident.resolution_summary}"
         items.append(
             _timeline_item(
                 ts=incident.resolved_at,
                 kind="incident",
                 title="Incident resolved",
-                summary=f"Incident {incident.id} resolved after {_format_duration(incident.started_at, incident.resolved_at)}.",
+                summary=resolved_summary,
+                actor=incident.resolved_by,
             )
         )
 
@@ -401,6 +413,7 @@ def render_incident_postmortem_markdown(session: Session, incident: Incident) ->
         f"- Status: {payload['status']}",
         f"- Started: {_format_timestamp(incident.started_at)}",
         f"- Resolved: {_format_timestamp(incident.resolved_at)}",
+        f"- Resolved by: {incident.resolved_by or 'system'}",
         f"- Duration: {payload['duration']}",
         f"- Event count: {payload['stats']['events']}",
         f"- Notes: {payload['stats']['notes']}",
@@ -408,6 +421,10 @@ def render_incident_postmortem_markdown(session: Session, incident: Incident) ->
         f"- Remediation entries: {payload['stats']['remediation_steps']}",
         f"- Status page: {links['status_page_url']}",
         f"- Shared incident page: {links['public_incident_url'] or 'Create a share link if external access is needed.'}",
+        "",
+        "## Resolution Summary",
+        "",
+        f"{incident.resolution_summary or '_Document the fix, validation, and any remaining risk._'}",
         "",
         "## Root Cause",
         "",

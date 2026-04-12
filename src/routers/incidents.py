@@ -94,6 +94,8 @@ def _serialize_incident(incident: Incident, note_count: int = 0) -> dict:
         "owner": incident.owner,
         "acknowledged_at": incident.acknowledged_at.isoformat() if incident.acknowledged_at else None,
         "acknowledged_by": incident.acknowledged_by,
+        "resolved_by": incident.resolved_by,
+        "resolution_summary": incident.resolution_summary,
         "silenced_until": incident.silenced_until.isoformat() if incident.silenced_until else None,
         "silenced_by": incident.silenced_by,
         "jira_issue_key": incident.jira_issue_key,
@@ -156,7 +158,10 @@ def _notify_slack_thread_update(
             session=session,
             share_url=share_url,
         )
+        if session.new or session.dirty or session.deleted:
+            session.commit()
     except Exception:
+        session.rollback()
         pass
 
 
@@ -186,7 +191,10 @@ def _notify_pagerduty_ack(
                 "actor": actor,
             },
         )
+        if session.new or session.dirty or session.deleted:
+            session.commit()
     except Exception:
+        session.rollback()
         pass
 
 
@@ -655,8 +663,143 @@ def silence_incident(
     return {"incident": _serialize_incident(incident)}
 
 
+class IncidentResolvePayload(StrictBaseModel):
+    summary: constr(min_length=3, max_length=4000)
+
+
+class IncidentReopenPayload(StrictBaseModel):
+    reason: Optional[constr(max_length=1000)] = None
+
+
 class IncidentNotePayload(StrictBaseModel):
     body: constr(max_length=4000)
+
+
+@router.post("/incidents/{incident_id}/resolve")
+def resolve_incident(
+    project_id: int = Path(..., ge=1),
+    incident_id: int = Path(..., ge=1),
+    payload: IncidentResolvePayload = Body(...),
+    request: Request = None,
+    session: Session = Depends(get_session),
+    _proj: Project = Depends(require_admin_or_owner),
+    x_admin_token: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None),
+):
+    incident = _get_incident_or_404(session, project_id, incident_id)
+    if incident.status == "merged":
+        raise HTTPException(status_code=400, detail="Merged incidents cannot be manually resolved")
+    actor = _audit(
+        session,
+        request,
+        authorization,
+        x_admin_token,
+        "resolve_incident",
+        incident.id,
+        f"summary={payload.summary.strip()}",
+    )
+    incident.resolved_at = datetime.utcnow()
+    incident.status = "resolved"
+    incident.resolved_by = actor
+    incident.resolution_summary = payload.summary.strip()
+    incident.silenced_until = None
+    incident.silenced_by = None
+    session.add(incident)
+    session.commit()
+    session.refresh(incident)
+    _notify_slack_thread_update(
+        session,
+        _proj,
+        incident,
+        action="resolve",
+        body=f"Resolved incident with summary:\n>{incident.resolution_summary}",
+    )
+    try:
+        check = session.get(Check, incident.check_id) if getattr(incident, "check_id", None) else None
+        notify_incident_pagerduty_update(
+            _proj,
+            incident,
+            event_action="resolve",
+            summary=f"Incident #{incident.id} resolved in LastPing",
+            check=check,
+            session=session,
+            severity="info",
+            custom_details={
+                "incident_id": incident.id,
+                "project_id": project_id,
+                "check_id": getattr(check, "id", None) if check is not None else None,
+                "actor": actor,
+                "resolution_summary": incident.resolution_summary,
+            },
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+    return {"incident": _serialize_incident(incident)}
+
+
+@router.post("/incidents/{incident_id}/reopen")
+def reopen_incident(
+    project_id: int = Path(..., ge=1),
+    incident_id: int = Path(..., ge=1),
+    payload: IncidentReopenPayload = Body(default=IncidentReopenPayload()),
+    request: Request = None,
+    session: Session = Depends(get_session),
+    _proj: Project = Depends(require_admin_or_owner),
+    x_admin_token: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None),
+):
+    incident = _get_incident_or_404(session, project_id, incident_id)
+    if incident.status == "merged":
+        raise HTTPException(status_code=400, detail="Merged incidents cannot be reopened")
+    reason = (payload.reason or "").strip()
+    actor = _audit(
+        session,
+        request,
+        authorization,
+        x_admin_token,
+        "reopen_incident",
+        incident.id,
+        f"reason={reason or '-'}",
+    )
+    incident.status = "open"
+    incident.resolved_at = None
+    incident.resolved_by = None
+    incident.resolution_summary = None
+    session.add(incident)
+    session.commit()
+    session.refresh(incident)
+    _notify_slack_thread_update(
+        session,
+        _proj,
+        incident,
+        action="reopen",
+        body=(
+            f"Reopened incident.{f' Reason: {reason}' if reason else ''}"
+        ),
+    )
+    try:
+        check = session.get(Check, incident.check_id) if getattr(incident, "check_id", None) else None
+        notify_incident_pagerduty_update(
+            _proj,
+            incident,
+            event_action="trigger",
+            summary=f"Incident #{incident.id} reopened in LastPing",
+            check=check,
+            session=session,
+            severity="critical",
+            custom_details={
+                "incident_id": incident.id,
+                "project_id": project_id,
+                "check_id": getattr(check, "id", None) if check is not None else None,
+                "actor": actor,
+                "reopen_reason": reason or None,
+            },
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+    return {"incident": _serialize_incident(incident)}
 
 
 @router.post("/incidents/{incident_id}/notes")

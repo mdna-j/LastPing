@@ -52,6 +52,8 @@ def test_incident_timeline_and_postmortem_exports(tmp_path):
             owner="alice",
             acknowledged_at=started_at + timedelta(minutes=2),
             acknowledged_by="user:1",
+            resolved_by="user:1",
+            resolution_summary="Restarted the checkout worker, drained the backlog, and verified healthy heartbeats.",
         )
         session.add(incident)
         session.commit()
@@ -156,9 +158,11 @@ def test_incident_timeline_and_postmortem_exports(tmp_path):
     assert markdown.headers["content-type"].startswith("text/markdown")
     assert "Incident Postmortem" in markdown.text
     assert "## Root Cause" in markdown.text
+    assert "## Resolution Summary" in markdown.text
     assert "## Action Items" in markdown.text
     assert "Primary on-call paged" in markdown.text
     assert "Restarted checkout worker" in markdown.text
+    assert "drained the backlog" in markdown.text.lower()
     assert f"/ui/status/{project_id}" in markdown.text
     assert "/ui/incidents/public/shared-incident-token-12345" in markdown.text
 

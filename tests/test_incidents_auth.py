@@ -248,6 +248,27 @@ def test_incident_lifecycle_management_with_owner_token_and_viewer_read_access(t
     assert note.json()["note"]["body"] == "Investigating heartbeat backlog."
     assert note.json()["note"]["author"].startswith("user:")
 
+    resolve = client.post(
+        f"/projects/{project_id}/incidents/{incident_id}/resolve",
+        json={"summary": "Drained the backlog and verified fresh heartbeats across the region."},
+        headers=owner_headers,
+    )
+    assert resolve.status_code == 200
+    assert resolve.json()["incident"]["status"] == "resolved"
+    assert resolve.json()["incident"]["resolved_at"] is not None
+    assert resolve.json()["incident"]["resolved_by"].startswith("user:")
+    assert "Drained the backlog" in resolve.json()["incident"]["resolution_summary"]
+
+    reopen = client.post(
+        f"/projects/{project_id}/incidents/{incident_id}/reopen",
+        json={"reason": "A fresh timeout showed up after the first fix."},
+        headers=owner_headers,
+    )
+    assert reopen.status_code == 200
+    assert reopen.json()["incident"]["status"] == "open"
+    assert reopen.json()["incident"]["resolved_at"] is None
+    assert reopen.json()["incident"]["resolution_summary"] is None
+
     detail = client.get(
         f"/projects/{project_id}/incidents/{incident_id}",
         headers=owner_headers,
@@ -258,6 +279,7 @@ def test_incident_lifecycle_management_with_owner_token_and_viewer_read_access(t
     assert detail_payload["incident"]["note_count"] == 1
     assert len(detail_payload["notes"]) == 1
     assert detail_payload["notes"][0]["body"] == "Investigating heartbeat backlog."
+    assert detail_payload["incident"]["status"] == "open"
 
 
 def test_incident_workflow_actions_emit_slack_thread_updates(tmp_path, monkeypatch):
@@ -351,8 +373,22 @@ def test_incident_workflow_actions_emit_slack_thread_updates(tmp_path, monkeypat
     )
     assert note.status_code == 200
 
+    resolve = client.post(
+        f"/projects/{project_id}/incidents/{incident_id}/resolve",
+        json={"summary": "Applied the queue patch and verified the incident stopped firing."},
+        headers=owner_headers,
+    )
+    assert resolve.status_code == 200
+
+    reopen = client.post(
+        f"/projects/{project_id}/incidents/{incident_id}/reopen",
+        json={"reason": "A retry storm reopened the incident."},
+        headers=owner_headers,
+    )
+    assert reopen.status_code == 200
+
     actions = [call["action"] for call in calls]
-    assert actions == ["share", "assign", "ack", "note"]
+    assert actions == ["share", "assign", "ack", "note", "resolve", "reopen"]
     assert any(call["share_url"] for call in calls if call["action"] == "share")
 
 
@@ -432,6 +468,16 @@ def test_incident_acknowledge_emits_pagerduty_ack(tmp_path, monkeypatch):
     assert calls[0]["event_action"] == "acknowledge"
     assert calls[0]["incident_id"] == incident_id
 
+    resolve = client.post(
+        f"/projects/{project_id}/incidents/{incident_id}/resolve",
+        json={"summary": "Service stabilized after reducing the load on the failing dependency."},
+        headers=owner_headers,
+    )
+    assert resolve.status_code == 200
+    assert len(calls) == 2
+    assert calls[1]["event_action"] == "resolve"
+    assert calls[1]["custom_details"]["resolution_summary"].startswith("Service stabilized")
+
     clear_ack = client.post(
         f"/projects/{project_id}/incidents/{incident_id}/ack",
         json={"acknowledged": False},
@@ -447,3 +493,13 @@ def test_incident_acknowledge_emits_pagerduty_ack(tmp_path, monkeypatch):
     )
     assert clear_silence.status_code == 200
     assert clear_silence.json()["incident"]["silenced_until"] is None
+
+    reopen = client.post(
+        f"/projects/{project_id}/incidents/{incident_id}/reopen",
+        json={"reason": "The dependency regressed after deployment."},
+        headers=owner_headers,
+    )
+    assert reopen.status_code == 200
+    assert len(calls) == 3
+    assert calls[2]["event_action"] == "trigger"
+    assert calls[2]["custom_details"]["reopen_reason"] == "The dependency regressed after deployment."

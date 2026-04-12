@@ -124,11 +124,16 @@ function renderIncidentSummary(incident){
   const summaryEl = document.getElementById("incidentSummary");
   const actionsEl = document.getElementById("incidentActions");
   const jiraInfoEl = document.getElementById("jiraTicketInfo");
+  const resolutionMetaEl = document.getElementById("resolutionMeta");
+  const resolutionInput = document.getElementById("resolutionSummary");
   if(!summaryEl) return;
   const owner = incident.owner ? escapeHtml(incident.owner) : "unassigned";
   const ack = incident.acknowledged_at
     ? `${formatTimestamp(incident.acknowledged_at)} by ${escapeHtml(incident.acknowledged_by || "unknown")}`
     : "not acknowledged";
+  const resolved = incident.resolved_at
+    ? `${formatTimestamp(incident.resolved_at)} by ${escapeHtml(incident.resolved_by || "system")}`
+    : "still open";
   const silence = incident.silenced_until
     ? `${formatTimestamp(incident.silenced_until)} by ${escapeHtml(incident.silenced_by || "unknown")}`
     : "not silenced";
@@ -141,6 +146,7 @@ function renderIncidentSummary(incident){
       <div><span class="muted">Check</span><div>${incident.check_id}</div></div>
       <div><span class="muted">Status</span><div>${escapeHtml(incident.status || "unknown")}</div></div>
       <div><span class="muted">Started</span><div>${formatTimestamp(incident.started_at)}</div></div>
+      <div><span class="muted">Resolved</span><div>${resolved}</div></div>
       <div><span class="muted">Owner</span><div>${owner}</div></div>
       <div><span class="muted">Acknowledged</span><div>${ack}</div></div>
       <div><span class="muted">Silenced</span><div>${silence}</div></div>
@@ -153,11 +159,21 @@ function renderIncidentSummary(incident){
       ? `Linked Jira issue: <a href="${escapeHtml(incident.jira_issue_url)}" target="_blank" rel="noreferrer">${escapeHtml(incident.jira_issue_key || incident.jira_issue_url)}</a>`
       : "No Jira ticket linked yet.";
   }
+  if(resolutionInput){
+    resolutionInput.value = incident.resolution_summary || "";
+  }
+  if(resolutionMetaEl){
+    resolutionMetaEl.innerHTML = incident.resolution_summary
+      ? `Current summary: ${escapeHtml(incident.resolution_summary)}`
+      : "No manual resolution summary recorded yet.";
+  }
   if(actionsEl){
     actionsEl.classList.remove("hidden");
     const ackBtn = document.getElementById("ackIncidentBtn");
     const silenceBtn = document.getElementById("silenceIncidentBtn");
     const jiraBtn = document.getElementById("jiraTicketBtn");
+    const resolveBtn = document.getElementById("resolveIncidentBtn");
+    const reopenBtn = document.getElementById("reopenIncidentBtn");
     if(ackBtn){
       ackBtn.textContent = incident.acknowledged_at ? "Clear Ack" : "Acknowledge";
       ackBtn.dataset.acknowledged = incident.acknowledged_at ? "false" : "true";
@@ -168,6 +184,12 @@ function renderIncidentSummary(incident){
     if(jiraBtn){
       jiraBtn.textContent = incident.jira_issue_url ? "Open Jira Ticket" : "Create Jira Ticket";
       jiraBtn.dataset.issueUrl = incident.jira_issue_url || "";
+    }
+    if(resolveBtn){
+      resolveBtn.textContent = incident.resolved_at ? "Update Resolution" : "Resolve Incident";
+    }
+    if(reopenBtn){
+      reopenBtn.classList.toggle("hidden", !incident.resolved_at || incident.status === "merged");
     }
   }
 }
@@ -385,6 +407,45 @@ async function addIncidentNote(){
   await refreshIncidentPage();
 }
 
+async function resolveIncident(){
+  const iid = incidentIdFromPath();
+  const pid = incidentProjectId();
+  const summaryEl = document.getElementById("resolutionSummary");
+  const summary = summaryEl ? summaryEl.value.trim() : "";
+  if(summary.length < 3){
+    alert("Add a short resolution summary before resolving the incident.");
+    return;
+  }
+  const resp = await fetch(`/projects/${pid}/incidents/${iid}/resolve`, {
+    method: "POST",
+    headers: manageHeaders(),
+    body: JSON.stringify({summary}),
+  });
+  const body = await resp.json().catch(()=> ({}));
+  if(!resp.ok){
+    alert(body && body.detail ? body.detail : "Failed to resolve incident.");
+    return;
+  }
+  await refreshIncidentPage();
+}
+
+async function reopenIncident(){
+  const iid = incidentIdFromPath();
+  const pid = incidentProjectId();
+  const reason = prompt(`Why is incident ${iid} being reopened?`, "") || "";
+  const resp = await fetch(`/projects/${pid}/incidents/${iid}/reopen`, {
+    method: "POST",
+    headers: manageHeaders(),
+    body: JSON.stringify({reason: reason.trim() || null}),
+  });
+  const body = await resp.json().catch(()=> ({}));
+  if(!resp.ok){
+    alert(body && body.detail ? body.detail : "Failed to reopen incident.");
+    return;
+  }
+  await refreshIncidentPage();
+}
+
 async function refreshIncidentPage(){
   await loadIncidentDetail();
   await loadSimilarIncidents();
@@ -408,6 +469,8 @@ document.addEventListener("DOMContentLoaded", ()=>{
   const silenceBtn = document.getElementById("silenceIncidentBtn");
   const clearSilenceBtn = document.getElementById("clearSilenceBtn");
   const addNoteBtn = document.getElementById("addNoteBtn");
+  const resolveBtn = document.getElementById("resolveIncidentBtn");
+  const reopenBtn = document.getElementById("reopenIncidentBtn");
   const exportMarkdownBtn = document.getElementById("exportMarkdownBtn");
   const exportPdfBtn = document.getElementById("exportPdfBtn");
   if(shareBtn) shareBtn.addEventListener("click", createShare);
@@ -418,6 +481,8 @@ document.addEventListener("DOMContentLoaded", ()=>{
   if(silenceBtn) silenceBtn.addEventListener("click", ()=> silenceIncident(false));
   if(clearSilenceBtn) clearSilenceBtn.addEventListener("click", ()=> silenceIncident(true));
   if(addNoteBtn) addNoteBtn.addEventListener("click", addIncidentNote);
+  if(resolveBtn) resolveBtn.addEventListener("click", resolveIncident);
+  if(reopenBtn) reopenBtn.addEventListener("click", reopenIncident);
   if(exportMarkdownBtn) exportMarkdownBtn.addEventListener("click", ()=> downloadPostmortem("md"));
   if(exportPdfBtn) exportPdfBtn.addEventListener("click", ()=> downloadPostmortem("pdf"));
   refreshIncidentPage();

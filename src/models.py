@@ -523,6 +523,12 @@ class Incident(SQLModel, table=True):
     owner: Optional[str] = Field(default=None, description="incident owner or responder handle")
     acknowledged_at: Optional[datetime] = Field(default=None, description="when the incident was acknowledged")
     acknowledged_by: Optional[str] = Field(default=None, description="actor who acknowledged the incident")
+    resolved_by: Optional[str] = Field(default=None, description="actor who manually resolved the incident")
+    resolution_summary: Optional[str] = Field(
+        default=None,
+        sa_column=sa.Column(sa.Text(), nullable=True),
+        description="operator-entered summary describing how the incident was resolved",
+    )
     silenced_until: Optional[datetime] = Field(default=None, description="suppress notifications until this time")
     silenced_by: Optional[str] = Field(default=None, description="actor who silenced the incident")
     open_run_key: Optional[str] = Field(default=None, index=True, description="idempotency key for incident creation run")

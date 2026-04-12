@@ -827,6 +827,21 @@ def incident_detail_page(incident_id: int = Path(..., ge=1)):
 
         <section class="card">
           <div class="section-head">
+            <h3>Resolution</h3>
+            <div class="muted">Capture the closure summary, resolve the incident, or reopen it if the fix did not hold.</div>
+          </div>
+          <div id="resolutionMeta" class="muted">Resolution details will appear here once the incident is loaded.</div>
+          <div class="row">
+            <textarea id="resolutionSummary" rows="4" placeholder="Describe the fix, validation steps, and any remaining risk..." style="width:min(760px,100%)"></textarea>
+          </div>
+          <div class="row">
+            <button id="resolveIncidentBtn" class="btn">Resolve Incident</button>
+            <button id="reopenIncidentBtn" class="btn btn-secondary hidden">Reopen Incident</button>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="section-head">
             <h3>Timeline</h3>
             <div class="muted">Auto-built chronology from events, alerts, merges, acknowledgements, and remediation steps.</div>
           </div>
