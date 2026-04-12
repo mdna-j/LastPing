@@ -113,6 +113,7 @@ def test_project_jira_rotation_grace_falls_back_to_previous_token(tmp_path, monk
     from src import db as dbmod
     from src.main import app
     from src.models import Check, Incident, Project
+    from src.notification_queue import process_notification_queue
     from src.security import hash_api_key
 
     dbmod.create_db_and_tables()
@@ -161,15 +162,21 @@ def test_project_jira_rotation_grace_falls_back_to_previous_token(tmp_path, monk
             raise RuntimeError("new token not propagated yet")
         return {"key": "OPS-123", "url": "https://lastping.atlassian.net/browse/OPS-123"}
 
-    monkeypatch.setattr("src.routers.incidents.create_jira_issue", fake_create_jira_issue)
+    monkeypatch.setattr("src.jira.create_jira_issue", fake_create_jira_issue)
 
     ticket_res = client.post(
         f"/projects/{project_id}/incidents/{incident_id}/jira-ticket",
         headers={"X-ADMIN-TOKEN": "jira-admin"},
     )
     assert ticket_res.status_code == 200, ticket_res.text
+    assert ticket_res.json()["queued"] is True
+
+    with Session(dbmod.engine) as session:
+        results = process_notification_queue(session)
+        assert len(results) == 1
+        assert results[0]["ok"] is True
+
     assert attempted_tokens == ["new-jira-token", "old-jira-token"]
-    assert ticket_res.json()["issue_key"] == "OPS-123"
 
     get_res = client.get(f"/projects/{project_id}/jira-settings", headers={"X-ADMIN-TOKEN": "jira-admin"})
     assert get_res.status_code == 200

@@ -50,7 +50,6 @@ def test_project_throttle_escalation(tmp_path, monkeypatch):
     from src import db as dbmod
     from src.models import Project, Check, CheckType, CheckStatus, Event, EventType
     from src import worker
-    from src import alerts
 
     dbmod.create_db_and_tables()
 
@@ -73,11 +72,11 @@ def test_project_throttle_escalation(tmp_path, monkeypatch):
 
         called = {}
 
-        def fake_notify_escalation(proj, reason, check=None):
+        def fake_notify_escalation(proj, reason, check=None, session=None):
             called['esc'] = reason
             return True
 
-        monkeypatch.setattr(alerts, 'notify_escalation', fake_notify_escalation)
+        monkeypatch.setattr(worker, 'notify_escalation', fake_notify_escalation)
 
         worker.scan_checks_once(session)
 
@@ -179,6 +178,7 @@ def test_slack_thread_is_created_and_reused_for_incident_updates(tmp_path, monke
     from src import alerts
     from src import db as dbmod
     from src.models import Check, CheckType, Incident, Project
+    from src.notification_queue import process_notification_queue
 
     dbmod.create_db_and_tables()
 
@@ -210,12 +210,14 @@ def test_slack_thread_is_created_and_reused_for_incident_updates(tmp_path, monke
 
         alerts.notify_down(check, project, reason="timeout", incident=incident, session=session)
         session.commit()
+        process_notification_queue(session)
         session.refresh(incident)
         assert incident.slack_thread_ts == "1740000000.000123"
         assert incident.slack_channel_id == "COPS"
 
         alerts.notify_recovery(check, project, incident=incident, session=session)
         session.commit()
+        process_notification_queue(session)
 
         assert len(calls) == 2
         assert calls[0]["url"] == "https://slack.com/api/chat.postMessage"
@@ -232,6 +234,7 @@ def test_pagerduty_trigger_and_resolve_reuse_incident_dedup_key(tmp_path, monkey
     from src import alerts
     from src import db as dbmod
     from src.models import Check, CheckType, Incident, Project
+    from src.notification_queue import process_notification_queue
 
     dbmod.create_db_and_tables()
 
@@ -261,6 +264,7 @@ def test_pagerduty_trigger_and_resolve_reuse_incident_dedup_key(tmp_path, monkey
 
         alerts.notify_down(check, project, reason="timeout", incident=incident, session=session)
         session.commit()
+        process_notification_queue(session)
         session.refresh(incident)
 
         assert incident.pagerduty_dedup_key == f"lastping:incident:{project.id}:{incident.id}"
@@ -268,6 +272,8 @@ def test_pagerduty_trigger_and_resolve_reuse_incident_dedup_key(tmp_path, monkey
         assert calls[0]["payload"]["dedup_key"] == incident.pagerduty_dedup_key
 
         alerts.notify_recovery(check, project, incident=incident, session=session)
+        session.commit()
+        process_notification_queue(session)
 
         assert calls[1]["payload"]["event_action"] == "resolve"
         assert calls[1]["payload"]["dedup_key"] == incident.pagerduty_dedup_key

@@ -32,8 +32,9 @@ from sqlalchemy.exc import IntegrityError
 
 from .db import engine
 from .models import Check, CheckType, CheckStatus, Event, EventType, Project, Incident, CheckResult, BrowserCheckArtifact
-from .alerts import notify_down, notify_recovery, notify_degraded, notify_status_subscribers, send_email, send_sms
+from .alerts import notify_down, notify_recovery, notify_degraded, notify_escalation, notify_status_subscribers, send_sms
 from .models import UptimeSnapshot, AvailabilityRollup, CheckLease, RemediationHook, RemediationLog, RemediationApproval, OnCallAlert, OnCallEscalation, OnCallRotation, OnCallMember, AuditLog, Anomaly, Heartbeat
+from .notification_queue import process_notification_queue, queue_email_delivery
 from .analytics_ml import find_similar_incidents
 
 logger = logging.getLogger("lastping.worker")
@@ -95,6 +96,15 @@ def _notify_recovery_compat(check: Check, project: Project, *, incident: Optiona
         if "unexpected keyword argument" not in str(exc):
             raise
         return notify_recovery(check, project)
+
+
+def _notify_escalation_compat(project: Project, *, reason: str, check: Optional[Check], session: Session):
+    try:
+        return notify_escalation(project, reason, check=check, session=session)
+    except TypeError as exc:
+        if "unexpected keyword argument" not in str(exc):
+            raise
+        return notify_escalation(project, reason, check=check)
 
 
 def _as_utc_naive(value: datetime) -> datetime:
@@ -1243,7 +1253,7 @@ def _trigger_escalation(session: Session, project: Project, now: datetime, reaso
         last_es = getattr(project, "last_escalated_at", None)
         window = getattr(project, "alert_rate_limit_window", 0) or 0
         if (last_es is None) or ((now - last_es).total_seconds() > window):
-            ok = notify_escalation(project, reason, check=check)
+            ok = _notify_escalation_compat(project, reason=reason, check=check, session=session)
             project.last_escalated_at = now
             session.add(project)
             session.commit()
@@ -1277,7 +1287,7 @@ def _trigger_check_escalation(session: Session, project: Project, check: Check, 
     try:
         from .alerts import notify_escalation
 
-        ok = notify_escalation(project, reason, check=check)
+        ok = _notify_escalation_compat(project, reason=reason, check=check, session=session)
         check.last_escalated_at = now
         session.add(check)
         session.commit()
@@ -1587,7 +1597,15 @@ def _maybe_log_rollup_archive_health(session: Session, now: datetime, project_id
             if alert_to:
                 subj = f"[LastPing] Rollup archive missing: {project.name} ({month_period})"
                 body = f"Monthly rollup for {project.name} is missing for period {month_period}."
-                send_email(subj, body, to=alert_to)
+                queue_email_delivery(
+                    session,
+                    project_id=project.id,
+                    event="rollup_archive_missing",
+                    subject=subj,
+                    body=body,
+                    to=alert_to,
+                    target=alert_to,
+                )
             continue
 
         if quarter_due and pid not in quarter_projects_with_rollup:
@@ -1599,7 +1617,15 @@ def _maybe_log_rollup_archive_health(session: Session, now: datetime, project_id
             if alert_to:
                 subj = f"[LastPing] Rollup archive missing: {project.name} ({quarter_period})"
                 body = f"Quarterly rollup for {project.name} is missing for period {quarter_period}."
-                send_email(subj, body, to=alert_to)
+                queue_email_delivery(
+                    session,
+                    project_id=project.id,
+                    event="rollup_archive_missing",
+                    subject=subj,
+                    body=body,
+                    to=alert_to,
+                    target=alert_to,
+                )
 
 
 def _retention_days(env_var: str, default_days: int) -> int:
@@ -2319,7 +2345,7 @@ def _maybe_check_burn_rate_alerts(session: Session, now: datetime, project_ids):
             continue
 
         try:
-            notify_escalation(project, status["alert"]["reason"])
+            _notify_escalation_compat(project, reason=status["alert"]["reason"], check=None, session=session)
         except Exception:
             logger.exception("Failed to send burn rate alert for project %s", pid)
 
@@ -2973,12 +2999,32 @@ def _send_oncall_target(session: Session, project: Project, check: Check, alert:
                 return False
             ok = False
             if member.email:
-                ok = send_email(f"[LastPing] {project.name} alert", msg, to=member.email) or ok
+                queue_email_delivery(
+                    session,
+                    project_id=project.id,
+                    check_id=check.id,
+                    event=f"oncall_{alert.event_type}",
+                    subject=f"[LastPing] {project.name} alert",
+                    body=msg,
+                    to=member.email,
+                    target=member.email,
+                )
+                ok = True
             if member.phone:
                 ok = send_sms(msg, to=member.phone, project=project) or ok
             return ok
         if esc.target_type == "email" and esc.target_value:
-            return send_email(f"[LastPing] {project.name} alert", msg, to=esc.target_value)
+            queue_email_delivery(
+                session,
+                project_id=project.id,
+                check_id=check.id,
+                event=f"oncall_{alert.event_type}",
+                subject=f"[LastPing] {project.name} alert",
+                body=msg,
+                to=esc.target_value,
+                target=esc.target_value,
+            )
+            return True
         if esc.target_type == "sms" and esc.target_value:
             return send_sms(msg, to=esc.target_value, project=project)
     except Exception:
@@ -3446,7 +3492,7 @@ def scan_checks_once(session: Session):
                                 session.add(check)
                                 session.commit()
                                 try:
-                                    notify_degraded(check, project, reason=f"latency_ms={latency_ms:.1f}" if latency_ms is not None else None)
+                                    notify_degraded(check, project, reason=f"latency_ms={latency_ms:.1f}" if latency_ms is not None else None, session=session)
                                     check.last_alerted_at = now
                                     check.last_alert_type = EventType.DEGRADED
                                     session.add(check)
@@ -3482,7 +3528,7 @@ def scan_checks_once(session: Session):
                                 session.add(check)
                                 session.commit()
                                 try:
-                                    notify_degraded(check, project, reason="still degraded")
+                                    notify_degraded(check, project, reason="still degraded", session=session)
                                     check.last_alerted_at = now
                                     check.last_alert_type = EventType.DEGRADED
                                     session.add(check)
@@ -3803,6 +3849,7 @@ def main():
             with Session(engine) as session:
                 try:
                     scan_checks_once(session)
+                    process_notification_queue(session)
                 except Exception:
                     logger.exception("Error scanning checks")
             # update worker health file so orchestration can determine liveness

@@ -13,6 +13,7 @@ def test_create_incident_jira_ticket_and_reuse_link(tmp_path, monkeypatch):
     from src import db as dbmod
     from src.main import app
     from src.models import AuditLog, Check, CheckType, Incident, Project, ProjectMembership, User, UserToken
+    from src.notification_queue import process_notification_queue
     from src.security import hash_api_key
 
     dbmod.create_db_and_tables()
@@ -60,7 +61,7 @@ def test_create_incident_jira_ticket_and_reuse_link(tmp_path, monkeypatch):
         calls.append(kwargs)
         return {"key": "OPS-17", "url": "https://lastping.atlassian.net/browse/OPS-17"}
 
-    monkeypatch.setattr("src.routers.incidents.create_jira_issue", fake_create_jira_issue)
+    monkeypatch.setattr("src.jira.create_jira_issue", fake_create_jira_issue)
 
     res = client.post(
         f"/projects/{project_id}/incidents/{incident_id}/jira-ticket",
@@ -68,9 +69,17 @@ def test_create_incident_jira_ticket_and_reuse_link(tmp_path, monkeypatch):
     )
     assert res.status_code == 200
     body = res.json()
-    assert body["created"] is True
-    assert body["issue_key"] == "OPS-17"
-    assert body["incident"]["jira_issue_key"] == "OPS-17"
+    assert body["created"] is False
+    assert body["queued"] is True
+    assert body["delivery_id"] is not None
+    assert body["incident"]["jira_issue_key"] is None
+    assert len(calls) == 0
+
+    with Session(dbmod.engine) as session:
+        results = process_notification_queue(session)
+        assert len(results) == 1
+        assert results[0]["ok"] is True
+
     assert len(calls) == 1
     assert "LastPing incident" in calls[0]["description"]
 
@@ -80,6 +89,7 @@ def test_create_incident_jira_ticket_and_reuse_link(tmp_path, monkeypatch):
     )
     assert second.status_code == 200
     assert second.json()["created"] is False
+    assert second.json()["queued"] is False
 
     with Session(dbmod.engine) as session:
         incident = session.get(Incident, incident_id)
@@ -91,4 +101,5 @@ def test_create_incident_jira_ticket_and_reuse_link(tmp_path, monkeypatch):
                 select(AuditLog).where(AuditLog.target_type == "incident", AuditLog.target_id == incident_id)
             ).all()
         ]
+        assert "queue_jira_ticket" in actions
         assert "create_jira_ticket" in actions

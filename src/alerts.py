@@ -22,6 +22,13 @@ from sqlmodel import Session, select
 
 from .db import ensure_engine
 from .models import AuditLog, Incident, StatusSubscription
+from .notification_queue import (
+    queue_discord_delivery,
+    queue_email_delivery,
+    queue_pagerduty_delivery,
+    queue_project_webhook_delivery,
+    queue_slack_delivery,
+)
 from .secret_lifecycle import SECRET_PAGERDUTY_INTEGRATION_KEY, active_project_secret_candidates, touch_project_secret_last_used
 
 logger = logging.getLogger("lastping.alerts")
@@ -254,6 +261,23 @@ def retry_notification_failure_payload(details: dict) -> dict:
         "target": target,
         "response": response,
     }
+
+
+def _queue_delivery(queue_func, **kwargs) -> bool:
+    session = kwargs.pop("session", None)
+    if session is None:
+        return False
+    try:
+        queue_func(session, **kwargs)
+        return True
+    except Exception:
+        logger.exception(
+            "Failed to enqueue notification delivery channel=%s event=%s project=%s",
+            kwargs.get("channel"),
+            kwargs.get("event"),
+            kwargs.get("project_id"),
+        )
+        return False
 
 
 def _post_json_with_response(url: str, payload: dict, timeout: int = 10, headers: Optional[dict] = None) -> Optional[dict]:
@@ -541,17 +565,29 @@ def notify_down(check, project, reason: str = None, incident: Optional[Incident]
                 embed.setdefault("fields", []).append({"name": "Check URL", "value": check_url, "inline": False})
             if reason_text:
                 embed["fields"].append({"name": "Reason", "value": reason_text, "inline": False})
-            sent = _track_notification_result(
-                _post_json(discord_url, {"embeds": [embed]}),
-                project=project,
-                check=check,
-                channel="discord",
-                event="down",
-                target=discord_url,
-                detail="project Discord webhook send failed",
-                retry_payload={"embeds": [embed]},
-                request_kind="json_post",
-            ) or sent
+            if session is not None and getattr(project, "id", None) is not None:
+                sent = _queue_delivery(
+                    queue_discord_delivery,
+                    session=session,
+                    project_id=project.id,
+                    check_id=getattr(check, "id", None),
+                    incident_id=getattr(incident, "id", None) if incident is not None else None,
+                    event="down",
+                    payload={"embeds": [embed]},
+                    target="project discord route",
+                ) or sent
+            else:
+                sent = _track_notification_result(
+                    _post_json(discord_url, {"embeds": [embed]}),
+                    project=project,
+                    check=check,
+                    channel="discord",
+                    event="down",
+                    target=discord_url,
+                    detail="project Discord webhook send failed",
+                    retry_payload={"embeds": [embed]},
+                    request_kind="json_post",
+                ) or sent
 
         # Slack: send Block Kit payload for structured messages
         slack_url = _slack_url(project, check)
@@ -576,25 +612,38 @@ def notify_down(check, project, reason: str = None, incident: Optional[Incident]
                 if check_url:
                     action_elements.append({"type": "button", "text": {"type": "plain_text", "text": "Open Check"}, "url": check_url})
                 attachment["actions"] = action_elements
-            slack_ok, slack_target = _post_slack_message(
-                project=project,
-                check=check,
-                incident=incident,
-                session=session,
-                payload={"attachments": [attachment]},
-                fallback_text=summary,
-            )
-            sent = _track_notification_result(
-                slack_ok,
-                project=project,
-                check=check,
-                channel="slack",
-                event="down",
-                target=slack_target,
-                detail="project Slack webhook send failed",
-                retry_payload={"attachments": [attachment]},
-                request_kind="json_post" if isinstance(slack_target, str) and slack_target.startswith(("http://", "https://")) else None,
-            ) or sent
+            if session is not None and getattr(project, "id", None) is not None:
+                sent = _queue_delivery(
+                    queue_slack_delivery,
+                    session=session,
+                    project_id=project.id,
+                    check_id=getattr(check, "id", None),
+                    incident_id=getattr(incident, "id", None) if incident is not None else None,
+                    event="down",
+                    payload={"attachments": [attachment]},
+                    fallback_text=summary,
+                    target=_slack_channel(project, check, incident) or "project slack route",
+                ) or sent
+            else:
+                slack_ok, slack_target = _post_slack_message(
+                    project=project,
+                    check=check,
+                    incident=incident,
+                    session=session,
+                    payload={"attachments": [attachment]},
+                    fallback_text=summary,
+                )
+                sent = _track_notification_result(
+                    slack_ok,
+                    project=project,
+                    check=check,
+                    channel="slack",
+                    event="down",
+                    target=slack_target,
+                    detail="project Slack webhook send failed",
+                    retry_payload={"attachments": [attachment]},
+                    request_kind="json_post" if isinstance(slack_target, str) and slack_target.startswith(("http://", "https://")) else None,
+                ) or sent
 
         # PagerDuty: use existing helper which builds proper event payload
         if _pagerduty_keys(project, check) and _check_channel_enabled(check, "alert_pagerduty_enabled"):
@@ -607,25 +656,43 @@ def notify_down(check, project, reason: str = None, incident: Optional[Incident]
             dedup_key = _pagerduty_dedup_key(project, check, incident)
             if incident is not None:
                 _remember_incident_pagerduty_dedup_key(incident, dedup_key=dedup_key, session=session)
-            sent = _track_notification_result(
-                _send_pagerduty_event_for_project(
-                    project,
-                    summary,
-                    "critical",
-                    check=check,
+            if session is not None and getattr(project, "id", None) is not None:
+                sent = _queue_delivery(
+                    queue_pagerduty_delivery,
+                    session=session,
+                    project_id=project.id,
+                    check_id=getattr(check, "id", None),
+                    incident_id=getattr(incident, "id", None) if incident is not None else None,
+                    event="down",
+                    summary=summary,
+                    severity="critical",
                     event_action="trigger",
-                    dedup_key=dedup_key,
                     source=project.name,
                     component=check.name,
                     custom_details=pd_details,
-                ),
-                project=project,
-                check=check,
-                channel="pagerduty",
-                event="down",
-                target="https://events.pagerduty.com/v2/enqueue",
-                detail="PagerDuty trigger event send failed",
-            ) or sent
+                    dedup_key=dedup_key,
+                    target="pagerduty integration",
+                ) or sent
+            else:
+                sent = _track_notification_result(
+                    _send_pagerduty_event_for_project(
+                        project,
+                        summary,
+                        "critical",
+                        check=check,
+                        event_action="trigger",
+                        dedup_key=dedup_key,
+                        source=project.name,
+                        component=check.name,
+                        custom_details=pd_details,
+                    ),
+                    project=project,
+                    check=check,
+                    channel="pagerduty",
+                    event="down",
+                    target="https://events.pagerduty.com/v2/enqueue",
+                    detail="PagerDuty trigger event send failed",
+                ) or sent
 
         # Generic webhook: send structured JSON payload so receivers can process
         gen_url = _generic_webhook_url(project, check)
@@ -638,17 +705,29 @@ def notify_down(check, project, reason: str = None, incident: Optional[Incident]
                 "check_url": check_url,
                 "timestamp": now_iso,
             }
-            sent = _track_notification_result(
-                send_generic_webhook(gen_url, payload),
-                project=project,
-                check=check,
-                channel="webhook",
-                event="down",
-                target=gen_url,
-                detail="generic webhook send failed",
-                retry_payload=payload,
-                request_kind="json_post",
-            ) or sent
+            if session is not None and getattr(project, "id", None) is not None:
+                sent = _queue_delivery(
+                    queue_project_webhook_delivery,
+                    session=session,
+                    project_id=project.id,
+                    check_id=getattr(check, "id", None),
+                    incident_id=getattr(incident, "id", None) if incident is not None else None,
+                    event="down",
+                    payload=payload,
+                    target="project webhook",
+                ) or sent
+            else:
+                sent = _track_notification_result(
+                    send_generic_webhook(gen_url, payload),
+                    project=project,
+                    check=check,
+                    channel="webhook",
+                    event="down",
+                    target=gen_url,
+                    detail="generic webhook send failed",
+                    retry_payload=payload,
+                    request_kind="json_post",
+                ) or sent
 
         # fall back to global endpoints if no project-specific webhook is set
         if not sent:
@@ -657,25 +736,50 @@ def notify_down(check, project, reason: str = None, incident: Optional[Incident]
                 f"Last ping: `{check.last_ping}` — expected every `{getattr(check, 'expected_interval', getattr(check, 'interval', None))}s` + grace `{getattr(check, 'grace_period', None)}s`{(' — Reason: ' + reason) if reason else ''}"
             )
             if _check_channel_enabled(check, "alert_discord_enabled"):
-                _track_notification_result(
-                    send_discord_message(msg),
-                    project=project,
-                    check=check,
-                    channel="discord",
-                    event="down",
-                    target=os.environ.get("DISCORD_WEBHOOK_URL"),
-                    detail="global Discord webhook send failed",
-                )
+                if session is not None and getattr(project, "id", None) is not None:
+                    _queue_delivery(
+                        queue_discord_delivery,
+                        session=session,
+                        project_id=project.id,
+                        check_id=getattr(check, "id", None),
+                        incident_id=getattr(incident, "id", None) if incident is not None else None,
+                        event="down",
+                        payload={"content": msg},
+                        target="global discord route",
+                    )
+                else:
+                    _track_notification_result(
+                        send_discord_message(msg),
+                        project=project,
+                        check=check,
+                        channel="discord",
+                        event="down",
+                        target=os.environ.get("DISCORD_WEBHOOK_URL"),
+                        detail="global Discord webhook send failed",
+                    )
             if _check_channel_enabled(check, "alert_slack_enabled"):
-                _track_notification_result(
-                    send_slack_message(msg),
-                    project=project,
-                    check=check,
-                    channel="slack",
-                    event="down",
-                    target=os.environ.get("SLACK_WEBHOOK_URL"),
-                    detail="global Slack webhook send failed",
-                )
+                if session is not None and getattr(project, "id", None) is not None:
+                    _queue_delivery(
+                        queue_slack_delivery,
+                        session=session,
+                        project_id=project.id,
+                        check_id=getattr(check, "id", None),
+                        incident_id=getattr(incident, "id", None) if incident is not None else None,
+                        event="down",
+                        payload={"text": msg},
+                        fallback_text=msg,
+                        target="global slack route",
+                    )
+                else:
+                    _track_notification_result(
+                        send_slack_message(msg),
+                        project=project,
+                        check=check,
+                        channel="slack",
+                        event="down",
+                        target=os.environ.get("SLACK_WEBHOOK_URL"),
+                        detail="global Slack webhook send failed",
+                    )
         try:
             if _sms_allowed(project, check):
                 sms_msg = f"[LastPing] DOWN: {project.name}/{check.name} {reason or ''}".strip()
@@ -694,22 +798,36 @@ def notify_down(check, project, reason: str = None, incident: Optional[Incident]
             if _oncall_allowed(project, check) and _oncall_email(project, check):
                 subj = f"[LastPing] DOWN: {project.name}/{check.name}"
                 body = f"Project {project.name} check {check.name} is DOWN. {reason or ''}".strip()
-                _track_notification_result(
-                    send_email(subj, body, to=_oncall_email(project, check)),
-                    project=project,
-                    check=check,
-                    channel="email",
-                    event="down",
-                    target=_oncall_email(project, check),
-                    detail="on-call email send failed",
-                )
+                if session is not None and getattr(project, "id", None) is not None:
+                    _queue_delivery(
+                        queue_email_delivery,
+                        session=session,
+                        project_id=project.id,
+                        check_id=getattr(check, "id", None),
+                        incident_id=getattr(incident, "id", None) if incident is not None else None,
+                        event="down",
+                        subject=subj,
+                        body=body,
+                        to=_oncall_email(project, check),
+                        target=_oncall_email(project, check),
+                    )
+                else:
+                    _track_notification_result(
+                        send_email(subj, body, to=_oncall_email(project, check)),
+                        project=project,
+                        check=check,
+                        channel="email",
+                        event="down",
+                        target=_oncall_email(project, check),
+                        detail="on-call email send failed",
+                    )
         except Exception:
             pass
     except Exception:
         logger.exception("Failed to send DOWN notification")
 
 
-def notify_degraded(check, project, reason: str = None) -> None:
+def notify_degraded(check, project, reason: str = None, session: Optional[Session] = None) -> None:
     try:
         now_iso = datetime.utcnow().isoformat() + "Z"
         if reason is None:
@@ -727,70 +845,127 @@ def notify_degraded(check, project, reason: str = None) -> None:
             embed = {"title": ":warning: DEGRADED", "description": summary, "color": 16753920, "timestamp": now_iso}
             if reason:
                 embed["fields"] = [{"name": "Reason", "value": reason, "inline": False}]
-            sent = _track_notification_result(
-                _post_json(discord_url, {"embeds": [embed]}),
-                project=project,
-                check=check,
-                channel="discord",
-                event="degraded",
-                target=discord_url,
-                detail="project Discord webhook send failed",
-                retry_payload={"embeds": [embed]},
-                request_kind="json_post",
-            ) or sent
+            if session is not None and getattr(project, "id", None) is not None:
+                sent = _queue_delivery(
+                    queue_discord_delivery,
+                    session=session,
+                    project_id=project.id,
+                    check_id=getattr(check, "id", None),
+                    event="degraded",
+                    payload={"embeds": [embed]},
+                    target="project discord route",
+                ) or sent
+            else:
+                sent = _track_notification_result(
+                    _post_json(discord_url, {"embeds": [embed]}),
+                    project=project,
+                    check=check,
+                    channel="discord",
+                    event="degraded",
+                    target=discord_url,
+                    detail="project Discord webhook send failed",
+                    retry_payload={"embeds": [embed]},
+                    request_kind="json_post",
+                ) or sent
         slack_url = _slack_url(project, check)
         if slack_url and _check_channel_enabled(check, "alert_slack_enabled"):
             blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": f":warning: *{summary}*"}}]
             if reason:
                 blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"*Reason:* {reason}"}]})
             attachment = {"color": "#F5A623", "blocks": blocks}
-            sent = _track_notification_result(
-                _post_json(slack_url, {"attachments": [attachment]}),
-                project=project,
-                check=check,
-                channel="slack",
-                event="degraded",
-                target=slack_url,
-                detail="project Slack webhook send failed",
-                retry_payload={"attachments": [attachment]},
-                request_kind="json_post",
-            ) or sent
-        gen_url = _generic_webhook_url(project, check)
-        if gen_url and _check_channel_enabled(check, "alert_webhook_enabled"):
-            payload = {"event": "degraded", "summary": summary, "details": {"reason": reason}, "timestamp": now_iso}
-            sent = _track_notification_result(
-                send_generic_webhook(gen_url, payload),
-                project=project,
-                check=check,
-                channel="webhook",
-                event="degraded",
-                target=gen_url,
-                detail="generic webhook send failed",
-                retry_payload=payload,
-                request_kind="json_post",
-            ) or sent
-        if not sent:
-            msg = f":warning: **DEGRADED** -- Project `{project.name}` Check `{check.name}` {reason or ''}".strip()
-            if _check_channel_enabled(check, "alert_discord_enabled"):
-                _track_notification_result(
-                    send_discord_message(msg),
-                    project=project,
-                    check=check,
-                    channel="discord",
+            if session is not None and getattr(project, "id", None) is not None:
+                sent = _queue_delivery(
+                    queue_slack_delivery,
+                    session=session,
+                    project_id=project.id,
+                    check_id=getattr(check, "id", None),
                     event="degraded",
-                    target=os.environ.get("DISCORD_WEBHOOK_URL"),
-                    detail="global Discord webhook send failed",
-                )
-            if _check_channel_enabled(check, "alert_slack_enabled"):
-                _track_notification_result(
-                    send_slack_message(msg),
+                    payload={"attachments": [attachment]},
+                    fallback_text=summary,
+                    target=_slack_channel(project, check) or "project slack route",
+                ) or sent
+            else:
+                sent = _track_notification_result(
+                    _post_json(slack_url, {"attachments": [attachment]}),
                     project=project,
                     check=check,
                     channel="slack",
                     event="degraded",
-                    target=os.environ.get("SLACK_WEBHOOK_URL"),
-                    detail="global Slack webhook send failed",
-                )
+                    target=slack_url,
+                    detail="project Slack webhook send failed",
+                    retry_payload={"attachments": [attachment]},
+                    request_kind="json_post",
+                ) or sent
+        gen_url = _generic_webhook_url(project, check)
+        if gen_url and _check_channel_enabled(check, "alert_webhook_enabled"):
+            payload = {"event": "degraded", "summary": summary, "details": {"reason": reason}, "timestamp": now_iso}
+            if session is not None and getattr(project, "id", None) is not None:
+                sent = _queue_delivery(
+                    queue_project_webhook_delivery,
+                    session=session,
+                    project_id=project.id,
+                    check_id=getattr(check, "id", None),
+                    event="degraded",
+                    payload=payload,
+                    target="project webhook",
+                ) or sent
+            else:
+                sent = _track_notification_result(
+                    send_generic_webhook(gen_url, payload),
+                    project=project,
+                    check=check,
+                    channel="webhook",
+                    event="degraded",
+                    target=gen_url,
+                    detail="generic webhook send failed",
+                    retry_payload=payload,
+                    request_kind="json_post",
+                ) or sent
+        if not sent:
+            msg = f":warning: **DEGRADED** -- Project `{project.name}` Check `{check.name}` {reason or ''}".strip()
+            if _check_channel_enabled(check, "alert_discord_enabled"):
+                if session is not None and getattr(project, "id", None) is not None:
+                    _queue_delivery(
+                        queue_discord_delivery,
+                        session=session,
+                        project_id=project.id,
+                        check_id=getattr(check, "id", None),
+                        event="degraded",
+                        payload={"content": msg},
+                        target="global discord route",
+                    )
+                else:
+                    _track_notification_result(
+                        send_discord_message(msg),
+                        project=project,
+                        check=check,
+                        channel="discord",
+                        event="degraded",
+                        target=os.environ.get("DISCORD_WEBHOOK_URL"),
+                        detail="global Discord webhook send failed",
+                    )
+            if _check_channel_enabled(check, "alert_slack_enabled"):
+                if session is not None and getattr(project, "id", None) is not None:
+                    _queue_delivery(
+                        queue_slack_delivery,
+                        session=session,
+                        project_id=project.id,
+                        check_id=getattr(check, "id", None),
+                        event="degraded",
+                        payload={"text": msg},
+                        fallback_text=msg,
+                        target="global slack route",
+                    )
+                else:
+                    _track_notification_result(
+                        send_slack_message(msg),
+                        project=project,
+                        check=check,
+                        channel="slack",
+                        event="degraded",
+                        target=os.environ.get("SLACK_WEBHOOK_URL"),
+                        detail="global Slack webhook send failed",
+                    )
         try:
             if _sms_allowed(project, check):
                 sms_msg = f"[LastPing] DEGRADED: {project.name}/{check.name} {reason or ''}".strip()
@@ -809,15 +984,28 @@ def notify_degraded(check, project, reason: str = None) -> None:
             if _oncall_allowed(project, check) and _oncall_email(project, check):
                 subj = f"[LastPing] DEGRADED: {project.name}/{check.name}"
                 body = f"Project {project.name} check {check.name} is DEGRADED. {reason or ''}".strip()
-                _track_notification_result(
-                    send_email(subj, body, to=_oncall_email(project, check)),
-                    project=project,
-                    check=check,
-                    channel="email",
-                    event="degraded",
-                    target=_oncall_email(project, check),
-                    detail="on-call email send failed",
-                )
+                if session is not None and getattr(project, "id", None) is not None:
+                    _queue_delivery(
+                        queue_email_delivery,
+                        session=session,
+                        project_id=project.id,
+                        check_id=getattr(check, "id", None),
+                        event="degraded",
+                        subject=subj,
+                        body=body,
+                        to=_oncall_email(project, check),
+                        target=_oncall_email(project, check),
+                    )
+                else:
+                    _track_notification_result(
+                        send_email(subj, body, to=_oncall_email(project, check)),
+                        project=project,
+                        check=check,
+                        channel="email",
+                        event="degraded",
+                        target=_oncall_email(project, check),
+                        detail="on-call email send failed",
+                    )
         except Exception:
             pass
     except Exception:
@@ -854,17 +1042,29 @@ def notify_recovery(check, project, incident: Optional[Incident] = None, session
                 embed["fields"].append({"name": "Project URL", "value": project_url, "inline": False})
             if check_url:
                 embed["fields"].append({"name": "Check URL", "value": check_url, "inline": False})
-            sent = _track_notification_result(
-                _post_json(discord_url, {"embeds": [embed]}),
-                project=project,
-                check=check,
-                channel="discord",
-                event="recovery",
-                target=discord_url,
-                detail="project Discord webhook send failed",
-                retry_payload={"embeds": [embed]},
-                request_kind="json_post",
-            ) or sent
+            if session is not None and getattr(project, "id", None) is not None:
+                sent = _queue_delivery(
+                    queue_discord_delivery,
+                    session=session,
+                    project_id=project.id,
+                    check_id=getattr(check, "id", None),
+                    incident_id=getattr(incident, "id", None) if incident is not None else None,
+                    event="recovery",
+                    payload={"embeds": [embed]},
+                    target="project discord route",
+                ) or sent
+            else:
+                sent = _track_notification_result(
+                    _post_json(discord_url, {"embeds": [embed]}),
+                    project=project,
+                    check=check,
+                    channel="discord",
+                    event="recovery",
+                    target=discord_url,
+                    detail="project Discord webhook send failed",
+                    retry_payload={"embeds": [embed]},
+                    request_kind="json_post",
+                ) or sent
         slack_url = _slack_url(project, check)
         if (slack_url or _slack_channel(project, check, incident)) and _check_channel_enabled(check, "alert_slack_enabled"):
             blocks = [
@@ -879,25 +1079,38 @@ def notify_recovery(check, project, incident: Optional[Incident] = None, session
                 if check_url:
                     actions.append({"type": "button", "text": {"type": "plain_text", "text": "Open Check"}, "url": check_url})
                 attachment["actions"] = actions
-            slack_ok, slack_target = _post_slack_message(
-                project=project,
-                check=check,
-                incident=incident,
-                session=session,
-                payload={"attachments": [attachment]},
-                fallback_text=summary,
-            )
-            sent = _track_notification_result(
-                slack_ok,
-                project=project,
-                check=check,
-                channel="slack",
-                event="recovery",
-                target=slack_target,
-                detail="project Slack webhook send failed",
-                retry_payload={"attachments": [attachment]},
-                request_kind="json_post" if isinstance(slack_target, str) and slack_target.startswith(("http://", "https://")) else None,
-            ) or sent
+            if session is not None and getattr(project, "id", None) is not None:
+                sent = _queue_delivery(
+                    queue_slack_delivery,
+                    session=session,
+                    project_id=project.id,
+                    check_id=getattr(check, "id", None),
+                    incident_id=getattr(incident, "id", None) if incident is not None else None,
+                    event="recovery",
+                    payload={"attachments": [attachment]},
+                    fallback_text=summary,
+                    target=_slack_channel(project, check, incident) or "project slack route",
+                ) or sent
+            else:
+                slack_ok, slack_target = _post_slack_message(
+                    project=project,
+                    check=check,
+                    incident=incident,
+                    session=session,
+                    payload={"attachments": [attachment]},
+                    fallback_text=summary,
+                )
+                sent = _track_notification_result(
+                    slack_ok,
+                    project=project,
+                    check=check,
+                    channel="slack",
+                    event="recovery",
+                    target=slack_target,
+                    detail="project Slack webhook send failed",
+                    retry_payload={"attachments": [attachment]},
+                    request_kind="json_post" if isinstance(slack_target, str) and slack_target.startswith(("http://", "https://")) else None,
+                ) or sent
         if _pagerduty_keys(project, check) and _check_channel_enabled(check, "alert_pagerduty_enabled"):
             pd_details = details.copy()
             if project_url:
@@ -905,65 +1118,118 @@ def notify_recovery(check, project, incident: Optional[Incident] = None, session
             if check_url:
                 pd_details["check_url"] = check_url
             dedup_key = _pagerduty_dedup_key(project, check, incident)
-            sent = _track_notification_result(
-                _send_pagerduty_event_for_project(
-                    project,
-                    summary,
-                    "info",
-                    check=check,
+            if session is not None and getattr(project, "id", None) is not None:
+                sent = _queue_delivery(
+                    queue_pagerduty_delivery,
+                    session=session,
+                    project_id=project.id,
+                    check_id=getattr(check, "id", None),
+                    incident_id=getattr(incident, "id", None) if incident is not None else None,
+                    event="recovery",
+                    summary=summary,
+                    severity="info",
                     event_action="resolve",
-                    dedup_key=dedup_key,
                     source=project.name,
                     component=check.name,
                     custom_details=pd_details,
-                ),
-                project=project,
-                check=check,
-                channel="pagerduty",
-                event="recovery",
-                target="https://events.pagerduty.com/v2/enqueue",
-                detail="PagerDuty recovery event send failed",
-            ) or sent
+                    dedup_key=dedup_key,
+                    target="pagerduty integration",
+                ) or sent
+            else:
+                sent = _track_notification_result(
+                    _send_pagerduty_event_for_project(
+                        project,
+                        summary,
+                        "info",
+                        check=check,
+                        event_action="resolve",
+                        dedup_key=dedup_key,
+                        source=project.name,
+                        component=check.name,
+                        custom_details=pd_details,
+                    ),
+                    project=project,
+                    check=check,
+                    channel="pagerduty",
+                    event="recovery",
+                    target="https://events.pagerduty.com/v2/enqueue",
+                    detail="PagerDuty recovery event send failed",
+                ) or sent
         gen_url = _generic_webhook_url(project, check)
         if gen_url and _check_channel_enabled(check, "alert_webhook_enabled"):
-            sent = _track_notification_result(
-                send_generic_webhook(
-                    gen_url,
-                    {"event": "recovery", "summary": summary, "details": details, "timestamp": now_iso, "project_url": project_url, "check_url": check_url},
-                ),
-                project=project,
-                check=check,
-                channel="webhook",
-                event="recovery",
-                target=gen_url,
-                detail="generic webhook send failed",
-                retry_payload={"event": "recovery", "summary": summary, "details": details, "timestamp": now_iso, "project_url": project_url, "check_url": check_url},
-                request_kind="json_post",
-            ) or sent
+            payload = {"event": "recovery", "summary": summary, "details": details, "timestamp": now_iso, "project_url": project_url, "check_url": check_url}
+            if session is not None and getattr(project, "id", None) is not None:
+                sent = _queue_delivery(
+                    queue_project_webhook_delivery,
+                    session=session,
+                    project_id=project.id,
+                    check_id=getattr(check, "id", None),
+                    incident_id=getattr(incident, "id", None) if incident is not None else None,
+                    event="recovery",
+                    payload=payload,
+                    target="project webhook",
+                ) or sent
+            else:
+                sent = _track_notification_result(
+                    send_generic_webhook(gen_url, payload),
+                    project=project,
+                    check=check,
+                    channel="webhook",
+                    event="recovery",
+                    target=gen_url,
+                    detail="generic webhook send failed",
+                    retry_payload=payload,
+                    request_kind="json_post",
+                ) or sent
 
         # fall back to global endpoints if no project-specific webhook is configured
         if not sent:
             msg = (f":white_check_mark: **RECOVERY** — Project `{project.name}` — Check `{check.name}` is UP again\n" f"Last ping: `{check.last_ping}`")
             if _check_channel_enabled(check, "alert_discord_enabled"):
-                _track_notification_result(
-                    send_discord_message(msg),
-                    project=project,
-                    check=check,
-                    channel="discord",
-                    event="recovery",
-                    target=os.environ.get("DISCORD_WEBHOOK_URL"),
-                    detail="global Discord webhook send failed",
-                )
+                if session is not None and getattr(project, "id", None) is not None:
+                    _queue_delivery(
+                        queue_discord_delivery,
+                        session=session,
+                        project_id=project.id,
+                        check_id=getattr(check, "id", None),
+                        incident_id=getattr(incident, "id", None) if incident is not None else None,
+                        event="recovery",
+                        payload={"content": msg},
+                        target="global discord route",
+                    )
+                else:
+                    _track_notification_result(
+                        send_discord_message(msg),
+                        project=project,
+                        check=check,
+                        channel="discord",
+                        event="recovery",
+                        target=os.environ.get("DISCORD_WEBHOOK_URL"),
+                        detail="global Discord webhook send failed",
+                    )
             if _check_channel_enabled(check, "alert_slack_enabled"):
-                _track_notification_result(
-                    send_slack_message(msg),
-                    project=project,
-                    check=check,
-                    channel="slack",
-                    event="recovery",
-                    target=os.environ.get("SLACK_WEBHOOK_URL"),
-                    detail="global Slack webhook send failed",
-                )
+                if session is not None and getattr(project, "id", None) is not None:
+                    _queue_delivery(
+                        queue_slack_delivery,
+                        session=session,
+                        project_id=project.id,
+                        check_id=getattr(check, "id", None),
+                        incident_id=getattr(incident, "id", None) if incident is not None else None,
+                        event="recovery",
+                        payload={"text": msg},
+                        fallback_text=msg,
+                        target="global slack route",
+                    )
+                else:
+                    _track_notification_result(
+                        send_slack_message(msg),
+                        project=project,
+                        check=check,
+                        channel="slack",
+                        event="recovery",
+                        target=os.environ.get("SLACK_WEBHOOK_URL"),
+                        detail="global Slack webhook send failed",
+                    )
     except Exception:
         logger.exception("Failed to send recovery notification")
 
@@ -1004,6 +1270,18 @@ def notify_incident_slack_update(
                 ],
             }
         )
+    if session is not None and getattr(project, "id", None) is not None:
+        return _queue_delivery(
+            queue_slack_delivery,
+            session=session,
+            project_id=project.id,
+            check_id=getattr(check, "id", None),
+            incident_id=getattr(incident, "id", None),
+            event=f"incident_{action}",
+            payload={"blocks": blocks},
+            fallback_text=f"{summary}: {body}",
+            target=_slack_channel(project, check, incident) or "incident slack thread",
+        )
     slack_ok, slack_target = _post_slack_message(
         project=project,
         check=check,
@@ -1042,6 +1320,23 @@ def notify_incident_pagerduty_update(
     if not dedup_key:
         return False
     _remember_incident_pagerduty_dedup_key(incident, dedup_key=dedup_key, session=session)
+    if session is not None and getattr(project, "id", None) is not None:
+        return _queue_delivery(
+            queue_pagerduty_delivery,
+            session=session,
+            project_id=project.id,
+            check_id=getattr(check, "id", None),
+            incident_id=getattr(incident, "id", None),
+            event=f"incident_{event_action}",
+            summary=summary,
+            severity=severity,
+            event_action=event_action,
+            source=getattr(project, "name", "lastping"),
+            component=getattr(check, "name", None),
+            custom_details=custom_details or {},
+            dedup_key=dedup_key,
+            target="pagerduty integration",
+        )
     return _track_notification_result(
         _send_pagerduty_event_for_project(
             project,
@@ -1099,7 +1394,7 @@ def send_email(subject: str, body: str, to: Optional[str] = None) -> bool:
     return False
 
 
-def notify_escalation(project, reason: str, check=None):
+def notify_escalation(project, reason: str, check=None, session: Optional[Session] = None):
     """Notify escalation via project webhooks and optional email."""
     sent = False
     now_iso = datetime.utcnow().isoformat() + "Z"
@@ -1120,17 +1415,28 @@ def notify_escalation(project, reason: str, check=None):
         }
         if check is not None:
             embed["fields"].append({"name": "Check", "value": getattr(check, "name", "n/a"), "inline": True})
-        sent = _track_notification_result(
-            _post_json(discord_url, {"embeds": [embed]}),
-            project=project,
-            check=check,
-            channel="discord",
-            event="escalation",
-            target=discord_url,
-            detail="project Discord webhook send failed",
-            retry_payload={"embeds": [embed]},
-            request_kind="json_post",
-        ) or sent
+        if session is not None and getattr(project, "id", None) is not None:
+            sent = _queue_delivery(
+                queue_discord_delivery,
+                session=session,
+                project_id=project.id,
+                check_id=getattr(check, "id", None),
+                event="escalation",
+                payload={"embeds": [embed]},
+                target="project discord route",
+            ) or sent
+        else:
+            sent = _track_notification_result(
+                _post_json(discord_url, {"embeds": [embed]}),
+                project=project,
+                check=check,
+                channel="discord",
+                event="escalation",
+                target=discord_url,
+                detail="project Discord webhook send failed",
+                retry_payload={"embeds": [embed]},
+                request_kind="json_post",
+            ) or sent
 
     slack_url = _slack_url(project, check)
     if slack_url and _check_channel_enabled(check, "alert_slack_enabled"):
@@ -1141,52 +1447,91 @@ def notify_escalation(project, reason: str, check=None):
         if check is not None:
             blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"*Check:* {getattr(check, 'name', 'n/a')}"}]})
         attachment = {"color": "#F5A623", "blocks": blocks}
-        sent = _track_notification_result(
-            _post_json(slack_url, {"attachments": [attachment]}),
-            project=project,
-            check=check,
-            channel="slack",
-            event="escalation",
-            target=slack_url,
-            detail="project Slack webhook send failed",
-            retry_payload={"attachments": [attachment]},
-            request_kind="json_post",
-        ) or sent
+        if session is not None and getattr(project, "id", None) is not None:
+            sent = _queue_delivery(
+                queue_slack_delivery,
+                session=session,
+                project_id=project.id,
+                check_id=getattr(check, "id", None),
+                event="escalation",
+                payload={"attachments": [attachment]},
+                fallback_text=summary,
+                target=_slack_channel(project, check) or "project slack route",
+            ) or sent
+        else:
+            sent = _track_notification_result(
+                _post_json(slack_url, {"attachments": [attachment]}),
+                project=project,
+                check=check,
+                channel="slack",
+                event="escalation",
+                target=slack_url,
+                detail="project Slack webhook send failed",
+                retry_payload={"attachments": [attachment]},
+                request_kind="json_post",
+            ) or sent
 
     if _pagerduty_keys(project, check) and _check_channel_enabled(check, "alert_pagerduty_enabled"):
-        sent = _track_notification_result(
-            _send_pagerduty_event_for_project(
-                project,
-                summary,
-                "critical",
-                check=check,
+        if session is not None and getattr(project, "id", None) is not None:
+            sent = _queue_delivery(
+                queue_pagerduty_delivery,
+                session=session,
+                project_id=project.id,
+                check_id=getattr(check, "id", None),
+                event="escalation",
+                summary=summary,
+                severity="critical",
                 event_action="trigger",
                 source=project.name,
                 component=getattr(check, "name", None),
                 custom_details=details,
-            ),
-            project=project,
-            check=check,
-            channel="pagerduty",
-            event="escalation",
-            target="https://events.pagerduty.com/v2/enqueue",
-            detail="PagerDuty escalation event send failed",
-        ) or sent
+                target="pagerduty integration",
+            ) or sent
+        else:
+            sent = _track_notification_result(
+                _send_pagerduty_event_for_project(
+                    project,
+                    summary,
+                    "critical",
+                    check=check,
+                    event_action="trigger",
+                    source=project.name,
+                    component=getattr(check, "name", None),
+                    custom_details=details,
+                ),
+                project=project,
+                check=check,
+                channel="pagerduty",
+                event="escalation",
+                target="https://events.pagerduty.com/v2/enqueue",
+                detail="PagerDuty escalation event send failed",
+            ) or sent
 
     gen_url = _generic_webhook_url(project, check)
     if gen_url and _check_channel_enabled(check, "alert_webhook_enabled"):
         payload = {"event": "escalation", "summary": summary, "details": details}
-        sent = _track_notification_result(
-            send_generic_webhook(gen_url, payload),
-            project=project,
-            check=check,
-            channel="webhook",
-            event="escalation",
-            target=gen_url,
-            detail="generic webhook send failed",
-            retry_payload=payload,
-            request_kind="json_post",
-        ) or sent
+        if session is not None and getattr(project, "id", None) is not None:
+            sent = _queue_delivery(
+                queue_project_webhook_delivery,
+                session=session,
+                project_id=project.id,
+                check_id=getattr(check, "id", None),
+                event="escalation",
+                payload=payload,
+                target="project webhook",
+            ) or sent
+        else:
+            sent = _track_notification_result(
+                send_generic_webhook(gen_url, payload),
+                project=project,
+                check=check,
+                channel="webhook",
+                event="escalation",
+                target=gen_url,
+                detail="generic webhook send failed",
+                retry_payload=payload,
+                request_kind="json_post",
+            ) or sent
 
     esc = os.environ.get("ALERT_ESCALATION_EMAIL")
     if esc:
@@ -1196,15 +1541,28 @@ def notify_escalation(project, reason: str, check=None):
         else:
             subj = f"[LastPing] Escalation: project {project.name} alert threshold exceeded"
             body = f"Project {project.name} has exceeded its alert threshold. Latest reason: {reason}"
-        sent = _track_notification_result(
-            send_email(subj, body, to=esc),
-            project=project,
-            check=check,
-            channel="email",
-            event="escalation",
-            target=esc,
-            detail="escalation email send failed",
-        ) or sent
+        if session is not None and getattr(project, "id", None) is not None:
+            sent = _queue_delivery(
+                queue_email_delivery,
+                session=session,
+                project_id=project.id,
+                check_id=getattr(check, "id", None),
+                event="escalation",
+                subject=subj,
+                body=body,
+                to=esc,
+                target=esc,
+            ) or sent
+        else:
+            sent = _track_notification_result(
+                send_email(subj, body, to=esc),
+                project=project,
+                check=check,
+                channel="email",
+                event="escalation",
+                target=esc,
+                detail="escalation email send failed",
+            ) or sent
     try:
         if _sms_allowed(project, check):
             if check is not None:
@@ -1230,15 +1588,28 @@ def notify_escalation(project, reason: str, check=None):
             else:
                 subj = f"[LastPing] ESCALATION: {project.name}"
                 body = f"Project {project.name} escalation: {reason}"
-            sent = _track_notification_result(
-                send_email(subj, body, to=_oncall_email(project, check)),
-                project=project,
-                check=check,
-                channel="email",
-                event="escalation",
-                target=_oncall_email(project, check),
-                detail="on-call email send failed",
-            ) or sent
+            if session is not None and getattr(project, "id", None) is not None:
+                sent = _queue_delivery(
+                    queue_email_delivery,
+                    session=session,
+                    project_id=project.id,
+                    check_id=getattr(check, "id", None),
+                    event="escalation",
+                    subject=subj,
+                    body=body,
+                    to=_oncall_email(project, check),
+                    target=_oncall_email(project, check),
+                ) or sent
+            else:
+                sent = _track_notification_result(
+                    send_email(subj, body, to=_oncall_email(project, check)),
+                    project=project,
+                    check=check,
+                    channel="email",
+                    event="escalation",
+                    target=_oncall_email(project, check),
+                    detail="on-call email send failed",
+                ) or sent
     except Exception:
         pass
 
@@ -1311,16 +1682,30 @@ def notify_status_subscribers(session: Session, project, check, incident, *, eve
     for subscription in subscriptions:
         try:
             if subscription.channel == "email":
-                sent = _track_notification_result(
-                    send_email(subject, "\n".join(body_lines), to=subscription.target),
-                    project=project,
-                    check=check,
-                    subscription=subscription,
-                    channel="email",
-                    event=f"status_{event}",
-                    target=subscription.target,
-                    detail="public status email send failed",
-                ) or sent
+                if getattr(project, "id", None) is not None:
+                    sent = _queue_delivery(
+                        queue_email_delivery,
+                        session=session,
+                        project_id=project.id,
+                        check_id=getattr(check, "id", None),
+                        incident_id=getattr(incident, "id", None),
+                        event=f"status_{event}",
+                        subject=subject,
+                        body="\n".join(body_lines),
+                        to=subscription.target,
+                        target=subscription.target,
+                    ) or sent
+                else:
+                    sent = _track_notification_result(
+                        send_email(subject, "\n".join(body_lines), to=subscription.target),
+                        project=project,
+                        check=check,
+                        subscription=subscription,
+                        channel="email",
+                        event=f"status_{event}",
+                        target=subscription.target,
+                        detail="public status email send failed",
+                    ) or sent
             elif subscription.channel == "webhook":
                 logger.info(
                     "Skipping disabled public status webhook subscription id=%s project=%s",

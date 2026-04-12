@@ -113,6 +113,23 @@ function renderNotificationFailures(rows){
     root.innerHTML = '<div class="muted">No recent failed deliveries.</div>';
     return;
   }
+  const statusText = (row)=>{
+    const parts = [];
+    if(row.delivery_status) parts.push(row.delivery_status);
+    if(row.attempt_count !== undefined && row.attempt_count !== null){
+      parts.push(`attempt ${row.attempt_count}`);
+    }
+    if(row.dead_at){
+      parts.push(`dead @ ${new Date(row.dead_at).toLocaleString()}`);
+    }else if(row.next_attempt_at && row.delivery_status && row.delivery_status !== "delivered"){
+      parts.push(`next ${new Date(row.next_attempt_at).toLocaleString()}`);
+    }
+    if(row.last_retry_action && row.last_retry_at){
+      parts.push(`${row.last_retry_action} @ ${new Date(row.last_retry_at).toLocaleString()}`);
+    }
+    if(row.detail) parts.push(row.detail);
+    return parts.join(" · ") || "queued";
+  };
   root.innerHTML = `
     <div class="table-wrap">
       <table class="data-table">
@@ -133,7 +150,7 @@ function renderNotificationFailures(rows){
               <td>${escapeHtml(row.channel)}</td>
               <td>${escapeHtml(row.event)}</td>
               <td title="${escapeHtml(row.target || "")}">${escapeHtml(row.target || "n/a")}</td>
-              <td>${escapeHtml(row.last_retry_action ? `${row.last_retry_action} @ ${new Date(row.last_retry_at).toLocaleString()}` : row.detail || "failed")}</td>
+              <td>${escapeHtml(statusText(row))}</td>
               <td>${row.retryable ? `<button class="btn btn-secondary notification-retry-btn" data-failure-id="${row.id}">Retry</button>` : '<span class="muted">Not retryable</span>'}</td>
             </tr>
           `).join("")}

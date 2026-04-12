@@ -9,6 +9,7 @@ def test_worker_notifies_public_status_subscribers_for_open_and_resolve(tmp_path
 
     from src import alerts, db as dbmod, worker
     from src.models import Check, CheckStatus, CheckType, Project, StatusSubscription
+    from src.notification_queue import process_notification_queue
 
     dbmod.create_db_and_tables()
 
@@ -44,6 +45,7 @@ def test_worker_notifies_public_status_subscribers_for_open_and_resolve(tmp_path
         session.refresh(check)
 
         worker.scan_checks_once(session)
+        process_notification_queue(session)
         session.refresh(check)
         assert check.status == CheckStatus.DOWN
 
@@ -55,6 +57,7 @@ def test_worker_notifies_public_status_subscribers_for_open_and_resolve(tmp_path
         session.commit()
 
         worker.scan_checks_once(session)
+        process_notification_queue(session)
         session.refresh(check)
         assert check.status == CheckStatus.UP
 

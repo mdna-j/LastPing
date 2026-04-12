@@ -1,5 +1,4 @@
 import os
-import os
 from pathlib import Path as FilePath
 from datetime import datetime, timezone
 from typing import Optional
@@ -19,15 +18,15 @@ from ..deps import (
     require_admin_or_owner,
     require_project_access,
 )
-from ..jira import create_jira_issue, jira_settings_ready
-from ..models import AuditLog, BrowserCheckArtifact, Check, Event, Incident, IncidentNote, Project
+from ..models import AuditLog, BrowserCheckArtifact, Check, Event, Incident, IncidentNote, NotificationDelivery, Project
+from ..notification_queue import STATUS_PROCESSING, STATUS_QUEUED, STATUS_RETRY, queue_jira_ticket_delivery
 from ..postmortems import (
     build_incident_timeline,
     render_incident_postmortem_markdown,
     render_incident_postmortem_pdf,
 )
 from ..schemas import StrictBaseModel
-from ..secret_lifecycle import SECRET_JIRA_API_TOKEN, active_project_secret_candidates, touch_project_secret_last_used
+from ..secret_lifecycle import SECRET_JIRA_API_TOKEN, active_project_secret_candidates
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["incidents"])
 
@@ -433,6 +432,7 @@ def create_incident_jira_ticket(
     if incident.jira_issue_key and incident.jira_issue_url:
         return {
             "created": False,
+            "queued": False,
             "issue_key": incident.jira_issue_key,
             "issue_url": incident.jira_issue_url,
             "incident": _serialize_incident(incident),
@@ -440,59 +440,65 @@ def create_incident_jira_ticket(
     jira_token_candidates = active_project_secret_candidates(_proj, SECRET_JIRA_API_TOKEN, session=session)
     if not (_proj.jira_base_url and _proj.jira_user_email and _proj.jira_project_key and jira_token_candidates):
         raise HTTPException(status_code=400, detail="Jira settings are incomplete for this project")
+    existing_delivery = session.exec(
+        select(NotificationDelivery)
+        .where(
+            NotificationDelivery.project_id == project_id,
+            NotificationDelivery.incident_id == incident_id,
+            NotificationDelivery.request_kind == "jira_ticket",
+            NotificationDelivery.status.in_([STATUS_QUEUED, STATUS_RETRY, STATUS_PROCESSING]),
+        )
+        .order_by(NotificationDelivery.created_at.desc(), NotificationDelivery.id.desc())
+    ).first()
+    if existing_delivery is not None:
+        return {
+            "created": False,
+            "queued": True,
+            "message": "Jira ticket creation is already queued for this incident.",
+            "delivery_id": existing_delivery.id,
+            "issue_key": None,
+            "issue_url": None,
+            "incident": _serialize_incident(incident),
+        }
+
     check = session.get(Check, incident.check_id)
     summary = f"[LastPing] Incident #{incident.id}: {(check.name if check else f'check {incident.check_id}')} {incident.status}"
-    result = None
-    last_error = None
-    for jira_token in jira_token_candidates:
-        try:
-            result = create_jira_issue(
-                base_url=_proj.jira_base_url or "",
-                email=_proj.jira_user_email or "",
-                api_token=jira_token or "",
-                project_key=_proj.jira_project_key or "",
-                issue_type=_proj.jira_issue_type or "Task",
-                summary=summary,
-                description=_incident_jira_description(session, _proj, incident),
-                labels=["lastping", "incident"],
-            )
-            touch_project_secret_last_used(project_id, SECRET_JIRA_API_TOKEN, session=session)
-            break
-        except Exception as exc:
-            last_error = exc
-    if result is None:
-        raise HTTPException(status_code=502, detail=str(last_error or "Jira issue creation failed"))
-
-    issue_key = result.get("key")
-    issue_url = result.get("url")
-    if not issue_key or not issue_url:
-        raise HTTPException(status_code=502, detail="Jira issue creation did not return an issue key")
-
-    incident.jira_issue_key = issue_key
-    incident.jira_issue_url = issue_url
-    session.add(incident)
-    actor = _audit(
+    actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
+    delivery = queue_jira_ticket_delivery(
         session,
-        request,
-        authorization,
-        x_admin_token,
-        "create_jira_ticket",
-        incident.id,
-        f"issue_key={issue_key}, issue_url={issue_url}",
+        project_id=project_id,
+        check_id=getattr(check, "id", None),
+        incident_id=incident.id,
+        summary=summary,
+        description=_incident_jira_description(session, _proj, incident),
+        labels=["lastping", "incident"],
+        issue_type=_proj.jira_issue_type or "Task",
+        target=_proj.jira_project_key or "jira project",
+        audit_actor=actor,
+        audit_actor_ip=actor_ip,
+        audit_user_agent=user_agent,
+    )
+    session.add(
+        AuditLog(
+            actor=actor,
+            action="queue_jira_ticket",
+            target_type="incident",
+            target_id=incident.id,
+            project_id=incident.project_id,
+            details=f"delivery_id={delivery.id}",
+            actor_ip=actor_ip,
+            user_agent=user_agent,
+        )
     )
     session.commit()
     session.refresh(incident)
-    _notify_slack_thread_update(
-        session,
-        _proj,
-        incident,
-        action="jira_ticket",
-        body=f"Created Jira issue `{issue_key}`{f' by `{actor}`' if actor else ''}: {issue_url}",
-    )
     return {
-        "created": True,
-        "issue_key": issue_key,
-        "issue_url": issue_url,
+        "created": False,
+        "queued": True,
+        "message": "Jira ticket creation queued for background delivery.",
+        "delivery_id": delivery.id,
+        "issue_key": None,
+        "issue_url": None,
         "incident": _serialize_incident(incident),
     }
 

@@ -126,7 +126,7 @@ def test_burn_rate_alert_logs_and_dedupes(tmp_path, monkeypatch):
     os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_burn_rate.sqlite'}"
 
     from sqlmodel import Session, select
-    from src import alerts, db as dbmod
+    from src import db as dbmod
     from src.models import AuditLog, Check, Event, Project
     from src import worker
 
@@ -134,7 +134,7 @@ def test_burn_rate_alert_logs_and_dedupes(tmp_path, monkeypatch):
     worker._LAST_BURN_RATE_RUN = None
 
     notified = []
-    monkeypatch.setattr(alerts, "notify_escalation", lambda project, reason, check=None: notified.append((project.id, reason)) or True)
+    monkeypatch.setattr(worker, "notify_escalation", lambda project, reason, check=None: notified.append((project.id, reason)) or True)
 
     now = datetime.utcnow()
     with Session(dbmod.engine) as session:
@@ -423,14 +423,19 @@ def test_incident_silence_suppresses_realerts_and_oncall(tmp_path, monkeypatch):
         session.commit()
 
         calls = []
+        queued_emails = []
         monkeypatch.setattr(worker, "notify_down", lambda chk, proj, reason=None: calls.append(reason))
-        monkeypatch.setattr(worker, "send_email", lambda *args, **kwargs: True)
+        monkeypatch.setattr(worker, "queue_email_delivery", lambda *args, **kwargs: queued_emails.append((args, kwargs)))
 
         worker.scan_checks_once(session)
 
         alerts = session.exec(select(OnCallAlert).where(OnCallAlert.check_id == check.id)).all()
         assert calls == []
         assert alerts == []
+        assert not any(
+            kwargs.get("event") == "oncall_escalation" or kwargs.get("to") == "ops@example.com"
+            for _args, kwargs in queued_emails
+        )
 
 
 def test_realert_still_down(tmp_path, monkeypatch):

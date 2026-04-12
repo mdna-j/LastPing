@@ -272,6 +272,9 @@ async function createJiraTicket(){
     alert(body && body.detail ? body.detail : "Failed to create Jira ticket.");
     return;
   }
+  if(body && body.message){
+    alert(body.message);
+  }
   await refreshIncidentPage();
 }
 

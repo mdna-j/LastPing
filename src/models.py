@@ -553,6 +553,33 @@ class StatusSubscription(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
 
 
+class NotificationDelivery(SQLModel, table=True):
+    __tablename__ = "notification_delivery"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    check_id: Optional[int] = Field(default=None, foreign_key="check.id", index=True)
+    incident_id: Optional[int] = Field(default=None, foreign_key="incident.id", index=True)
+    subscription_id: Optional[int] = Field(default=None, foreign_key="status_subscription.id", index=True)
+    channel: str = Field(index=True, description="delivery channel: slack, pagerduty, jira, email, webhook, discord")
+    event: str = Field(index=True, description="logical event name such as down, recovery, jira_ticket, or status_opened")
+    request_kind: str = Field(index=True, description="executor kind for this queued delivery")
+    target: Optional[str] = Field(default=None, description="safe display target, never a raw secret")
+    payload_json: str = Field(default="{}", description="JSON-encoded executor payload")
+    status: str = Field(default="queued", index=True, description="queued, retry, processing, delivered, or dead")
+    attempt_count: int = Field(default=0)
+    max_attempts: int = Field(default=5)
+    next_attempt_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    claimed_by: Optional[str] = Field(default=None, index=True)
+    claimed_at: Optional[datetime] = Field(default=None, index=True)
+    last_error: Optional[str] = None
+    last_status_code: Optional[int] = None
+    delivered_at: Optional[datetime] = Field(default=None, index=True)
+    dead_at: Optional[datetime] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    updated_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+
+
 class AuditLog(SQLModel, table=True):
     __tablename__ = "audit_log"
     id: Optional[int] = Field(default=None, primary_key=True)

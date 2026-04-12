@@ -14,7 +14,8 @@ from pydantic import BaseModel, EmailStr, AnyHttpUrl, confloat, constr, root_val
 from sqlmodel import select, Session
 
 from ..db import get_session
-from ..models import AuditLog, ApiKey, OrgRole, Project as ProjectModel, ProjectMembership, Role
+from ..models import AuditLog, ApiKey, NotificationDelivery, OrgRole, Project as ProjectModel, ProjectMembership, Role
+from ..notification_queue import queue_email_delivery, retry_notification_delivery
 from ..security import generate_api_key, hash_api_key
 from ..secret_lifecycle import (
     SECRET_DISCORD_WEBHOOK_URL,
@@ -32,7 +33,7 @@ from ..secret_lifecycle import (
     touch_project_secret_last_used,
     update_project_secret_policy,
 )
-from ..alerts import retry_notification_failure_payload, send_pagerduty_event
+from ..alerts import send_pagerduty_event
 from ..deps import authorize_org_operation, authorize_project_operation, get_audit_context, get_current_user, limit_integration_action_requests, limit_public_requests
 from ..schemas import StrictBaseModel
 import os
@@ -712,12 +713,17 @@ class NotificationFailureOut(BaseModel):
     created_at: datetime
     channel: str
     event: str
+    delivery_status: str
     detail: Optional[str] = None
     target: Optional[str] = None
     check_id: Optional[int] = None
+    incident_id: Optional[int] = None
     subscription_id: Optional[int] = None
     retryable: bool = False
     request_kind: Optional[str] = None
+    attempt_count: int = 0
+    next_attempt_at: Optional[datetime] = None
+    dead_at: Optional[datetime] = None
     last_retry_action: Optional[str] = None
     last_retry_at: Optional[datetime] = None
 
@@ -952,12 +958,19 @@ def rotate_api_key(
     project.api_key_hash = new_hash
     # Email the new key to the project owner when configured. This is
     # the safe most practical delivery mechanism for production usage.
-    from ..alerts import send_email
     if getattr(project, 'owner_email', None):
         subject = f"[LastPing] API key rotated for project {project.name}"
         body = f"A new API key was generated for project {project.name}:\n\n{new_key}\n\nStore this securely; it will not be shown again."
         try:
-            send_email(subject, body, to=project.owner_email)
+            queue_email_delivery(
+                session,
+                project_id=project.id,
+                event="api_key_rotated",
+                subject=subject,
+                body=body,
+                to=project.owner_email,
+                target=project.owner_email,
+            )
         except Exception:
             # We swallow email errors here — rotation still succeeds.
             pass
@@ -1048,10 +1061,17 @@ def rotate_all_keys(request: Request = None, x_admin_token: Optional[str] = Head
         # email rotated key to owner when available
         try:
             if getattr(p, 'owner_email', None):
-                from ..alerts import send_email
                 subj = f"[LastPing] API key rotated for project {p.name}"
                 body = f"A new API key was generated for project {p.name}:\n\n{new_key}\n\nStore this securely; it will not be shown again."
-                send_email(subj, body, to=p.owner_email)
+                queue_email_delivery(
+                    session,
+                    project_id=p.id,
+                    event="api_key_rotated",
+                    subject=subj,
+                    body=body,
+                    to=p.owner_email,
+                    target=p.owner_email,
+                )
         except Exception:
             pass
         # audit per project rotation
@@ -1238,18 +1258,11 @@ def _jira_settings_out(session: Session, project: ProjectModel) -> JiraSettingsO
     )
 
 
-def _notification_failure_out(session: Session, row: AuditLog) -> NotificationFailureOut:
-    details = {}
-    try:
-        parsed = json.loads(row.details or "{}")
-        if isinstance(parsed, dict):
-            details = parsed
-    except Exception:
-        details = {}
+def _notification_failure_out(session: Session, row: NotificationDelivery) -> NotificationFailureOut:
     last_retry = session.exec(
         select(AuditLog)
         .where(
-            AuditLog.target_type == "audit_log",
+            AuditLog.target_type == "notification_delivery",
             AuditLog.target_id == row.id,
             AuditLog.action.in_(["notification_retry", "notification_retry_failed"]),
         )
@@ -1258,14 +1271,19 @@ def _notification_failure_out(session: Session, row: AuditLog) -> NotificationFa
     return NotificationFailureOut(
         id=row.id,
         created_at=row.created_at,
-        channel=str(details.get("channel") or "unknown"),
-        event=str(details.get("event") or "unknown"),
-        detail=details.get("detail"),
-        target=details.get("target"),
-        check_id=details.get("check_id"),
-        subscription_id=details.get("subscription_id"),
-        retryable=bool(details.get("retryable")),
-        request_kind=details.get("request_kind"),
+        channel=row.channel,
+        event=row.event,
+        delivery_status=row.status,
+        detail=row.last_error,
+        target=row.target,
+        check_id=row.check_id,
+        incident_id=row.incident_id,
+        subscription_id=row.subscription_id,
+        retryable=row.status != "processing",
+        request_kind=row.request_kind,
+        attempt_count=row.attempt_count,
+        next_attempt_at=row.next_attempt_at,
+        dead_at=row.dead_at,
         last_retry_action=last_retry.action if last_retry else None,
         last_retry_at=last_retry.created_at if last_retry else None,
     )
@@ -1590,13 +1608,12 @@ def list_project_notification_failures(
         session=session,
     )
     rows = session.exec(
-        select(AuditLog)
+        select(NotificationDelivery)
         .where(
-            AuditLog.action == "notification_failed",
-            AuditLog.target_type == "project",
-            AuditLog.target_id == project_id,
+            NotificationDelivery.project_id == project_id,
+            NotificationDelivery.status.in_(["queued", "retry", "dead"]),
         )
-        .order_by(AuditLog.created_at.desc())
+        .order_by(NotificationDelivery.created_at.desc())
     ).all()
     capped = rows[: max(1, min(int(limit or 20), 100))]
     return [_notification_failure_out(session, row) for row in capped]
@@ -1621,27 +1638,23 @@ def retry_project_notification_failure(
         x_api_key=x_api_key,
         session=session,
     )
-    row = session.get(AuditLog, failure_id)
-    if not row or row.action != "notification_failed" or row.target_type != "project" or row.target_id != project_id:
+    row = session.get(NotificationDelivery, failure_id)
+    if not row or row.project_id != project_id:
         raise HTTPException(status_code=404, detail="Notification failure not found")
-    try:
-        details = json.loads(row.details or "{}")
-    except Exception:
-        details = {}
-    result = retry_notification_failure_payload(details)
+    result = retry_notification_delivery(session, row, worker_id="manual-retry")
     actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
     session.add(
         AuditLog(
-            actor=actor,
+            actor=actor or "manual-retry",
             action="notification_retry" if result.get("ok") else "notification_retry_failed",
-            target_type="audit_log",
+            target_type="notification_delivery",
             target_id=row.id,
             details=json.dumps(
                 {
                     "source_failure_id": row.id,
-                    "target": result.get("target") or details.get("target"),
+                    "target": row.target,
                     "retry_ok": bool(result.get("ok")),
-                    "response": result.get("response"),
+                    "response": {"status": result.get("status"), "delivery_status": result.get("delivery_status")},
                     "message": result.get("detail"),
                 }
             ),
@@ -1653,10 +1666,9 @@ def retry_project_notification_failure(
     session.commit()
     if not result.get("ok"):
         raise HTTPException(status_code=502, detail=result.get("detail") or "Retry failed")
-    response = result.get("response") or {}
     return NotificationRetryResult(
         ok=True,
-        message="Retried webhook delivery.",
-        target=result.get("target"),
-        status=response.get("status"),
+        message="Retried queued delivery.",
+        target=row.target,
+        status=result.get("status"),
     )
