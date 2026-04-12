@@ -244,25 +244,6 @@ def _track_notification_result(
     return False
 
 
-def retry_notification_failure_payload(details: dict) -> dict:
-    if not isinstance(details, dict):
-        return {"ok": False, "detail": "Invalid failure payload"}
-    if details.get("request_kind") != "json_post":
-        return {"ok": False, "detail": "Failure does not support automatic retry"}
-    target = details.get("target")
-    payload = details.get("retry_payload")
-    if not isinstance(target, str) or not target.startswith(("http://", "https://")):
-        return {"ok": False, "detail": "No retryable webhook target recorded"}
-    if not isinstance(payload, dict):
-        return {"ok": False, "detail": "No retryable payload recorded"}
-    response = _post_json_with_response(target, payload)
-    return {
-        "ok": bool(response and response.get("ok")),
-        "target": target,
-        "response": response,
-    }
-
-
 def _queue_delivery(queue_func, **kwargs) -> bool:
     session = kwargs.pop("session", None)
     if session is None:
