@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from datetime import datetime
 import secrets
 import os
@@ -13,11 +15,13 @@ from ..models import (
     AuditLog,
     OrgRole,
     Organization,
+    OrganizationGroupMapping,
     OrganizationMembership,
     Project,
     ProjectTeamAccess,
     Role,
     Team,
+    TeamGroupMapping,
     TeamMembership,
     TeamRole,
     User,
@@ -72,6 +76,49 @@ def _require_team_write_access(
     return membership
 
 
+def _record_org_audit(
+    session: Session,
+    *,
+    request: Optional[Request],
+    authorization: Optional[str],
+    x_admin_token: Optional[str],
+    org_id: int,
+    action: str,
+    target_type: str,
+    target_id: Optional[int],
+    details: Optional[str],
+    team_id: Optional[int] = None,
+    project_id: Optional[int] = None,
+) -> None:
+    actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
+    session.add(
+        AuditLog(
+            actor=actor,
+            action=action,
+            target_type=target_type,
+            target_id=target_id,
+            details=details,
+            actor_ip=actor_ip,
+            user_agent=user_agent,
+            **_audit_scope(org_id, team_id=team_id, project_id=project_id),
+        )
+    )
+    session.commit()
+
+
+def _serialize_group_mapping(mapping: OrganizationGroupMapping | TeamGroupMapping, *, scope: str) -> GroupMappingRead:
+    return GroupMappingRead(
+        id=mapping.id,
+        scope=scope,
+        organization_id=mapping.organization_id,
+        team_id=getattr(mapping, "team_id", None),
+        provider=mapping.provider,
+        external_group=mapping.external_group,
+        role=mapping.role,
+        created_at=mapping.created_at,
+    )
+
+
 class OrgCreate(StrictBaseModel):
     name: constr(min_length=1, max_length=120)
     slug: Optional[constr(min_length=1, max_length=120)] = None
@@ -121,6 +168,38 @@ class TeamMemberIn(StrictBaseModel):
 
 class TeamProjectAccessIn(StrictBaseModel):
     role: constr(regex=r"^(owner|admin|editor|viewer)$") = Role.VIEWER.value
+
+
+class ScimSettingsRead(BaseModel):
+    configured: bool
+    last_rotated_at: Optional[datetime]
+
+
+class ScimRotateRead(ScimSettingsRead):
+    bearer_token: str
+
+
+class OrgGroupMappingIn(StrictBaseModel):
+    provider: constr(min_length=1, max_length=80)
+    external_group: constr(min_length=1, max_length=255)
+    role: constr(regex=r"^(owner|admin|member)$") = OrgRole.MEMBER.value
+
+
+class TeamGroupMappingIn(StrictBaseModel):
+    provider: constr(min_length=1, max_length=80)
+    external_group: constr(min_length=1, max_length=255)
+    role: constr(regex=r"^(lead|member)$") = TeamRole.MEMBER.value
+
+
+class GroupMappingRead(BaseModel):
+    id: int
+    scope: str
+    organization_id: int
+    team_id: Optional[int] = None
+    provider: str
+    external_group: str
+    role: str
+    created_at: datetime
 
 
 @router.post("/", response_model=OrgRead, status_code=status.HTTP_201_CREATED)
@@ -411,3 +490,225 @@ def grant_team_project_access(
     )
     session.commit()
     return {"project_id": project_id, "team_id": team_id, "role": access.role}
+
+
+@router.get("/{org_id}/scim-settings", response_model=ScimSettingsRead)
+def get_scim_settings(
+    org_id: int = Path(..., ge=1),
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    authorize_org_operation(org_id, min_role=OrgRole.ADMIN.value, authorization=authorization, x_admin_token=x_admin_token, session=session)
+    org = session.get(Organization, org_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    return ScimSettingsRead(
+        configured=bool((org.scim_bearer_token or "").strip()),
+        last_rotated_at=org.scim_last_rotated_at,
+    )
+
+
+@router.post("/{org_id}/scim-settings/rotate", response_model=ScimRotateRead)
+def rotate_scim_bearer_token(
+    org_id: int = Path(..., ge=1),
+    request: Request = None,
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    authorize_org_operation(org_id, min_role=OrgRole.ADMIN.value, authorization=authorization, x_admin_token=x_admin_token, session=session)
+    org = session.get(Organization, org_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    bearer_token = f"lp_scim_{secrets.token_urlsafe(32)}"
+    org.scim_bearer_token = bearer_token
+    org.scim_last_rotated_at = datetime.utcnow()
+    session.add(org)
+    session.commit()
+    _record_org_audit(
+        session,
+        request=request,
+        authorization=authorization,
+        x_admin_token=x_admin_token,
+        org_id=org_id,
+        action="rotate_scim_bearer_token",
+        target_type="organization",
+        target_id=org.id,
+        details="rotated organization SCIM bearer token",
+    )
+    return ScimRotateRead(
+        configured=True,
+        last_rotated_at=org.scim_last_rotated_at,
+        bearer_token=bearer_token,
+    )
+
+
+@router.get("/{org_id}/group-mappings", response_model=List[GroupMappingRead])
+def list_group_mappings(
+    org_id: int = Path(..., ge=1),
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    authorize_org_operation(org_id, min_role=OrgRole.ADMIN.value, authorization=authorization, x_admin_token=x_admin_token, session=session)
+    org_mappings = session.exec(
+        select(OrganizationGroupMapping).where(OrganizationGroupMapping.organization_id == org_id)
+    ).all()
+    team_mappings = session.exec(
+        select(TeamGroupMapping).where(TeamGroupMapping.organization_id == org_id)
+    ).all()
+    rows = [_serialize_group_mapping(mapping, scope="organization") for mapping in org_mappings]
+    rows.extend(_serialize_group_mapping(mapping, scope="team") for mapping in team_mappings)
+    rows.sort(key=lambda row: (row.scope, row.provider.lower(), row.external_group.lower(), row.team_id or 0))
+    return rows
+
+
+@router.post("/{org_id}/group-mappings/org", response_model=GroupMappingRead)
+def upsert_org_group_mapping(
+    org_id: int = Path(..., ge=1),
+    payload: OrgGroupMappingIn = Body(...),
+    request: Request = None,
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    authorize_org_operation(org_id, min_role=OrgRole.ADMIN.value, authorization=authorization, x_admin_token=x_admin_token, session=session)
+    mapping = session.exec(
+        select(OrganizationGroupMapping).where(
+            OrganizationGroupMapping.organization_id == org_id,
+            OrganizationGroupMapping.provider == payload.provider,
+            OrganizationGroupMapping.external_group == payload.external_group,
+        )
+    ).first()
+    if mapping is None:
+        mapping = OrganizationGroupMapping(
+            organization_id=org_id,
+            provider=payload.provider,
+            external_group=payload.external_group,
+            role=payload.role,
+        )
+    else:
+        mapping.role = payload.role
+    session.add(mapping)
+    session.commit()
+    session.refresh(mapping)
+    _record_org_audit(
+        session,
+        request=request,
+        authorization=authorization,
+        x_admin_token=x_admin_token,
+        org_id=org_id,
+        action="upsert_org_group_mapping",
+        target_type="organization_group_mapping",
+        target_id=mapping.id,
+        details=f"provider={mapping.provider}, external_group={mapping.external_group}, role={mapping.role}",
+    )
+    return _serialize_group_mapping(mapping, scope="organization")
+
+
+@router.post("/{org_id}/group-mappings/team/{team_id}", response_model=GroupMappingRead)
+def upsert_team_group_mapping(
+    org_id: int = Path(..., ge=1),
+    team_id: int = Path(..., ge=1),
+    payload: TeamGroupMappingIn = Body(...),
+    request: Request = None,
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    authorize_org_operation(org_id, min_role=OrgRole.ADMIN.value, authorization=authorization, x_admin_token=x_admin_token, session=session)
+    _ensure_team_in_org(session, org_id, team_id)
+    mapping = session.exec(
+        select(TeamGroupMapping).where(
+            TeamGroupMapping.organization_id == org_id,
+            TeamGroupMapping.team_id == team_id,
+            TeamGroupMapping.provider == payload.provider,
+            TeamGroupMapping.external_group == payload.external_group,
+        )
+    ).first()
+    if mapping is None:
+        mapping = TeamGroupMapping(
+            organization_id=org_id,
+            team_id=team_id,
+            provider=payload.provider,
+            external_group=payload.external_group,
+            role=payload.role,
+        )
+    else:
+        mapping.role = payload.role
+    session.add(mapping)
+    session.commit()
+    session.refresh(mapping)
+    _record_org_audit(
+        session,
+        request=request,
+        authorization=authorization,
+        x_admin_token=x_admin_token,
+        org_id=org_id,
+        action="upsert_team_group_mapping",
+        target_type="team_group_mapping",
+        target_id=mapping.id,
+        details=f"provider={mapping.provider}, external_group={mapping.external_group}, role={mapping.role}",
+        team_id=team_id,
+    )
+    return _serialize_group_mapping(mapping, scope="team")
+
+
+@router.delete("/{org_id}/group-mappings/org/{mapping_id}", response_model=dict)
+def delete_org_group_mapping(
+    org_id: int = Path(..., ge=1),
+    mapping_id: int = Path(..., ge=1),
+    request: Request = None,
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    authorize_org_operation(org_id, min_role=OrgRole.ADMIN.value, authorization=authorization, x_admin_token=x_admin_token, session=session)
+    mapping = session.get(OrganizationGroupMapping, mapping_id)
+    if not mapping or mapping.organization_id != org_id:
+        raise HTTPException(status_code=404, detail="Group mapping not found")
+    session.delete(mapping)
+    session.commit()
+    _record_org_audit(
+        session,
+        request=request,
+        authorization=authorization,
+        x_admin_token=x_admin_token,
+        org_id=org_id,
+        action="delete_org_group_mapping",
+        target_type="organization_group_mapping",
+        target_id=mapping_id,
+        details=None,
+    )
+    return {"deleted": True}
+
+
+@router.delete("/{org_id}/group-mappings/team/{mapping_id}", response_model=dict)
+def delete_team_group_mapping(
+    org_id: int = Path(..., ge=1),
+    mapping_id: int = Path(..., ge=1),
+    request: Request = None,
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    authorize_org_operation(org_id, min_role=OrgRole.ADMIN.value, authorization=authorization, x_admin_token=x_admin_token, session=session)
+    mapping = session.get(TeamGroupMapping, mapping_id)
+    if not mapping or mapping.organization_id != org_id:
+        raise HTTPException(status_code=404, detail="Group mapping not found")
+    session.delete(mapping)
+    session.commit()
+    _record_org_audit(
+        session,
+        request=request,
+        authorization=authorization,
+        x_admin_token=x_admin_token,
+        org_id=org_id,
+        action="delete_team_group_mapping",
+        target_type="team_group_mapping",
+        target_id=mapping_id,
+        details=None,
+        team_id=mapping.team_id,
+    )
+    return {"deleted": True}

@@ -225,6 +225,8 @@ class Organization(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str = Field(index=True)
     slug: Optional[str] = Field(default=None, index=True)
+    scim_bearer_token: Optional[str] = _encrypted_field(description="org-scoped SCIM bearer token")
+    scim_last_rotated_at: Optional[datetime] = Field(default=None)
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
     memberships: List["OrganizationMembership"] = Relationship(back_populates="organization")
@@ -267,6 +269,27 @@ class TeamMembership(SQLModel, table=True):
 
     team: Optional["Team"] = Relationship(back_populates="memberships")
     user: Optional["User"] = Relationship(back_populates="team_memberships")
+
+
+class OrganizationGroupMapping(SQLModel, table=True):
+    __tablename__ = "organization_group_mapping"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    organization_id: int = Field(foreign_key="organization.id", index=True)
+    provider: str = Field(index=True)
+    external_group: str = Field(index=True)
+    role: str = Field(default=OrgRole.MEMBER.value, index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class TeamGroupMapping(SQLModel, table=True):
+    __tablename__ = "team_group_mapping"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    organization_id: int = Field(foreign_key="organization.id", index=True)
+    team_id: int = Field(foreign_key="team.id", index=True)
+    provider: str = Field(index=True)
+    external_group: str = Field(index=True)
+    role: str = Field(default=TeamRole.MEMBER.value, index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 class ProjectTeamAccess(SQLModel, table=True):
@@ -352,6 +375,7 @@ class UserIdentity(SQLModel, table=True):
     provider_subject: str = Field(index=True)
     email: Optional[str] = Field(default=None, index=True)
     display_name: Optional[str] = Field(default=None)
+    last_groups_json: Optional[str] = Field(default=None, sa_column=sa.Column(sa.Text(), nullable=True))
     created_at: datetime = Field(default_factory=datetime.utcnow)
     last_login_at: Optional[datetime] = Field(default=None)
 

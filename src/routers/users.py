@@ -31,6 +31,7 @@ from ..enterprise_auth import (
     verify_auth_payload,
     verify_totp_code,
 )
+from ..identity_sync import sync_identity_groups
 from ..models import (
     AuditLog,
     OrgRole,
@@ -667,6 +668,14 @@ def finish_sso_login(
     identity.display_name = profile["display_name"]
     identity.last_login_at = now
     session.add(identity)
+    sync_summary = sync_identity_groups(
+        session,
+        user=user,
+        identity=identity,
+        provider=provider_cfg.name,
+        groups=profile.get("groups"),
+        occurred_at=now,
+    )
     session.commit()
 
     token, token_row = _issue_user_session(
@@ -682,7 +691,11 @@ def finish_sso_login(
         action="user_sso_login",
         target_type="user",
         target_id=user.id,
-        details=f"provider={provider_cfg.name}",
+        details=(
+            f"provider={provider_cfg.name},groups={sync_summary['group_count']},"
+            f"org_added={sync_summary['org_memberships_added']},org_upgraded={sync_summary['org_roles_upgraded']},"
+            f"team_added={sync_summary['team_memberships_added']},team_upgraded={sync_summary['team_roles_upgraded']}"
+        ),
         request=request,
         actor_override=f"user:{user.id}",
     )

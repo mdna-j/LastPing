@@ -132,6 +132,36 @@ def _env(name: str) -> str:
     return (os.environ.get(name) or "").strip()
 
 
+def _configured_group_claim(provider_name: str) -> str:
+    claim = _env(f"SSO_{provider_name.upper()}_GROUPS_CLAIM")
+    return claim or "groups"
+
+
+def _extract_group_values(payload: dict[str, Any], *, provider_name: str) -> list[str]:
+    raw_groups = payload.get(_configured_group_claim(provider_name))
+    if raw_groups is None:
+        return []
+    if isinstance(raw_groups, str):
+        candidates = [raw_groups]
+    elif isinstance(raw_groups, (list, tuple, set)):
+        candidates = [str(item or "").strip() for item in raw_groups]
+    else:
+        candidates = [str(raw_groups).strip()]
+    groups: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        normalized = candidate.strip()
+        if not normalized:
+            continue
+        lowered = normalized.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        groups.append(normalized)
+    groups.sort(key=str.lower)
+    return groups
+
+
 def _oidc_like_provider(
     *,
     name: str,
@@ -251,7 +281,7 @@ def _pick_github_email(access_token: str, emails_url: str) -> Optional[str]:
     return None
 
 
-def fetch_sso_profile(provider: SsoProvider, token_payload: dict[str, Any]) -> dict[str, str]:
+def fetch_sso_profile(provider: SsoProvider, token_payload: dict[str, Any]) -> dict[str, Any]:
     access_token = str(token_payload.get("access_token") or "").strip()
     if not access_token:
         raise RuntimeError("SSO provider did not return an access token")
@@ -274,4 +304,9 @@ def fetch_sso_profile(provider: SsoProvider, token_payload: dict[str, Any]) -> d
         display_name = str(payload.get("name") or payload.get("preferred_username") or email).strip()
     if not subject or not email:
         raise RuntimeError("SSO provider response is missing subject or email")
-    return {"subject": subject, "email": email, "display_name": display_name}
+    return {
+        "subject": subject,
+        "email": email,
+        "display_name": display_name,
+        "groups": _extract_group_values(payload, provider_name=provider.name),
+    }

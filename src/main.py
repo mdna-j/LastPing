@@ -28,6 +28,7 @@ from .routers.oncall import router as oncall_router
 from .routers.orgs import router as orgs_router
 from .routers.observability import router as observability_router
 from .routers.remediation import router as remediation_router
+from .routers.scim import router as scim_router
 from .deps import limit_public_requests
 
 
@@ -145,3 +146,4 @@ app.include_router(oncall_router)
 app.include_router(orgs_router)
 app.include_router(observability_router)
 app.include_router(remediation_router)
+app.include_router(scim_router)
