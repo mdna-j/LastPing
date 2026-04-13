@@ -403,6 +403,18 @@ def _record_dead_letter_audit(session: Session, delivery: NotificationDelivery) 
             user_agent=None,
         )
     )
+    session.add(
+        AuditLog(
+            actor="delivery_queue",
+            action="notification_dead",
+            target_type="notification_delivery",
+            target_id=delivery.id,
+            project_id=delivery.project_id,
+            details=_json_dumps(details),
+            actor_ip=None,
+            user_agent=None,
+        )
+    )
 
 
 def _mark_delivery_result(
@@ -704,3 +716,71 @@ def retry_notification_delivery(session: Session, delivery: NotificationDelivery
     if refreshed is None:
         return {"ok": False, "detail": "Notification delivery not found"}
     return process_notification_delivery(session, refreshed, now=now)
+
+
+def cancel_notification_delivery(session: Session, delivery: NotificationDelivery, *, reason: Optional[str] = None) -> dict[str, Any]:
+    now = _now()
+    detail = _safe_error_text(reason) or "Canceled by operator"
+    result = session.exec(
+        update(NotificationDelivery)
+        .where(
+            NotificationDelivery.id == delivery.id,
+            NotificationDelivery.status.in_([STATUS_QUEUED, STATUS_RETRY]),
+        )
+        .values(
+            status=STATUS_DEAD,
+            claimed_by=None,
+            claimed_at=None,
+            dead_at=now,
+            next_attempt_at=now,
+            last_error=detail,
+            updated_at=now,
+        )
+    )
+    if int(getattr(result, "rowcount", 0) or 0) != 1:
+        session.rollback()
+        return {"ok": False, "detail": "Only queued or retry deliveries can be canceled"}
+    session.commit()
+    refreshed = session.get(NotificationDelivery, delivery.id)
+    if refreshed is None:
+        return {"ok": False, "detail": "Notification delivery not found"}
+    return {
+        "ok": True,
+        "detail": detail,
+        "delivery_status": refreshed.status,
+        "status": refreshed.last_status_code,
+    }
+
+
+def poison_notification_delivery(session: Session, delivery: NotificationDelivery, *, reason: Optional[str] = None) -> dict[str, Any]:
+    now = _now()
+    detail = _safe_error_text(reason) or "Poisoned by operator"
+    result = session.exec(
+        update(NotificationDelivery)
+        .where(
+            NotificationDelivery.id == delivery.id,
+            NotificationDelivery.status.in_([STATUS_QUEUED, STATUS_RETRY]),
+        )
+        .values(
+            status=STATUS_DEAD,
+            claimed_by=None,
+            claimed_at=None,
+            dead_at=now,
+            next_attempt_at=now,
+            last_error=detail,
+            updated_at=now,
+        )
+    )
+    if int(getattr(result, "rowcount", 0) or 0) != 1:
+        session.rollback()
+        return {"ok": False, "detail": "Only queued or retry deliveries can be poisoned"}
+    session.commit()
+    refreshed = session.get(NotificationDelivery, delivery.id)
+    if refreshed is None:
+        return {"ok": False, "detail": "Notification delivery not found"}
+    return {
+        "ok": True,
+        "detail": detail,
+        "delivery_status": refreshed.status,
+        "status": refreshed.last_status_code,
+    }

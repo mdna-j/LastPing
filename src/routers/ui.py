@@ -1616,10 +1616,44 @@ def project_settings_page(project_id: int = Path(..., ge=1)):
 
         <section class="card">
           <div class="section-head">
-            <h3>Webhook Delivery Failures</h3>
-            <div class="muted">Inspect recent failed webhook-style deliveries and retry supported ones.</div>
+            <h3>Delivery Queue Ops</h3>
+            <div class="muted">Inspect queued work, replay dead letters, and control retry behavior per delivery.</div>
           </div>
-          <div id="notificationFailures" class="muted">Loading failed delivery history...</div>
+          <div class="row">
+            <label>Status:
+              <select id="deliveryStatusFilter" style="width:180px">
+                <option value="actionable">actionable</option>
+                <option value="all">all</option>
+                <option value="queued">queued</option>
+                <option value="retry">retrying</option>
+                <option value="processing">processing</option>
+                <option value="dead">dead</option>
+                <option value="delivered">delivered</option>
+              </select>
+            </label>
+            <label>Channel:
+              <select id="deliveryChannelFilter" style="width:170px">
+                <option value="all">all</option>
+                <option value="email">email</option>
+                <option value="webhook">webhook</option>
+                <option value="slack">slack</option>
+                <option value="discord">discord</option>
+                <option value="pagerduty">pagerduty</option>
+                <option value="jira">jira</option>
+              </select>
+            </label>
+            <label>Rows:
+              <select id="deliveryLimit" style="width:120px">
+                <option value="20">20</option>
+                <option value="40" selected>40</option>
+                <option value="80">80</option>
+              </select>
+            </label>
+            <button id="refreshDeliveryQueueBtn" class="btn btn-secondary" type="button">Refresh Queue</button>
+          </div>
+          <div id="deliveryQueueCards" class="kpi-grid"></div>
+          <div id="notificationFailures" class="muted">Loading delivery queue...</div>
+          <div id="deliveryInspectPanel" class="queue-inspect-card hidden"></div>
         </section>
       </main>
     </div>

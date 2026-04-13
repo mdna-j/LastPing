@@ -29,6 +29,9 @@ def test_main_ui_pages_render_expected_shell_and_auth_inputs(tmp_path):
         assert heading in resp.text
         assert marker in resp.text
         assert "health-strip" in resp.text
+        if path == "/ui/projects/1/settings":
+            assert 'id="deliveryStatusFilter"' in resp.text
+            assert 'id="deliveryInspectPanel"' in resp.text
 
 
 def test_dashboard_health_returns_expected_summary_fields(tmp_path):

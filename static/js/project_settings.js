@@ -9,6 +9,7 @@ function headersSettings(){
 
 let clearJiraApiTokenRequested = false;
 let clearPagerdutyIntegrationKeyRequested = false;
+let selectedDeliveryId = null;
 
 function escapeHtml(value){
   return String(value ?? "")
@@ -163,6 +164,197 @@ function renderNotificationFailures(rows){
   });
 }
 
+function queueBadgeClass(status){
+  if(status === "dead") return "queue-badge queue-badge-dead";
+  if(status === "retry") return "queue-badge queue-badge-retry";
+  if(status === "processing") return "queue-badge queue-badge-processing";
+  if(status === "delivered") return "queue-badge queue-badge-delivered";
+  return "queue-badge queue-badge-queued";
+}
+
+function renderDeliveryQueueCards(rows){
+  const root = document.getElementById("deliveryQueueCards");
+  if(!root) return;
+  const deliveries = Array.isArray(rows) ? rows : [];
+  const count = (status)=> deliveries.filter((row)=> row.delivery_status === status).length;
+  const items = [
+    ["Queued", count("queued"), count("queued") > 0 ? "kpi-warning" : "kpi-neutral", "Waiting for first send attempt"],
+    ["Retrying", count("retry"), count("retry") > 0 ? "kpi-warning" : "kpi-neutral", "Backoff or manual replay candidates"],
+    ["Processing", count("processing"), count("processing") > 0 ? "kpi-warning" : "kpi-healthy", "Currently claimed by a worker"],
+    ["Dead", count("dead"), count("dead") > 0 ? "kpi-critical" : "kpi-healthy", "Needs inspect, replay, or discard action"],
+  ];
+  root.innerHTML = items.map(([label, value, state, sub])=> `
+    <article class="card kpi-card ${state}">
+      <div class="metric-label">${escapeHtml(label)}</div>
+      <div class="metric-value">${escapeHtml(value)}</div>
+      <div class="metric-sub">${escapeHtml(sub)}</div>
+    </article>
+  `).join("");
+}
+
+function renderDeliveryInspect(detail){
+  const root = document.getElementById("deliveryInspectPanel");
+  if(!root) return;
+  if(!detail){
+    root.classList.add("hidden");
+    root.innerHTML = "";
+    return;
+  }
+  const payloadPreview = detail.payload_preview && Object.keys(detail.payload_preview).length
+    ? JSON.stringify(detail.payload_preview, null, 2)
+    : "No payload preview available.";
+  const history = Array.isArray(detail.retry_history) ? detail.retry_history : [];
+  root.classList.remove("hidden");
+  root.innerHTML = `
+    <div class="section-head">
+      <h3>Delivery Inspect</h3>
+      <div class="muted">Queue item #${escapeHtml(detail.id)} · ${escapeHtml(detail.channel)} / ${escapeHtml(detail.event)}</div>
+    </div>
+    <div class="queue-inspect-grid">
+      <div class="queue-inspect-block">
+        <div class="queue-inspect-meta">
+          <div><span class="muted">Status</span><div><span class="${queueBadgeClass(detail.delivery_status)}">${escapeHtml(detail.delivery_status)}</span></div></div>
+          <div><span class="muted">Attempts</span><div>${escapeHtml(detail.attempt_count)} / ${escapeHtml(detail.max_attempts)}</div></div>
+          <div><span class="muted">Target</span><div>${escapeHtml(detail.target || "n/a")}</div></div>
+          <div><span class="muted">Claimed by</span><div>${escapeHtml(detail.claimed_by || "unclaimed")}</div></div>
+          <div><span class="muted">Next attempt</span><div>${escapeHtml(detail.next_attempt_at ? new Date(detail.next_attempt_at).toLocaleString() : "n/a")}</div></div>
+          <div><span class="muted">HTTP status</span><div>${escapeHtml(detail.last_status_code ?? "n/a")}</div></div>
+          <div><span class="muted">Incident</span><div>${escapeHtml(detail.incident_id ?? "n/a")}</div></div>
+          <div><span class="muted">Check</span><div>${escapeHtml(detail.check_id ?? "n/a")}</div></div>
+        </div>
+        <div class="queue-detail-note">
+          <strong>Last error:</strong> ${escapeHtml(detail.last_error || "none")}
+        </div>
+      </div>
+      <div class="queue-inspect-block">
+        <div class="queue-block-title">Payload preview</div>
+        <pre class="queue-payload-preview">${escapeHtml(payloadPreview)}</pre>
+      </div>
+    </div>
+    <div class="queue-history-block">
+      <div class="queue-block-title">Retry / ops history</div>
+      ${history.length ? `
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>When</th>
+                <th>Action</th>
+                <th>Actor</th>
+                <th>Detail</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${history.map((entry)=> `
+                <tr>
+                  <td>${escapeHtml(new Date(entry.created_at).toLocaleString())}</td>
+                  <td>${escapeHtml(entry.action)}</td>
+                  <td>${escapeHtml(entry.actor || "system")}</td>
+                  <td>${escapeHtml(entry.detail || "n/a")}</td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </div>
+      ` : '<div class="muted">No retry or operator history recorded for this delivery yet.</div>'}
+    </div>
+  `;
+}
+
+async function inspectNotificationDelivery(deliveryId){
+  const pid = document.getElementById("projectId").value || "1";
+  const headers = headersSettings();
+  const root = document.getElementById("deliveryInspectPanel");
+  if(root){
+    root.classList.remove("hidden");
+    root.innerHTML = '<div class="muted">Loading delivery details...</div>';
+  }
+  try{
+    const res = await fetch(`/projects/${pid}/notification-deliveries/${deliveryId}`, {headers});
+    const body = await res.json().catch(()=> ({}));
+    if(!res.ok){
+      const detail = body && body.detail ? body.detail : "Failed to inspect delivery";
+      if(root) root.innerHTML = `<div class="muted">${escapeHtml(detail)}</div>`;
+      return;
+    }
+    selectedDeliveryId = Number(deliveryId);
+    renderDeliveryInspect(body);
+  }catch(_e){
+    if(root) root.innerHTML = '<div class="muted">Failed to inspect delivery.</div>';
+  }
+}
+
+function renderNotificationFailures(rows){
+  const root = document.getElementById("notificationFailures");
+  if(!root) return;
+  const deliveries = Array.isArray(rows) ? rows : [];
+  renderDeliveryQueueCards(deliveries);
+  if(!deliveries.length){
+    root.innerHTML = '<div class="muted">No deliveries match the current filters.</div>';
+    renderDeliveryInspect(null);
+    return;
+  }
+  root.innerHTML = `
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>When</th>
+            <th>Channel</th>
+            <th>Event</th>
+            <th>Target</th>
+            <th>Summary</th>
+            <th>Status</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${deliveries.map((row)=> `
+            <tr class="queue-row ${selectedDeliveryId === row.id ? "queue-row-selected" : ""}" data-delivery-id="${row.id}">
+              <td>${escapeHtml(new Date(row.created_at).toLocaleString())}</td>
+              <td>${escapeHtml(row.channel)}</td>
+              <td>${escapeHtml(row.event)}</td>
+              <td title="${escapeHtml(row.target || "")}">${escapeHtml(row.target || "n/a")}</td>
+              <td title="${escapeHtml(row.payload_summary || "")}">${escapeHtml(row.payload_summary || "n/a")}</td>
+              <td>
+                <div><span class="${queueBadgeClass(row.delivery_status)}">${escapeHtml(row.delivery_status)}</span></div>
+                <div class="muted">attempt ${escapeHtml(row.attempt_count)} / ${escapeHtml(row.max_attempts)}</div>
+                <div class="muted">${escapeHtml(row.last_error || "")}</div>
+              </td>
+              <td>
+                <div class="queue-action-row">
+                  <button class="btn btn-secondary queue-inspect-btn" data-delivery-id="${row.id}">Inspect</button>
+                  <button class="btn btn-secondary queue-retry-btn" data-delivery-id="${row.id}" ${row.retryable ? "" : "disabled"}>Replay</button>
+                  <button class="btn btn-secondary queue-cancel-btn" data-delivery-id="${row.id}" ${row.cancelable ? "" : "disabled"}>Cancel</button>
+                  <button class="btn btn-secondary queue-poison-btn" data-delivery-id="${row.id}" ${row.poisonable ? "" : "disabled"}>Poison</button>
+                </div>
+              </td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+  root.querySelectorAll(".queue-inspect-btn").forEach((btn)=>{
+    btn.addEventListener("click", ()=> inspectNotificationDelivery(btn.getAttribute("data-delivery-id")));
+  });
+  root.querySelectorAll(".queue-retry-btn").forEach((btn)=>{
+    btn.addEventListener("click", ()=> retryNotificationFailure(btn.getAttribute("data-delivery-id")));
+  });
+  root.querySelectorAll(".queue-cancel-btn").forEach((btn)=>{
+    btn.addEventListener("click", ()=> cancelNotificationDelivery(btn.getAttribute("data-delivery-id")));
+  });
+  root.querySelectorAll(".queue-poison-btn").forEach((btn)=>{
+    btn.addEventListener("click", ()=> poisonNotificationDelivery(btn.getAttribute("data-delivery-id")));
+  });
+  root.querySelectorAll(".queue-row").forEach((row)=>{
+    row.addEventListener("click", (event)=>{
+      if(event.target && event.target.closest("button")) return;
+      inspectNotificationDelivery(row.getAttribute("data-delivery-id"));
+    });
+  });
+}
+
 function renderSettingsCards(checks, health, slo, alerts, pagerduty, jira){
   const root = document.getElementById("settingsCards");
   if(!root) return;
@@ -198,13 +390,24 @@ function renderSettingsCards(checks, health, slo, alerts, pagerduty, jira){
   ].join("");
 }
 
+function notificationQueueUrl(pid){
+  const params = new URLSearchParams();
+  const statusFilter = document.getElementById("deliveryStatusFilter");
+  const channelFilter = document.getElementById("deliveryChannelFilter");
+  const limitFilter = document.getElementById("deliveryLimit");
+  params.set("delivery_status", statusFilter ? (statusFilter.value || "actionable") : "actionable");
+  params.set("channel", channelFilter ? (channelFilter.value || "all") : "all");
+  params.set("limit", limitFilter ? (limitFilter.value || "40") : "40");
+  return `/projects/${pid}/notification-deliveries?${params.toString()}`;
+}
+
 async function loadSettings(){
   const perf = window.LastPingShell ? window.LastPingShell.createPerfTracker("Settings") : null;
   const pid = document.getElementById("projectId").value || "1";
   const headers = headersSettings();
 
   try{
-    const [checksRes, sloRes, alertRes, jiraRes, pagerdutyRes, failureRes] = await Promise.all([
+    const [checksRes, sloRes, alertRes, jiraRes, pagerdutyRes, deliveryRes] = await Promise.all([
       perf && window.LastPingShell
         ? perf.fetchJson("checks", `/projects/${pid}/checks`)
         : fetch(`/projects/${pid}/checks`).then(async (res)=> ({ok: res.ok, status: res.status, data: res.ok ? await res.json() : null})),
@@ -221,15 +424,15 @@ async function loadSettings(){
         ? perf.fetchJson("pagerduty-settings", `/projects/${pid}/pagerduty-settings`, {headers})
         : fetch(`/projects/${pid}/pagerduty-settings`, {headers}).then(async (res)=> ({ok: res.ok, status: res.status, data: res.ok ? await res.json() : null})),
       perf && window.LastPingShell
-        ? perf.fetchJson("notification-failures", `/projects/${pid}/notification-failures`, {headers})
-        : fetch(`/projects/${pid}/notification-failures`, {headers}).then(async (res)=> ({ok: res.ok, status: res.status, data: res.ok ? await res.json() : null})),
+        ? perf.fetchJson("notification-deliveries", notificationQueueUrl(pid), {headers})
+        : fetch(notificationQueueUrl(pid), {headers}).then(async (res)=> ({ok: res.ok, status: res.status, data: res.ok ? await res.json() : null})),
     ]);
     const checks = checksRes.ok ? (checksRes.data || []) : [];
     const shellPromise = window.LastPingShell
       ? window.LastPingShell.hydratePageShell(pid, checks, {perf})
       : Promise.resolve({checks, health: null});
 
-    if(!sloRes.ok || !alertRes.ok || !jiraRes.ok || !pagerdutyRes.ok || !failureRes.ok){
+    if(!sloRes.ok || !alertRes.ok || !jiraRes.ok || !pagerdutyRes.ok || !deliveryRes.ok){
       alert("Failed to load settings");
       const shellData = await shellPromise;
       renderSettingsCards(shellData.checks, shellData.health, null, null, null, null);
@@ -241,7 +444,7 @@ async function loadSettings(){
     const alerts = alertRes.data || {};
     const jira = jiraRes.data || {};
     const pagerduty = pagerdutyRes.data || {};
-    const failures = failureRes.data || [];
+    const deliveries = deliveryRes.data || [];
     const shellData = await shellPromise;
 
     const render = ()=>{
@@ -294,10 +497,15 @@ async function loadSettings(){
       setPagerdutyKeyConfigured(!!pagerduty.integration_key_configured);
 
       renderSettingsCards(shellData.checks, shellData.health, slo, alerts, pagerduty, jira);
-      renderNotificationFailures(failures);
+      renderNotificationFailures(deliveries);
     };
     if(perf) perf.measureRender("settings-render", render);
     else render();
+    if(selectedDeliveryId){
+      const visible = Array.isArray(deliveries) && deliveries.some((row)=> Number(row.id) === Number(selectedDeliveryId));
+      if(visible) inspectNotificationDelivery(selectedDeliveryId);
+      else renderDeliveryInspect(null);
+    }
   }catch(_e){
     if(window.LastPingShell){
       const shellData = await window.LastPingShell.hydratePageShell(pid, null, {perf});
@@ -391,15 +599,15 @@ async function sendPagerdutyTest(){
   }
 }
 
-async function retryNotificationFailure(failureId){
+async function runNotificationDeliveryAction(deliveryId, action, fallbackMessage){
   const pid = document.getElementById("projectId").value || "1";
   const headers = headersSettings();
   const root = document.getElementById("notificationFailures");
   try{
-    const res = await fetch(`/projects/${pid}/notification-failures/${failureId}/retry`, {method: "POST", headers});
+    const res = await fetch(`/projects/${pid}/notification-deliveries/${deliveryId}/${action}`, {method: "POST", headers});
     const body = await res.json().catch(()=> ({}));
     if(!res.ok){
-      const detail = body && body.detail ? body.detail : "Retry failed";
+      const detail = body && body.detail ? body.detail : fallbackMessage;
       alert(detail);
       return;
     }
@@ -411,8 +619,20 @@ async function retryNotificationFailure(failureId){
     }
     await loadSettings();
   }catch(_e){
-    alert("Retry failed");
+    alert(fallbackMessage);
   }
+}
+
+async function retryNotificationFailure(failureId){
+  await runNotificationDeliveryAction(failureId, "retry", "Replay failed");
+}
+
+async function cancelNotificationDelivery(deliveryId){
+  await runNotificationDeliveryAction(deliveryId, "cancel", "Cancel failed");
+}
+
+async function poisonNotificationDelivery(deliveryId){
+  await runNotificationDeliveryAction(deliveryId, "poison", "Poison failed");
 }
 
 document.addEventListener("DOMContentLoaded", ()=>{
@@ -421,6 +641,10 @@ document.addEventListener("DOMContentLoaded", ()=>{
   const testBtn = document.getElementById("sendPagerdutyTestBtn");
   const clearJiraBtn = document.getElementById("clearJiraApiTokenBtn");
   const clearPdBtn = document.getElementById("clearPagerdutyIntegrationKeyBtn");
+  const refreshQueueBtn = document.getElementById("refreshDeliveryQueueBtn");
+  const deliveryStatusFilter = document.getElementById("deliveryStatusFilter");
+  const deliveryChannelFilter = document.getElementById("deliveryChannelFilter");
+  const deliveryLimit = document.getElementById("deliveryLimit");
   const pid = document.getElementById("projectId");
 
   if(loadBtn) loadBtn.addEventListener("click", loadSettings);
@@ -434,6 +658,10 @@ document.addEventListener("DOMContentLoaded", ()=>{
     clearPagerdutyIntegrationKeyRequested = !clearPagerdutyIntegrationKeyRequested;
     syncSecretActionState();
   });
+  if(refreshQueueBtn) refreshQueueBtn.addEventListener("click", loadSettings);
+  if(deliveryStatusFilter) deliveryStatusFilter.addEventListener("change", loadSettings);
+  if(deliveryChannelFilter) deliveryChannelFilter.addEventListener("change", loadSettings);
+  if(deliveryLimit) deliveryLimit.addEventListener("change", loadSettings);
   if(pid) pid.addEventListener("change", loadSettings);
 
   loadSettings();

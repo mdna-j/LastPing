@@ -7,7 +7,7 @@ key once; the server stores only the PBKDF2 hash.
 """
 
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status, Header, Request, Path, Body
 from pydantic import BaseModel, EmailStr, AnyHttpUrl, confloat, constr, root_validator
@@ -15,7 +15,17 @@ from sqlmodel import select, Session
 
 from ..db import get_session
 from ..models import AuditLog, ApiKey, NotificationDelivery, OrgRole, Project as ProjectModel, ProjectMembership, Role
-from ..notification_queue import queue_email_delivery, retry_notification_delivery
+from ..notification_queue import (
+    STATUS_DEAD,
+    STATUS_DELIVERED,
+    STATUS_PROCESSING,
+    STATUS_QUEUED,
+    STATUS_RETRY,
+    cancel_notification_delivery,
+    poison_notification_delivery,
+    queue_email_delivery,
+    retry_notification_delivery,
+)
 from ..security import generate_api_key, hash_api_key
 from ..secret_lifecycle import (
     SECRET_DISCORD_WEBHOOK_URL,
@@ -728,11 +738,58 @@ class NotificationFailureOut(BaseModel):
     last_retry_at: Optional[datetime] = None
 
 
+class NotificationDeliveryHistoryEntry(BaseModel):
+    created_at: datetime
+    action: str
+    actor: Optional[str] = None
+    detail: Optional[str] = None
+
+
+class NotificationDeliveryOut(BaseModel):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+    channel: str
+    event: str
+    request_kind: str
+    delivery_status: str
+    target: Optional[str] = None
+    check_id: Optional[int] = None
+    incident_id: Optional[int] = None
+    subscription_id: Optional[int] = None
+    attempt_count: int = 0
+    max_attempts: int = 0
+    next_attempt_at: Optional[datetime] = None
+    claimed_by: Optional[str] = None
+    claimed_at: Optional[datetime] = None
+    delivered_at: Optional[datetime] = None
+    dead_at: Optional[datetime] = None
+    last_error: Optional[str] = None
+    last_status_code: Optional[int] = None
+    retryable: bool = False
+    cancelable: bool = False
+    poisonable: bool = False
+    payload_summary: Optional[str] = None
+
+
+class NotificationDeliveryDetailOut(NotificationDeliveryOut):
+    payload_preview: dict[str, Any]
+    retry_history: List[NotificationDeliveryHistoryEntry]
+
+
 class NotificationRetryResult(BaseModel):
     ok: bool
     message: str
     target: Optional[str] = None
     status: Optional[int] = None
+
+
+class NotificationDeliveryActionResult(BaseModel):
+    ok: bool
+    message: str
+    target: Optional[str] = None
+    status: Optional[int] = None
+    delivery_status: Optional[str] = None
 
 
 class MaintenanceWindow(StrictBaseModel):
@@ -1258,6 +1315,189 @@ def _jira_settings_out(session: Session, project: ProjectModel) -> JiraSettingsO
     )
 
 
+_DELIVERY_PREVIEW_REDACT_KEYS = {
+    "api_key",
+    "authorization",
+    "body",
+    "integration_key",
+    "password",
+    "secret",
+    "token",
+    "webhook",
+}
+_DELIVERY_PREVIEW_REDACT_TEXT_MARKERS = (
+    "api key",
+    "api_key",
+    "authorization:",
+    "bearer ",
+    "integration key",
+    "password",
+    "secret",
+    "token",
+    "x-api-key",
+)
+_DELIVERY_ACTION_LABELS = {
+    "notification_retry": "Manual replay succeeded",
+    "notification_retry_failed": "Manual replay failed",
+    "notification_cancel": "Canceled by operator",
+    "notification_cancel_failed": "Cancel failed",
+    "notification_poison": "Moved to dead-letter",
+    "notification_poison_failed": "Poison action failed",
+    "notification_dead": "Delivery exhausted retries",
+}
+
+
+def _delivery_preview_key_is_sensitive(key: Optional[str]) -> bool:
+    if not key:
+        return False
+    lowered = str(key).strip().lower()
+    return any(marker in lowered for marker in _DELIVERY_PREVIEW_REDACT_KEYS)
+
+
+def _delivery_preview_text(value: Any, *, key: Optional[str] = None, limit: int = 220) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    lowered = text.lower()
+    if _delivery_preview_key_is_sensitive(key) or any(marker in lowered for marker in _DELIVERY_PREVIEW_REDACT_TEXT_MARKERS):
+        return "[redacted]"
+    if len(text) > limit:
+        return f"{text[:limit].rstrip()}..."
+    return text
+
+
+def _safe_delivery_payload_preview(value: Any, *, key: Optional[str] = None, depth: int = 0) -> Any:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if depth >= 3:
+        return "[nested]"
+    if isinstance(value, dict):
+        items = list(value.items())
+        preview = {
+            str(item_key): _safe_delivery_payload_preview(item_value, key=str(item_key), depth=depth + 1)
+            for item_key, item_value in items[:12]
+        }
+        if len(items) > 12:
+            preview["__truncated__"] = f"{len(items) - 12} more field(s)"
+        return preview
+    if isinstance(value, list):
+        preview = [_safe_delivery_payload_preview(item, key=key, depth=depth + 1) for item in value[:8]]
+        if len(value) > 8:
+            preview.append(f"... {len(value) - 8} more item(s)")
+        return preview
+    return _delivery_preview_text(value, key=key)
+
+
+def _notification_delivery_payload(row: NotificationDelivery) -> dict[str, Any]:
+    try:
+        payload = json.loads(row.payload_json or "{}")
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _notification_delivery_payload_summary(row: NotificationDelivery, payload: dict[str, Any]) -> Optional[str]:
+    summary_candidates = [
+        payload.get("summary"),
+        payload.get("subject"),
+        payload.get("fallback_text"),
+        payload.get("description"),
+    ]
+    nested_payload = payload.get("payload")
+    if isinstance(nested_payload, dict):
+        summary_candidates.extend(
+            [
+                nested_payload.get("text"),
+                nested_payload.get("content"),
+                nested_payload.get("title"),
+            ]
+        )
+    for candidate in summary_candidates:
+        preview = _delivery_preview_text(candidate, limit=160)
+        if preview:
+            return preview
+    return _delivery_preview_text(row.last_error, limit=160) or _delivery_preview_text(row.target, limit=120)
+
+
+def _notification_delivery_out(row: NotificationDelivery) -> NotificationDeliveryOut:
+    payload = _notification_delivery_payload(row)
+    status_value = row.status or STATUS_QUEUED
+    return NotificationDeliveryOut(
+        id=row.id,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        channel=row.channel,
+        event=row.event,
+        request_kind=row.request_kind,
+        delivery_status=status_value,
+        target=row.target,
+        check_id=row.check_id,
+        incident_id=row.incident_id,
+        subscription_id=row.subscription_id,
+        attempt_count=int(row.attempt_count or 0),
+        max_attempts=int(row.max_attempts or 0),
+        next_attempt_at=row.next_attempt_at,
+        claimed_by=row.claimed_by,
+        claimed_at=row.claimed_at,
+        delivered_at=row.delivered_at,
+        dead_at=row.dead_at,
+        last_error=row.last_error,
+        last_status_code=row.last_status_code,
+        retryable=status_value in {STATUS_QUEUED, STATUS_RETRY, STATUS_DEAD},
+        cancelable=status_value in {STATUS_QUEUED, STATUS_RETRY},
+        poisonable=status_value in {STATUS_QUEUED, STATUS_RETRY},
+        payload_summary=_notification_delivery_payload_summary(row, payload),
+    )
+
+
+def _notification_delivery_history(session: Session, row: NotificationDelivery) -> List[NotificationDeliveryHistoryEntry]:
+    logs = session.exec(
+        select(AuditLog)
+        .where(
+            AuditLog.target_type == "notification_delivery",
+            AuditLog.target_id == row.id,
+        )
+        .order_by(AuditLog.created_at.desc())
+    ).all()
+    history: List[NotificationDeliveryHistoryEntry] = []
+    for log in logs[:20]:
+        detail = None
+        if log.details:
+            try:
+                parsed = json.loads(log.details)
+            except Exception:
+                parsed = log.details
+            safe_preview = _safe_delivery_payload_preview(parsed)
+            if isinstance(safe_preview, (dict, list)):
+                detail = json.dumps(safe_preview, default=str)
+            else:
+                detail = str(safe_preview)
+            if detail and len(detail) > 260:
+                detail = f"{detail[:260].rstrip()}..."
+        if not detail:
+            detail = _DELIVERY_ACTION_LABELS.get(log.action)
+        history.append(
+            NotificationDeliveryHistoryEntry(
+                created_at=log.created_at,
+                action=log.action,
+                actor=log.actor,
+                detail=detail,
+            )
+        )
+    return history
+
+
+def _notification_delivery_detail_out(session: Session, row: NotificationDelivery) -> NotificationDeliveryDetailOut:
+    base = _notification_delivery_out(row)
+    return NotificationDeliveryDetailOut(
+        **base.dict(),
+        payload_preview=_safe_delivery_payload_preview(_notification_delivery_payload(row)) or {},
+        retry_history=_notification_delivery_history(session, row),
+    )
+
+
 def _notification_failure_out(session: Session, row: NotificationDelivery) -> NotificationFailureOut:
     last_retry = session.exec(
         select(AuditLog)
@@ -1590,6 +1830,111 @@ def set_project_jira_settings(
     return _jira_settings_out(session, project)
 
 
+def _list_project_notification_delivery_rows(
+    session: Session,
+    *,
+    project_id: int,
+    delivery_status: Optional[str],
+    channel: Optional[str],
+    limit: int,
+) -> List[NotificationDelivery]:
+    normalized_status = (delivery_status or "actionable").strip().lower()
+    query = select(NotificationDelivery).where(NotificationDelivery.project_id == project_id)
+    if normalized_status == "actionable":
+        query = query.where(NotificationDelivery.status.in_([STATUS_QUEUED, STATUS_RETRY, STATUS_PROCESSING, STATUS_DEAD]))
+    elif normalized_status != "all":
+        allowed_statuses = {STATUS_QUEUED, STATUS_RETRY, STATUS_PROCESSING, STATUS_DELIVERED, STATUS_DEAD}
+        if normalized_status not in allowed_statuses:
+            raise HTTPException(status_code=400, detail="Unsupported notification delivery status filter")
+        query = query.where(NotificationDelivery.status == normalized_status)
+    normalized_channel = (channel or "").strip().lower()
+    if normalized_channel and normalized_channel != "all":
+        query = query.where(NotificationDelivery.channel == normalized_channel)
+    rows = session.exec(
+        query.order_by(NotificationDelivery.updated_at.desc(), NotificationDelivery.id.desc())
+    ).all()
+    return rows[: max(1, min(int(limit or 40), 100))]
+
+
+def _audit_notification_delivery_action(
+    *,
+    session: Session,
+    project: ProjectModel,
+    row: NotificationDelivery,
+    request: Optional[Request],
+    authorization: Optional[str],
+    x_admin_token: Optional[str],
+    action: str,
+    details: dict[str, Any],
+) -> None:
+    actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
+    session.add(
+        AuditLog(
+            actor=actor or "delivery-ops",
+            action=action,
+            target_type="notification_delivery",
+            target_id=row.id,
+            details=json.dumps(details, default=str),
+            actor_ip=actor_ip,
+            user_agent=user_agent,
+            **_project_scope_kwargs(project),
+        )
+    )
+    session.commit()
+
+
+@router.get("/{project_id}/notification-deliveries", response_model=List[NotificationDeliveryOut])
+def list_project_notification_deliveries(
+    project_id: int = Path(..., ge=1),
+    delivery_status: Optional[str] = None,
+    channel: Optional[str] = None,
+    limit: int = 40,
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    authorize_project_operation(
+        project_id,
+        min_role=Role.ADMIN.value,
+        x_admin_token=x_admin_token,
+        authorization=authorization,
+        x_api_key=x_api_key,
+        session=session,
+    )
+    rows = _list_project_notification_delivery_rows(
+        session,
+        project_id=project_id,
+        delivery_status=delivery_status,
+        channel=channel,
+        limit=limit,
+    )
+    return [_notification_delivery_out(row) for row in rows]
+
+
+@router.get("/{project_id}/notification-deliveries/{delivery_id}", response_model=NotificationDeliveryDetailOut)
+def get_project_notification_delivery(
+    project_id: int = Path(..., ge=1),
+    delivery_id: int = Path(..., ge=1),
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    authorize_project_operation(
+        project_id,
+        min_role=Role.ADMIN.value,
+        x_admin_token=x_admin_token,
+        authorization=authorization,
+        x_api_key=x_api_key,
+        session=session,
+    )
+    row = session.get(NotificationDelivery, delivery_id)
+    if not row or row.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Notification delivery not found")
+    return _notification_delivery_detail_out(session, row)
+
+
 @router.get("/{project_id}/notification-failures", response_model=List[NotificationFailureOut])
 def list_project_notification_failures(
     project_id: int = Path(..., ge=1),
@@ -1607,22 +1952,21 @@ def list_project_notification_failures(
         x_api_key=x_api_key,
         session=session,
     )
-    rows = session.exec(
-        select(NotificationDelivery)
-        .where(
-            NotificationDelivery.project_id == project_id,
-            NotificationDelivery.status.in_(["queued", "retry", "dead"]),
-        )
-        .order_by(NotificationDelivery.created_at.desc())
-    ).all()
-    capped = rows[: max(1, min(int(limit or 20), 100))]
-    return [_notification_failure_out(session, row) for row in capped]
+    rows = _list_project_notification_delivery_rows(
+        session,
+        project_id=project_id,
+        delivery_status="actionable",
+        channel=None,
+        limit=limit,
+    )
+    failures = [row for row in rows if row.status in {STATUS_QUEUED, STATUS_RETRY, STATUS_DEAD}]
+    return [_notification_failure_out(session, row) for row in failures]
 
 
-@router.post("/{project_id}/notification-failures/{failure_id}/retry", response_model=NotificationRetryResult)
-def retry_project_notification_failure(
+@router.post("/{project_id}/notification-deliveries/{delivery_id}/retry", response_model=NotificationDeliveryActionResult)
+def retry_project_notification_delivery(
     project_id: int = Path(..., ge=1),
-    failure_id: int = Path(..., ge=1),
+    delivery_id: int = Path(..., ge=1),
     request: Request = None,
     _scope = Depends(limit_integration_action_requests),
     authorization: Optional[str] = Header(None),
@@ -1638,37 +1982,156 @@ def retry_project_notification_failure(
         x_api_key=x_api_key,
         session=session,
     )
-    row = session.get(NotificationDelivery, failure_id)
+    row = session.get(NotificationDelivery, delivery_id)
     if not row or row.project_id != project_id:
-        raise HTTPException(status_code=404, detail="Notification failure not found")
+        raise HTTPException(status_code=404, detail="Notification delivery not found")
     result = retry_notification_delivery(session, row, worker_id="manual-retry")
-    actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
-    session.add(
-        AuditLog(
-            actor=actor or "manual-retry",
-            action="notification_retry" if result.get("ok") else "notification_retry_failed",
-            target_type="notification_delivery",
-            target_id=row.id,
-            details=json.dumps(
-                {
-                    "source_failure_id": row.id,
-                    "target": row.target,
-                    "retry_ok": bool(result.get("ok")),
-                    "response": {"status": result.get("status"), "delivery_status": result.get("delivery_status")},
-                    "message": result.get("detail"),
-                }
-            ),
-            actor_ip=actor_ip,
-            user_agent=user_agent,
-            **_project_scope_kwargs(project),
-        )
+    _audit_notification_delivery_action(
+        session=session,
+        project=project,
+        row=row,
+        request=request,
+        authorization=authorization,
+        x_admin_token=x_admin_token,
+        action="notification_retry" if result.get("ok") else "notification_retry_failed",
+        details={
+            "target": row.target,
+            "retry_ok": bool(result.get("ok")),
+            "response": {"status": result.get("status"), "delivery_status": result.get("delivery_status")},
+            "message": result.get("detail"),
+        },
     )
-    session.commit()
     if not result.get("ok"):
         raise HTTPException(status_code=502, detail=result.get("detail") or "Retry failed")
-    return NotificationRetryResult(
+    return NotificationDeliveryActionResult(
         ok=True,
         message="Retried queued delivery.",
         target=row.target,
         status=result.get("status"),
+        delivery_status=result.get("delivery_status"),
+    )
+
+
+@router.post("/{project_id}/notification-deliveries/{delivery_id}/cancel", response_model=NotificationDeliveryActionResult)
+def cancel_project_notification_delivery(
+    project_id: int = Path(..., ge=1),
+    delivery_id: int = Path(..., ge=1),
+    request: Request = None,
+    _scope = Depends(limit_integration_action_requests),
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    project = authorize_project_operation(
+        project_id,
+        min_role=Role.ADMIN.value,
+        x_admin_token=x_admin_token,
+        authorization=authorization,
+        x_api_key=x_api_key,
+        session=session,
+    )
+    row = session.get(NotificationDelivery, delivery_id)
+    if not row or row.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Notification delivery not found")
+    result = cancel_notification_delivery(session, row)
+    _audit_notification_delivery_action(
+        session=session,
+        project=project,
+        row=row,
+        request=request,
+        authorization=authorization,
+        x_admin_token=x_admin_token,
+        action="notification_cancel" if result.get("ok") else "notification_cancel_failed",
+        details={
+            "target": row.target,
+            "message": result.get("detail"),
+            "delivery_status": result.get("delivery_status"),
+        },
+    )
+    if not result.get("ok"):
+        raise HTTPException(status_code=409, detail=result.get("detail") or "Cancel failed")
+    return NotificationDeliveryActionResult(
+        ok=True,
+        message="Canceled queued delivery.",
+        target=row.target,
+        status=result.get("status"),
+        delivery_status=result.get("delivery_status"),
+    )
+
+
+@router.post("/{project_id}/notification-deliveries/{delivery_id}/poison", response_model=NotificationDeliveryActionResult)
+def poison_project_notification_delivery(
+    project_id: int = Path(..., ge=1),
+    delivery_id: int = Path(..., ge=1),
+    request: Request = None,
+    _scope = Depends(limit_integration_action_requests),
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    project = authorize_project_operation(
+        project_id,
+        min_role=Role.ADMIN.value,
+        x_admin_token=x_admin_token,
+        authorization=authorization,
+        x_api_key=x_api_key,
+        session=session,
+    )
+    row = session.get(NotificationDelivery, delivery_id)
+    if not row or row.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Notification delivery not found")
+    result = poison_notification_delivery(session, row)
+    _audit_notification_delivery_action(
+        session=session,
+        project=project,
+        row=row,
+        request=request,
+        authorization=authorization,
+        x_admin_token=x_admin_token,
+        action="notification_poison" if result.get("ok") else "notification_poison_failed",
+        details={
+            "target": row.target,
+            "message": result.get("detail"),
+            "delivery_status": result.get("delivery_status"),
+        },
+    )
+    if not result.get("ok"):
+        raise HTTPException(status_code=409, detail=result.get("detail") or "Poison failed")
+    return NotificationDeliveryActionResult(
+        ok=True,
+        message="Moved delivery to dead-letter.",
+        target=row.target,
+        status=result.get("status"),
+        delivery_status=result.get("delivery_status"),
+    )
+
+
+@router.post("/{project_id}/notification-failures/{failure_id}/retry", response_model=NotificationRetryResult)
+def retry_project_notification_failure(
+    project_id: int = Path(..., ge=1),
+    failure_id: int = Path(..., ge=1),
+    request: Request = None,
+    _scope = Depends(limit_integration_action_requests),
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    result = retry_project_notification_delivery(
+        project_id=project_id,
+        delivery_id=failure_id,
+        request=request,
+        _scope=_scope,
+        authorization=authorization,
+        x_admin_token=x_admin_token,
+        x_api_key=x_api_key,
+        session=session,
+    )
+    return NotificationRetryResult(
+        ok=result.ok,
+        message=result.message,
+        target=result.target,
+        status=result.status,
     )
