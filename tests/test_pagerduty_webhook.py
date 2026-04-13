@@ -86,6 +86,8 @@ def test_pagerduty_webhook_syncs_incident_lifecycle_and_notes(tmp_path):
         assert incident.owner == "Primary On-Call"
         assert incident.status == "resolved"
         assert incident.resolved_at is not None
+        assert incident.resolved_by == "pagerduty:PD Responder"
+        assert incident.resolution_summary == "Resolved in PagerDuty by PD Responder."
 
         notes = session.exec(select(IncidentNote).where(IncidentNote.incident_id == incident_id)).all()
         assert len(notes) == 1
@@ -132,6 +134,8 @@ def test_pagerduty_webhook_can_reopen_and_clear_ack(tmp_path):
             check_id=check.id,
             status="resolved",
             resolved_at=datetime.utcnow() - timedelta(minutes=2),
+            resolved_by="pagerduty:Old User",
+            resolution_summary="Old summary",
             acknowledged_at=datetime.utcnow() - timedelta(minutes=3),
             acknowledged_by="pagerduty:Old User",
             pagerduty_dedup_key=f"lastping:incident:{project.id}:88",
@@ -175,6 +179,8 @@ def test_pagerduty_webhook_can_reopen_and_clear_ack(tmp_path):
         assert incident.acknowledged_by is None
         assert incident.status == "open"
         assert incident.resolved_at is None
+        assert incident.resolved_by is None
+        assert incident.resolution_summary is None
 
 
 def test_pagerduty_webhook_requires_shared_secret(tmp_path):

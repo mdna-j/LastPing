@@ -106,6 +106,44 @@ def _status_done(payload: dict) -> Optional[bool]:
     return None
 
 
+def _status_label(payload: dict) -> Optional[str]:
+    return _first_nonempty(
+        _nested(payload, "issue", "fields", "status", "name"),
+        _nested(payload, "issue", "fields", "status", "statusCategory", "name"),
+        _nested(payload, "issue", "fields", "status", "statusCategory", "key"),
+    )
+
+
+def _browse_url_from_self(self_url: Any, issue_key: Optional[str]) -> Optional[str]:
+    if not isinstance(self_url, str) or not self_url.strip() or not issue_key:
+        return None
+    marker = "/rest/api/"
+    normalized = self_url.strip()
+    if marker not in normalized:
+        return None
+    base_url = normalized.split(marker, 1)[0].rstrip("/")
+    if not base_url:
+        return None
+    return f"{base_url}/browse/{issue_key}"
+
+
+def _issue_url(payload: dict) -> Optional[str]:
+    issue_key = _issue_key(payload)
+    return _first_nonempty(
+        _nested(payload, "issue", "browseUrl"),
+        payload.get("issue_url"),
+        _browse_url_from_self(_nested(payload, "issue", "self"), issue_key),
+    )
+
+
+def _resolution_summary(payload: dict, actor: str) -> str:
+    issue_key = _issue_key(payload)
+    status_label = _status_label(payload) or "done"
+    if issue_key:
+        return f"Resolved in Jira issue {issue_key} with status {status_label} by {actor}."
+    return f"Resolved in Jira with status {status_label} by {actor}."
+
+
 def _changed_fields(payload: dict) -> set[str]:
     items = _nested(payload, "changelog", "items")
     names: set[str] = set()
@@ -146,6 +184,20 @@ def _apply_sync_event(session: Session, incident: Incident, payload: dict) -> in
     changed = 0
     changed_fields = _changed_fields(payload)
 
+    issue_url = _issue_url(payload)
+    if issue_url and incident.jira_issue_url != issue_url:
+        incident.jira_issue_url = issue_url
+        session.add(incident)
+        changed += 1
+        _record_sync_audit(
+            session,
+            incident=incident,
+            action="link",
+            actor=actor,
+            raw_event_type=raw_event_type,
+            details={"issue_key": incident.jira_issue_key or _issue_key(payload), "issue_url": issue_url},
+        )
+
     comment_text = _comment_text(payload)
     if comment_text and raw_event_type in {"comment_created", "comment_updated"}:
         session.add(
@@ -168,7 +220,7 @@ def _apply_sync_event(session: Session, incident: Incident, payload: dict) -> in
         changed += 1
 
     assignee = _assignee_label(payload)
-    if assignee and (raw_event_type in {"jira:issue_updated", "jira:issue_created"} or "assignee" in changed_fields):
+    if raw_event_type in {"jira:issue_updated", "jira:issue_created"} or "assignee" in changed_fields:
         if incident.owner != assignee:
             incident.owner = assignee
             session.add(incident)
@@ -184,9 +236,22 @@ def _apply_sync_event(session: Session, incident: Incident, payload: dict) -> in
 
     done = _status_done(payload)
     if done is True and (raw_event_type in {"jira:issue_updated", "jira:issue_created"} or "status" in changed_fields):
-        if incident.resolved_at is None or incident.status != "resolved":
+        resolved_by = f"jira:{actor}"
+        resolution_summary = _resolution_summary(payload, actor)
+        if (
+            incident.resolved_at is None
+            or incident.status != "resolved"
+            or incident.resolved_by != resolved_by
+            or incident.resolution_summary != resolution_summary
+            or incident.silenced_until is not None
+            or incident.silenced_by is not None
+        ):
             incident.resolved_at = when
             incident.status = "resolved"
+            incident.resolved_by = resolved_by
+            incident.resolution_summary = resolution_summary
+            incident.silenced_until = None
+            incident.silenced_by = None
             session.add(incident)
             changed += 1
         _record_sync_audit(
@@ -195,12 +260,23 @@ def _apply_sync_event(session: Session, incident: Incident, payload: dict) -> in
             action="resolve",
             actor=actor,
             raw_event_type=raw_event_type,
-            details={"resolved_at": when.isoformat()},
+            details={
+                "resolved_at": when.isoformat(),
+                "resolved_by": resolved_by,
+                "resolution_summary": resolution_summary,
+            },
         )
     elif done is False and (raw_event_type in {"jira:issue_updated", "jira:issue_created"} or "status" in changed_fields):
-        if incident.resolved_at is not None or incident.status != "open":
+        if (
+            incident.resolved_at is not None
+            or incident.status != "open"
+            or incident.resolved_by is not None
+            or incident.resolution_summary is not None
+        ):
             incident.resolved_at = None
             incident.status = "open"
+            incident.resolved_by = None
+            incident.resolution_summary = None
             session.add(incident)
             changed += 1
         _record_sync_audit(

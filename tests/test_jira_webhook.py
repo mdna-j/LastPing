@@ -32,7 +32,7 @@ def test_jira_webhook_syncs_comment_assignee_and_status(tmp_path):
             check_id=check.id,
             status="open",
             jira_issue_key="OPS-17",
-            jira_issue_url="https://lastping.atlassian.net/browse/OPS-17",
+            jira_issue_url=None,
             started_at=datetime.utcnow() - timedelta(minutes=10),
         )
         session.add(incident)
@@ -62,9 +62,10 @@ def test_jira_webhook_syncs_comment_assignee_and_status(tmp_path):
             "user": {"displayName": "Jira Manager"},
             "issue": {
                 "key": "OPS-17",
+                "self": "https://lastping.atlassian.net/rest/api/3/issue/10017",
                 "fields": {
                     "assignee": {"displayName": "Primary On-Call"},
-                    "status": {"statusCategory": {"key": "done"}},
+                    "status": {"name": "Done", "statusCategory": {"key": "done"}},
                 },
             },
             "changelog": {"items": [{"field": "assignee"}, {"field": "status"}]},
@@ -72,7 +73,7 @@ def test_jira_webhook_syncs_comment_assignee_and_status(tmp_path):
         headers={"X-Jira-Webhook-Secret": "jira-secret"},
     )
     assert update_resp.status_code == 200
-    assert update_resp.json() == {"accepted": True, "processed": 1, "changed": 2, "ignored": 0}
+    assert update_resp.json() == {"accepted": True, "processed": 1, "changed": 3, "ignored": 0}
 
     with Session(dbmod.engine) as session:
         incident = session.get(Incident, incident_id)
@@ -80,6 +81,9 @@ def test_jira_webhook_syncs_comment_assignee_and_status(tmp_path):
         assert incident.owner == "Primary On-Call"
         assert incident.status == "resolved"
         assert incident.resolved_at is not None
+        assert incident.resolved_by == "jira:Jira Manager"
+        assert incident.resolution_summary == "Resolved in Jira issue OPS-17 with status Done by Jira Manager."
+        assert incident.jira_issue_url == "https://lastping.atlassian.net/browse/OPS-17"
 
         notes = session.exec(select(IncidentNote).where(IncidentNote.incident_id == incident_id)).all()
         assert len(notes) == 1
@@ -92,6 +96,7 @@ def test_jira_webhook_syncs_comment_assignee_and_status(tmp_path):
                 select(AuditLog).where(AuditLog.target_type == "incident", AuditLog.target_id == incident_id)
             ).all()
         ]
+        assert "jira_link" in actions
         assert "jira_note" in actions
         assert "jira_assign" in actions
         assert "jira_resolve" in actions
@@ -125,6 +130,8 @@ def test_jira_webhook_can_reopen_and_requires_secret(tmp_path):
             check_id=check.id,
             status="resolved",
             resolved_at=datetime.utcnow() - timedelta(minutes=2),
+            resolved_by="jira:Old User",
+            resolution_summary="Fixed upstream issue",
             jira_issue_key="OPS-99",
             jira_issue_url="https://lastping.atlassian.net/browse/OPS-99",
         )
@@ -154,3 +161,5 @@ def test_jira_webhook_can_reopen_and_requires_secret(tmp_path):
         assert incident is not None
         assert incident.status == "open"
         assert incident.resolved_at is None
+        assert incident.resolved_by is None
+        assert incident.resolution_summary is None

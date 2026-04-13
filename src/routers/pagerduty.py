@@ -128,6 +128,13 @@ def _annotation_text(event: dict) -> str:
     return "PagerDuty annotation synced into LastPing."
 
 
+def _resolution_summary(event: dict, actor: str) -> str:
+    summary = _annotation_text(event)
+    if summary == "PagerDuty annotation synced into LastPing.":
+        return f"Resolved in PagerDuty by {actor}."
+    return summary
+
+
 def _action_from_event_type(event_type: str) -> Optional[str]:
     normalized = event_type.lower()
     if "unack" in normalized:
@@ -215,9 +222,22 @@ def _apply_sync_event(session: Session, incident: Incident, event: dict) -> bool
         return changed
 
     if action == "resolve":
-        if incident.resolved_at is None or incident.status != "resolved":
+        resolved_by = f"pagerduty:{actor}"
+        resolution_summary = _resolution_summary(event, actor)
+        if (
+            incident.resolved_at is None
+            or incident.status != "resolved"
+            or incident.resolved_by != resolved_by
+            or incident.resolution_summary != resolution_summary
+            or incident.silenced_until is not None
+            or incident.silenced_by is not None
+        ):
             incident.resolved_at = when
             incident.status = "resolved"
+            incident.resolved_by = resolved_by
+            incident.resolution_summary = resolution_summary
+            incident.silenced_until = None
+            incident.silenced_by = None
             session.add(incident)
             changed = True
         _record_sync_audit(
@@ -226,14 +246,25 @@ def _apply_sync_event(session: Session, incident: Incident, event: dict) -> bool
             action=action,
             actor=actor,
             raw_event_type=raw_event_type,
-            details={"resolved_at": when.isoformat()},
+            details={
+                "resolved_at": when.isoformat(),
+                "resolved_by": resolved_by,
+                "resolution_summary": resolution_summary,
+            },
         )
         return changed
 
     if action == "reopen":
-        if incident.resolved_at is not None or incident.status != "open":
+        if (
+            incident.resolved_at is not None
+            or incident.status != "open"
+            or incident.resolved_by is not None
+            or incident.resolution_summary is not None
+        ):
             incident.resolved_at = None
             incident.status = "open"
+            incident.resolved_by = None
+            incident.resolution_summary = None
             session.add(incident)
             changed = True
         _record_sync_audit(
@@ -248,7 +279,7 @@ def _apply_sync_event(session: Session, incident: Incident, event: dict) -> bool
 
     if action == "assign":
         owner = _assignee_label(event)
-        if owner and incident.owner != owner:
+        if incident.owner != owner:
             incident.owner = owner
             session.add(incident)
             changed = True

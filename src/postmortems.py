@@ -94,6 +94,7 @@ def _audit_title(action: str) -> str:
         "split_incident": "Incident split",
         "create_share": "Share link created",
         "create_jira_ticket": "Jira ticket created",
+        "jira_link": "Jira link synced",
         "jira_assign": "Jira assignee synced",
         "jira_note": "Jira comment synced",
         "jira_resolve": "Jira status resolved synced",
