@@ -2027,6 +2027,116 @@ def remediation_page(project_id: int = Path(..., ge=1)):
     """
 
 
+@router.get("/account", response_class=HTMLResponse)
+def account_page():
+    return """
+    <html>
+    <head>
+      <title>Enterprise Access</title>
+      <meta name="viewport" content="width=device-width,initial-scale=1" />
+      <link rel="stylesheet" href="/static/css/ui.css" />
+    </head>
+    <body>
+      <main style="max-width:1120px;margin:0 auto;">
+        <header style="margin-bottom:18px;">
+          <div class="muted" style="text-transform:uppercase;letter-spacing:.12em;">Identity</div>
+          <h1>Enterprise Access</h1>
+          <div class="muted">Password login, SSO entry points, org-scoped roles, MFA enrollment, and session management in one place.</div>
+        </header>
+
+        <section class="card" style="margin-bottom:16px;">
+          <div class="section-head">
+            <h3>Sign In</h3>
+            <div id="accountStatus" class="muted">Use password or SSO to mint a bearer session for the UI.</div>
+          </div>
+          <div class="row">
+            <label>Email:
+              <input id="authEmail" type="email" autocomplete="username" placeholder="ops@example.com" style="width:240px"/>
+            </label>
+            <label>Password:
+              <input id="authPassword" type="password" autocomplete="current-password" placeholder="password" style="width:220px"/>
+            </label>
+            <button id="loginBtn" class="btn">Login</button>
+            <button id="logoutBtn" class="btn btn-secondary">Clear Session</button>
+          </div>
+          <div id="ssoProviders" class="row"></div>
+        </section>
+
+        <section id="mfaCard" class="card" style="display:none;">
+          <div class="section-head">
+            <h3>MFA</h3>
+            <div class="muted">Admin-grade local login uses TOTP challenges and enforced enrollment.</div>
+          </div>
+          <div id="mfaStatus" class="muted" style="margin-bottom:10px;">No pending MFA flow.</div>
+          <div id="mfaEnrollBlock" style="display:none;">
+            <div class="row">
+              <label>Secret:
+                <input id="mfaSecret" readonly style="width:240px"/>
+              </label>
+              <label>OTPAuth URI:
+                <input id="mfaUri" readonly style="width:420px"/>
+              </label>
+            </div>
+          </div>
+          <div class="row">
+            <label>Code:
+              <input id="mfaCode" inputmode="numeric" autocomplete="one-time-code" placeholder="123456" style="width:140px"/>
+            </label>
+            <button id="verifyMfaBtn" class="btn">Complete MFA Step</button>
+            <button id="startMfaEnrollBtn" class="btn btn-secondary">Start Enrollment</button>
+          </div>
+          <div class="row">
+            <label>Disable with code:
+              <input id="disableMfaCode" inputmode="numeric" autocomplete="one-time-code" placeholder="123456" style="width:140px"/>
+            </label>
+            <button id="disableMfaBtn" class="btn btn-secondary">Disable MFA</button>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="section-head">
+            <h3>Profile</h3>
+            <div class="muted">Org-scoped roles, linked identities, and active sessions.</div>
+          </div>
+          <div id="accountSummary" class="muted">No active session.</div>
+          <div class="row" style="align-items:flex-start;">
+            <div class="card" style="flex:1; min-width:280px; margin-bottom:0;">
+              <h3>Organization Roles</h3>
+              <div id="orgRoles" class="muted">No org memberships loaded.</div>
+            </div>
+            <div class="card" style="flex:1; min-width:280px; margin-bottom:0;">
+              <h3>Linked Identities</h3>
+              <div id="linkedIdentities" class="muted">No linked SSO identities loaded.</div>
+            </div>
+          </div>
+          <div class="row" style="justify-content:flex-end; margin-top:12px;">
+            <button id="revokeOthersBtn" class="btn btn-secondary">Revoke Other Sessions</button>
+          </div>
+          <div id="sessionsWrap" style="margin-top:8px;">
+            <table>
+              <thead>
+                <tr>
+                  <th>Session</th>
+                  <th>Auth</th>
+                  <th>Issued</th>
+                  <th>Seen</th>
+                  <th>Status</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody id="sessionRows">
+                <tr><td colspan="6" class="muted">No sessions loaded.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+      <script src="/static/js/account.js"></script>
+    </body>
+    </html>
+    """
+
+
 @router.get("/status/{project_id}", response_class=HTMLResponse)
 def public_status_page(project_id: int = Path(..., ge=1), _scope = Depends(limit_public_status_requests)):
     return f"""

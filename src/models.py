@@ -286,12 +286,17 @@ class User(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     email: str = Field(index=True)
     hashed_password: str
+    display_name: Optional[str] = Field(default=None)
     is_active: bool = Field(default=True)
+    mfa_secret: Optional[str] = _encrypted_field(description="encrypted TOTP seed for user MFA")
+    mfa_enabled_at: Optional[datetime] = Field(default=None)
+    last_login_at: Optional[datetime] = Field(default=None)
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
     memberships: List["ProjectMembership"] = Relationship(back_populates="user")
     organization_memberships: List["OrganizationMembership"] = Relationship(back_populates="user")
     team_memberships: List["TeamMembership"] = Relationship(back_populates="user")
+    identities: List["UserIdentity"] = Relationship(back_populates="user")
 
 
 class ProjectMembership(SQLModel, table=True):
@@ -314,6 +319,14 @@ class UserToken(SQLModel, table=True):
     token_fingerprint: Optional[str] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     expires_at: Optional[datetime] = None
+    revoked_at: Optional[datetime] = Field(default=None, index=True)
+    last_seen_at: Optional[datetime] = Field(default=None)
+    session_name: Optional[str] = Field(default=None)
+    auth_method: Optional[str] = Field(default="password", index=True)
+    auth_provider: Optional[str] = Field(default=None, index=True)
+    issued_from_ip: Optional[str] = Field(default=None)
+    issued_user_agent: Optional[str] = Field(default=None, sa_column=sa.Column(sa.Text(), nullable=True))
+    mfa_verified_at: Optional[datetime] = Field(default=None)
 
     user: Optional[User] = Relationship()
 
@@ -325,6 +338,24 @@ class UserToken(SQLModel, table=True):
             values["token_fingerprint"] = fingerprint_token(token)
             values["token"] = hash_api_key(token)
         return values
+
+
+class UserIdentity(SQLModel, table=True):
+    __tablename__ = "user_identity"
+    __table_args__ = (
+        sa.UniqueConstraint("provider", "provider_subject", name="uq_user_identity_provider_subject"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    provider: str = Field(index=True)
+    provider_subject: str = Field(index=True)
+    email: Optional[str] = Field(default=None, index=True)
+    display_name: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    last_login_at: Optional[datetime] = Field(default=None)
+
+    user: Optional[User] = Relationship(back_populates="identities")
 
 
 class UptimeSnapshot(SQLModel, table=True):

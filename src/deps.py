@@ -323,9 +323,15 @@ def _get_valid_user_token(session: Session, authorization: Optional[str]) -> Use
     ut = _get_cached_user_token(session, token)
     if not ut:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    if getattr(ut, "revoked_at", None):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token revoked")
     if ut.expires_at and ut.expires_at < datetime.utcnow():
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
     return ut
+
+
+def get_current_user_token(authorization: Optional[str] = Header(None), session: Session = Depends(get_session)) -> UserToken:
+    return _get_valid_user_token(session, authorization)
 
 
 def _match_project_api_key(session: Session, project_id: int, key: str) -> tuple[Optional[ApiKey], bool, bool]:
@@ -822,7 +828,10 @@ def limit_by_api_key(project_id: int, authorization: Optional[str] = Header(None
 
 def get_current_user(authorization: Optional[str] = Header(None), session: Session = Depends(get_session)) -> User:
     ut = _get_valid_user_token(session, authorization)
-    return _get_cached_user(session, ut.user_id)
+    user = _get_cached_user(session, ut.user_id)
+    if not user or not getattr(user, "is_active", True):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User inactive")
+    return user
 
 
 def require_project_role(project_id: int, role: str, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)) -> ProjectMembership:

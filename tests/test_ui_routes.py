@@ -33,6 +33,12 @@ def test_main_ui_pages_render_expected_shell_and_auth_inputs(tmp_path):
             assert 'id="deliveryStatusFilter"' in resp.text
             assert 'id="deliveryInspectPanel"' in resp.text
 
+    account_resp = client.get("/ui/account")
+    assert account_resp.status_code == 200
+    assert "Enterprise Access" in account_resp.text
+    assert 'id="authEmail"' in account_resp.text
+    assert 'id="sessionRows"' in account_resp.text
+
 
 def test_dashboard_health_returns_expected_summary_fields(tmp_path):
     os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_ui_health.sqlite'}"
