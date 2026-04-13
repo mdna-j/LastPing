@@ -299,6 +299,10 @@ def add_org_member(
     ).first()
     if existing:
         existing.role = payload.role
+        existing.managed_provider = None
+        existing.managed_group = None
+        existing.managed_fallback_role = None
+        existing.managed_last_synced_at = None
         membership = existing
     else:
         membership = OrganizationMembership(organization_id=org_id, user_id=user.id, role=payload.role)
@@ -387,6 +391,10 @@ def add_team_member(
     ).first()
     if existing:
         existing.role = payload.role
+        existing.managed_provider = None
+        existing.managed_group = None
+        existing.managed_fallback_role = None
+        existing.managed_last_synced_at = None
         membership = existing
     else:
         membership = TeamMembership(team_id=team_id, user_id=user.id, role=payload.role)

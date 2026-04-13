@@ -121,6 +121,210 @@ def test_sso_group_mapping_syncs_org_and_team_roles(tmp_path, monkeypatch):
         assert identity is not None
         assert json.loads(identity.last_groups_json) == ["Acme-Admins", "Platform-Oncall"]
 
+    monkeypatch.setattr(
+        "src.routers.users.fetch_sso_profile",
+        lambda provider, token_payload: {
+            "subject": "google-subject-123",
+            "email": "group-sync@example.com",
+            "display_name": "Group Sync User",
+            "groups": [],
+        },
+    )
+
+    start = client.get("/users/sso/google/start?redirect_to=/ui/account", follow_redirects=False)
+    state = parse_qs(urlparse(start.headers["location"]).query)["state"][0]
+    callback = client.get(f"/users/sso/google/callback?code=test-code-2&state={state}&return_json=true")
+    assert callback.status_code == 200, callback.text
+
+    with Session(dbmod.engine) as session:
+        user = session.exec(select(User).where(User.email == "group-sync@example.com")).first()
+        assert user is not None
+        org_membership = session.exec(
+            select(OrganizationMembership).where(
+                OrganizationMembership.organization_id == org_id,
+                OrganizationMembership.user_id == user.id,
+            )
+        ).first()
+        assert org_membership is None
+
+        team_membership = session.exec(
+            select(TeamMembership).where(
+                TeamMembership.team_id == team_id,
+                TeamMembership.user_id == user.id,
+            )
+        ).first()
+        assert team_membership is None
+
+        identity = session.exec(
+            select(UserIdentity).where(
+                UserIdentity.user_id == user.id,
+                UserIdentity.provider == "google",
+            )
+        ).first()
+        assert identity is not None
+        assert json.loads(identity.last_groups_json) == []
+
+
+def test_sso_group_sync_reverts_to_manual_roles(tmp_path, monkeypatch):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_scim_group_sync_revert.sqlite'}"
+    os.environ["SSO_GOOGLE_CLIENT_ID"] = "client-id"
+    os.environ["SSO_GOOGLE_CLIENT_SECRET"] = "client-secret"
+
+    from src import db as dbmod
+    from src.main import app
+    from src.models import (
+        OrgRole,
+        Organization,
+        OrganizationGroupMapping,
+        OrganizationMembership,
+        Team,
+        TeamGroupMapping,
+        TeamMembership,
+        TeamRole,
+        User,
+        UserIdentity,
+    )
+    from src.security import hash_password
+
+    dbmod.create_db_and_tables()
+    client = TestClient(app)
+
+    with Session(dbmod.engine) as session:
+        org = Organization(name="Manual Fallback Org", slug="manual-fallback-org")
+        session.add(org)
+        session.commit()
+        session.refresh(org)
+        team = Team(organization_id=org.id, name="Ops", slug="ops")
+        session.add(team)
+        session.commit()
+        session.refresh(team)
+        user = User(email="fallback@example.com", hashed_password=hash_password("StrongPassword1"))
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        session.add(
+            OrganizationMembership(
+                organization_id=org.id,
+                user_id=user.id,
+                role=OrgRole.MEMBER.value,
+            )
+        )
+        session.add(
+            TeamMembership(
+                team_id=team.id,
+                user_id=user.id,
+                role=TeamRole.MEMBER.value,
+            )
+        )
+        session.add(
+            OrganizationGroupMapping(
+                organization_id=org.id,
+                provider="google",
+                external_group="Acme-Admins",
+                role=OrgRole.ADMIN.value,
+            )
+        )
+        session.add(
+            TeamGroupMapping(
+                organization_id=org.id,
+                team_id=team.id,
+                provider="google",
+                external_group="Ops-Leads",
+                role=TeamRole.LEAD.value,
+            )
+        )
+        session.commit()
+        org_id = org.id
+        team_id = team.id
+
+    monkeypatch.setattr(
+        "src.routers.users.exchange_sso_code",
+        lambda provider, code, redirect_uri: {"access_token": "google-access-token"},
+    )
+    monkeypatch.setattr(
+        "src.routers.users.fetch_sso_profile",
+        lambda provider, token_payload: {
+            "subject": "google-subject-manual",
+            "email": "fallback@example.com",
+            "display_name": "Fallback User",
+            "groups": ["Acme-Admins", "Ops-Leads"],
+        },
+    )
+
+    start = client.get("/users/sso/google/start?redirect_to=/ui/account", follow_redirects=False)
+    state = parse_qs(urlparse(start.headers["location"]).query)["state"][0]
+    callback = client.get(f"/users/sso/google/callback?code=manual-1&state={state}&return_json=true")
+    assert callback.status_code == 200, callback.text
+
+    with Session(dbmod.engine) as session:
+        user = session.exec(select(User).where(User.email == "fallback@example.com")).first()
+        assert user is not None
+        org_membership = session.exec(
+            select(OrganizationMembership).where(
+                OrganizationMembership.organization_id == org_id,
+                OrganizationMembership.user_id == user.id,
+            )
+        ).first()
+        assert org_membership is not None
+        assert org_membership.role == OrgRole.ADMIN.value
+        assert org_membership.managed_fallback_role == OrgRole.MEMBER.value
+
+        team_membership = session.exec(
+            select(TeamMembership).where(
+                TeamMembership.team_id == team_id,
+                TeamMembership.user_id == user.id,
+            )
+        ).first()
+        assert team_membership is not None
+        assert team_membership.role == TeamRole.LEAD.value
+        assert team_membership.managed_fallback_role == TeamRole.MEMBER.value
+
+    monkeypatch.setattr(
+        "src.routers.users.fetch_sso_profile",
+        lambda provider, token_payload: {
+            "subject": "google-subject-manual",
+            "email": "fallback@example.com",
+            "display_name": "Fallback User",
+            "groups": [],
+        },
+    )
+    start = client.get("/users/sso/google/start?redirect_to=/ui/account", follow_redirects=False)
+    state = parse_qs(urlparse(start.headers["location"]).query)["state"][0]
+    callback = client.get(f"/users/sso/google/callback?code=manual-2&state={state}&return_json=true")
+    assert callback.status_code == 200, callback.text
+
+    with Session(dbmod.engine) as session:
+        user = session.exec(select(User).where(User.email == "fallback@example.com")).first()
+        assert user is not None
+        org_membership = session.exec(
+            select(OrganizationMembership).where(
+                OrganizationMembership.organization_id == org_id,
+                OrganizationMembership.user_id == user.id,
+            )
+        ).first()
+        assert org_membership is not None
+        assert org_membership.role == OrgRole.MEMBER.value
+        assert org_membership.managed_provider is None
+
+        team_membership = session.exec(
+            select(TeamMembership).where(
+                TeamMembership.team_id == team_id,
+                TeamMembership.user_id == user.id,
+            )
+        ).first()
+        assert team_membership is not None
+        assert team_membership.role == TeamRole.MEMBER.value
+        assert team_membership.managed_provider is None
+
+        identity = session.exec(
+            select(UserIdentity).where(
+                UserIdentity.user_id == user.id,
+                UserIdentity.provider == "google",
+            )
+        ).first()
+        assert identity is not None
+        assert json.loads(identity.last_groups_json) == []
+
 
 def test_scim_token_rotation_and_org_scoped_provisioning(tmp_path):
     os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_scim_group_sync_provisioning.sqlite'}"
@@ -255,3 +459,22 @@ def test_scim_token_rotation_and_org_scoped_provisioning(tmp_path):
             )
         ).first()
         assert team_membership is None
+
+    reprovisioned = client.post(
+        "/scim/v2/Users",
+        headers=scim_headers,
+        json={
+            "userName": "scim-user@example.com",
+            "displayName": "SCIM User",
+            "externalId": "ext-123",
+            "active": True,
+            "groups": [{"display": "admins"}, {"display": "platform"}],
+        },
+    )
+    assert reprovisioned.status_code == 201, reprovisioned.text
+
+    deleted = client.delete(f"/scim/v2/Users/{user_id}", headers=scim_headers)
+    assert deleted.status_code == 204, deleted.text
+
+    missing = client.get(f"/scim/v2/Users/{user_id}", headers=scim_headers)
+    assert missing.status_code == 404

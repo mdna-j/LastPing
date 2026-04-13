@@ -694,7 +694,9 @@ def finish_sso_login(
         details=(
             f"provider={provider_cfg.name},groups={sync_summary['group_count']},"
             f"org_added={sync_summary['org_memberships_added']},org_upgraded={sync_summary['org_roles_upgraded']},"
-            f"team_added={sync_summary['team_memberships_added']},team_upgraded={sync_summary['team_roles_upgraded']}"
+            f"org_removed={sync_summary['org_memberships_removed']},org_downgraded={sync_summary['org_roles_downgraded']},"
+            f"team_added={sync_summary['team_memberships_added']},team_upgraded={sync_summary['team_roles_upgraded']},"
+            f"team_removed={sync_summary['team_memberships_removed']},team_downgraded={sync_summary['team_roles_downgraded']}"
         ),
         request=request,
         actor_override=f"user:{user.id}",

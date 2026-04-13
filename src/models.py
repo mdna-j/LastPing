@@ -240,6 +240,10 @@ class OrganizationMembership(SQLModel, table=True):
     organization_id: int = Field(foreign_key="organization.id", index=True)
     user_id: int = Field(foreign_key="user.id", index=True)
     role: str = Field(default=OrgRole.MEMBER.value, index=True)
+    managed_provider: Optional[str] = Field(default=None, index=True)
+    managed_group: Optional[str] = Field(default=None)
+    managed_fallback_role: Optional[str] = Field(default=None)
+    managed_last_synced_at: Optional[datetime] = Field(default=None)
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
     organization: Optional["Organization"] = Relationship(back_populates="memberships")
@@ -265,6 +269,10 @@ class TeamMembership(SQLModel, table=True):
     team_id: int = Field(foreign_key="team.id", index=True)
     user_id: int = Field(foreign_key="user.id", index=True)
     role: str = Field(default=TeamRole.MEMBER.value, index=True)
+    managed_provider: Optional[str] = Field(default=None, index=True)
+    managed_group: Optional[str] = Field(default=None)
+    managed_fallback_role: Optional[str] = Field(default=None)
+    managed_last_synced_at: Optional[datetime] = Field(default=None)
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
     team: Optional["Team"] = Relationship(back_populates="memberships")

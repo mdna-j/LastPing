@@ -156,6 +156,25 @@ def _record_scim_audit(
     session.commit()
 
 
+def _deprovision_scim_access(
+    session: Session,
+    *,
+    org: Organization,
+    user: User,
+    identity: Optional[UserIdentity],
+    occurred_at: datetime,
+    remove_identity: bool,
+) -> None:
+    _ensure_scim_membership(session, org=org, user=user, active=False, occurred_at=occurred_at)
+    if identity is None:
+        return
+    if remove_identity:
+        session.delete(identity)
+    else:
+        identity.last_groups_json = "[]"
+        session.add(identity)
+
+
 def _membership_for_org(session: Session, *, org_id: int, user_id: int) -> Optional[OrganizationMembership]:
     return session.exec(
         select(OrganizationMembership).where(
@@ -347,9 +366,10 @@ def create_user(
         email=email,
         occurred_at=now,
     )
-    _ensure_scim_membership(session, org=org, user=user, active=active, occurred_at=now)
+    sync_summary = None
     if active:
-        sync_identity_groups(
+        _ensure_scim_membership(session, org=org, user=user, active=True, occurred_at=now)
+        sync_summary = sync_identity_groups(
             session,
             user=user,
             identity=identity,
@@ -358,8 +378,14 @@ def create_user(
             occurred_at=now,
         )
     else:
-        identity.last_groups_json = "[]"
-        session.add(identity)
+        _deprovision_scim_access(
+            session,
+            org=org,
+            user=user,
+            identity=identity,
+            occurred_at=now,
+            remove_identity=False,
+        )
     session.commit()
     session.refresh(user)
     session.refresh(identity)
@@ -368,7 +394,13 @@ def create_user(
         org=org,
         action="scim_provision_user",
         target_id=user.id,
-        details=f"email={email}, active={active}",
+        details=(
+            f"email={email}, active={active}, groups={len(groups)}, "
+            f"org_added={(sync_summary or {}).get('org_memberships_added', 0)}, "
+            f"org_removed={(sync_summary or {}).get('org_memberships_removed', 0)}, "
+            f"team_added={(sync_summary or {}).get('team_memberships_added', 0)}, "
+            f"team_removed={(sync_summary or {}).get('team_memberships_removed', 0)}"
+        ),
     )
     return _serialize_user_resource(org=org, user=user, identity=identity, active=active)
 
@@ -397,6 +429,7 @@ def patch_user(
     for operation in operations:
         if not isinstance(operation, dict):
             continue
+        op_name = str(operation.get("op") or "").strip().lower()
         path = str(operation.get("path") or "").strip().lower()
         value = operation.get("value")
         if path == "active":
@@ -413,7 +446,9 @@ def patch_user(
         elif path in {"displayname", "name.formatted"}:
             new_display_name = str(value or "").strip() or new_display_name
         elif path == "groups":
-            if isinstance(value, list):
+            if op_name == "remove":
+                new_groups = []
+            elif isinstance(value, list):
                 normalized = []
                 for item in value:
                     if isinstance(item, dict):
@@ -445,9 +480,10 @@ def patch_user(
         identity.display_name = new_display_name
         session.add(identity)
 
-    _ensure_scim_membership(session, org=org, user=user, active=new_active, occurred_at=now)
+    sync_summary = None
     if new_active:
-        sync_identity_groups(
+        _ensure_scim_membership(session, org=org, user=user, active=True, occurred_at=now)
+        sync_summary = sync_identity_groups(
             session,
             user=user,
             identity=identity,
@@ -456,8 +492,14 @@ def patch_user(
             occurred_at=now,
         )
     else:
-        identity.last_groups_json = "[]"
-        session.add(identity)
+        _deprovision_scim_access(
+            session,
+            org=org,
+            user=user,
+            identity=identity,
+            occurred_at=now,
+            remove_identity=False,
+        )
     session.commit()
     session.refresh(user)
     if identity is not None:
@@ -467,6 +509,38 @@ def patch_user(
         org=org,
         action="scim_patch_user",
         target_id=user.id,
-        details=f"active={new_active}, groups={len(new_groups)}",
+        details=(
+            f"active={new_active}, groups={len(new_groups)}, "
+            f"org_added={(sync_summary or {}).get('org_memberships_added', 0)}, "
+            f"org_removed={(sync_summary or {}).get('org_memberships_removed', 0)}, "
+            f"team_added={(sync_summary or {}).get('team_memberships_added', 0)}, "
+            f"team_removed={(sync_summary or {}).get('team_memberships_removed', 0)}"
+        ),
     )
     return _serialize_user_resource(org=org, user=user, identity=identity, active=new_active)
+
+
+@router.delete("/Users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_user(
+    user_id: int = Path(..., ge=1),
+    org: Organization = Depends(_get_scim_org),
+    session: Session = Depends(get_session),
+):
+    user, identity, _active = _resolve_scim_user(session, org=org, user_id=user_id)
+    now = datetime.utcnow()
+    _deprovision_scim_access(
+        session,
+        org=org,
+        user=user,
+        identity=identity,
+        occurred_at=now,
+        remove_identity=True,
+    )
+    session.commit()
+    _record_scim_audit(
+        session,
+        org=org,
+        action="scim_delete_user",
+        target_id=user.id,
+        details=f"user_id={user.id}",
+    )
