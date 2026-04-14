@@ -10,7 +10,7 @@ from sqlmodel import Session, select
 
 from ..db import get_session
 from ..identity_sync import sync_identity_groups
-from ..models import AuditLog, OrgRole, Organization, OrganizationMembership, Team, TeamMembership, User, UserIdentity
+from ..models import AuditLog, OrgRole, Organization, OrganizationMembership, Team, TeamGroupMapping, TeamMembership, TeamRole, User, UserIdentity
 from ..security import hash_password
 
 router = APIRouter(prefix="/scim/v2", tags=["scim"])
@@ -18,6 +18,12 @@ router = APIRouter(prefix="/scim/v2", tags=["scim"])
 SCIM_LIST_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:ListResponse"
 SCIM_PATCH_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:PatchOp"
 SCIM_USER_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:User"
+SCIM_GROUP_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:Group"
+LASTPING_GROUP_SCHEMA = "urn:lastping:schemas:scim:group:1.0"
+
+
+def _slugify(value: str) -> str:
+    return "-".join(part for part in value.strip().lower().replace("_", "-").split() if part)
 
 
 def _parse_bearer_token(authorization: Optional[str]) -> Optional[str]:
@@ -110,6 +116,77 @@ def _identity_groups(identity: Optional[UserIdentity]) -> list[str]:
     return [str(item) for item in payload if str(item or "").strip()]
 
 
+def _scim_identities_for_org(session: Session, org: Organization) -> list[UserIdentity]:
+    return session.exec(
+        select(UserIdentity).where(
+            UserIdentity.provider == "scim",
+            UserIdentity.provider_subject.like(f"{org.id}:%"),
+        )
+    ).all()
+
+
+def _groups_without(group_names: list[str], target: str) -> list[str]:
+    lowered = target.strip().lower()
+    return [group for group in group_names if group.strip().lower() != lowered]
+
+
+def _groups_with(group_names: list[str], target: str) -> list[str]:
+    values = _groups_without(group_names, target)
+    values.append(target)
+    values.sort(key=str.lower)
+    return values
+
+
+def _group_member_rows(session: Session, *, org: Organization, external_group: str) -> list[tuple[User, UserIdentity]]:
+    rows: list[tuple[User, UserIdentity]] = []
+    lowered = external_group.strip().lower()
+    for identity in _scim_identities_for_org(session, org):
+        groups = {group.strip().lower() for group in _identity_groups(identity)}
+        if lowered not in groups:
+            continue
+        user = session.get(User, identity.user_id)
+        if user is None:
+            continue
+        rows.append((user, identity))
+    rows.sort(key=lambda row: (row[0].email or "").lower())
+    return rows
+
+
+def _resolve_scim_group_mapping(session: Session, *, org: Organization, group_id: int) -> TeamGroupMapping:
+    mapping = session.get(TeamGroupMapping, group_id)
+    if not mapping or mapping.organization_id != org.id or mapping.provider != "scim":
+        raise HTTPException(status_code=404, detail="SCIM group not found")
+    return mapping
+
+
+def _serialize_group_resource(session: Session, *, org: Organization, mapping: TeamGroupMapping) -> dict[str, Any]:
+    team = session.get(Team, mapping.team_id)
+    members = [
+        {
+            "value": str(user.id),
+            "$ref": f"/scim/v2/Users/{user.id}",
+            "display": user.display_name or user.email,
+        }
+        for user, _identity in _group_member_rows(session, org=org, external_group=mapping.external_group)
+    ]
+    return {
+        "schemas": [SCIM_GROUP_SCHEMA, LASTPING_GROUP_SCHEMA],
+        "id": str(mapping.id),
+        "displayName": mapping.external_group,
+        "members": members,
+        LASTPING_GROUP_SCHEMA: {
+            "teamId": mapping.team_id,
+            "teamName": team.name if team else None,
+            "role": mapping.role,
+        },
+        "meta": {
+            "resourceType": "Group",
+            "created": mapping.created_at.isoformat() if mapping.created_at else None,
+            "organizationId": org.id,
+        },
+    }
+
+
 def _serialize_user_resource(
     *,
     org: Organization,
@@ -140,6 +217,7 @@ def _record_scim_audit(
     *,
     org: Organization,
     action: str,
+    target_type: str = "user",
     target_id: Optional[int],
     details: Optional[str],
 ) -> None:
@@ -147,7 +225,7 @@ def _record_scim_audit(
         AuditLog(
             actor=f"scim:org:{org.id}",
             action=action,
-            target_type="user",
+            target_type=target_type,
             target_id=target_id,
             details=details,
             org_id=org.id,
@@ -217,6 +295,84 @@ def _upsert_scim_identity(
     return identity
 
 
+def _ensure_scim_identity_for_user(
+    session: Session,
+    *,
+    org: Organization,
+    user: User,
+    occurred_at: datetime,
+) -> UserIdentity:
+    identity = session.exec(
+        select(UserIdentity).where(
+            UserIdentity.user_id == user.id,
+            UserIdentity.provider == "scim",
+            UserIdentity.provider_subject.like(f"{org.id}:%"),
+        )
+    ).first()
+    if identity is None:
+        identity = UserIdentity(
+            user_id=user.id,
+            provider="scim",
+            provider_subject=f"{org.id}:{user.email.lower()}",
+            email=user.email,
+            display_name=user.display_name or user.email,
+            created_at=occurred_at,
+        )
+    else:
+        identity.email = user.email
+        identity.display_name = user.display_name or user.email
+    session.add(identity)
+    return identity
+
+
+def _resolve_group_member_user(
+    session: Session,
+    *,
+    org: Organization,
+    member_value: Any,
+    occurred_at: datetime,
+) -> tuple[User, UserIdentity]:
+    value = str(member_value or "").strip()
+    if not value:
+        raise HTTPException(status_code=400, detail="SCIM group member value is required")
+    user: Optional[User] = None
+    if value.isdigit():
+        user = session.get(User, int(value))
+    if user is None:
+        user = session.exec(select(User).where(User.email == value.lower())).first()
+    if user is None:
+        raise HTTPException(status_code=404, detail=f"SCIM member not found: {value}")
+    identity = _ensure_scim_identity_for_user(session, org=org, user=user, occurred_at=occurred_at)
+    return user, identity
+
+
+def _member_user_ids_from_payload(
+    session: Session,
+    *,
+    org: Organization,
+    members_payload: Any,
+    occurred_at: datetime,
+) -> set[int]:
+    if members_payload is None:
+        return set()
+    if not isinstance(members_payload, list):
+        raise HTTPException(status_code=400, detail="SCIM group members must be a list")
+    user_ids: set[int] = set()
+    for member in members_payload:
+        if isinstance(member, dict):
+            value = member.get("value") or member.get("email") or member.get("userName")
+        else:
+            value = member
+        user, _identity = _resolve_group_member_user(
+            session,
+            org=org,
+            member_value=value,
+            occurred_at=occurred_at,
+        )
+        user_ids.add(user.id)
+    return user_ids
+
+
 def _ensure_scim_membership(
     session: Session,
     *,
@@ -275,6 +431,82 @@ def _resolve_scim_user(session: Session, *, org: Organization, user_id: int) -> 
     return user, identity, membership is not None
 
 
+def _ensure_group_team(
+    session: Session,
+    *,
+    org: Organization,
+    display_name: str,
+    team_id: Optional[int],
+) -> Team:
+    if team_id is not None:
+        team = session.get(Team, team_id)
+        if not team or team.organization_id != org.id:
+            raise HTTPException(status_code=404, detail="SCIM team target not found")
+        return team
+    teams = session.exec(select(Team).where(Team.organization_id == org.id)).all()
+    for team in teams:
+        if (team.name or "").strip().lower() == display_name.strip().lower():
+            return team
+    team = Team(
+        organization_id=org.id,
+        name=display_name,
+        slug=_slugify(display_name) or None,
+    )
+    session.add(team)
+    session.flush()
+    return team
+
+
+def _apply_group_membership_sync(
+    session: Session,
+    *,
+    org: Organization,
+    mapping: TeamGroupMapping,
+    desired_user_ids: set[int],
+    occurred_at: datetime,
+) -> dict[str, int]:
+    current_rows = _group_member_rows(session, org=org, external_group=mapping.external_group)
+    current_user_ids = {user.id for user, _identity in current_rows}
+    affected_user_ids = current_user_ids | desired_user_ids
+    totals = {
+        "users_added": 0,
+        "users_removed": 0,
+        "org_memberships_added": 0,
+        "org_memberships_removed": 0,
+        "team_memberships_added": 0,
+        "team_memberships_removed": 0,
+    }
+    for user_id in affected_user_ids:
+        user = session.get(User, user_id)
+        if user is None:
+            continue
+        identity = _ensure_scim_identity_for_user(session, org=org, user=user, occurred_at=occurred_at)
+        existing_groups = _identity_groups(identity)
+        if user_id in desired_user_ids:
+            updated_groups = _groups_with(existing_groups, mapping.external_group)
+        else:
+            updated_groups = _groups_without(existing_groups, mapping.external_group)
+        if updated_groups == existing_groups:
+            continue
+        if user_id in desired_user_ids:
+            totals["users_added"] += 1
+        else:
+            totals["users_removed"] += 1
+        summary = sync_identity_groups(
+            session,
+            user=user,
+            identity=identity,
+            provider="scim",
+            groups=updated_groups,
+            occurred_at=occurred_at,
+        )
+        totals["org_memberships_added"] += summary["org_memberships_added"]
+        totals["org_memberships_removed"] += summary["org_memberships_removed"]
+        totals["team_memberships_added"] += summary["team_memberships_added"]
+        totals["team_memberships_removed"] += summary["team_memberships_removed"]
+    return totals
+
+
 @router.get("/ServiceProviderConfig")
 def service_provider_config():
     return {
@@ -287,6 +519,278 @@ def service_provider_config():
         "etag": {"supported": False},
         "authenticationSchemes": [{"type": "oauthbearertoken", "name": "Bearer Token"}],
     }
+
+
+@router.get("/Groups")
+def list_groups(
+    org: Organization = Depends(_get_scim_org),
+    session: Session = Depends(get_session),
+):
+    mappings = session.exec(
+        select(TeamGroupMapping).where(
+            TeamGroupMapping.organization_id == org.id,
+            TeamGroupMapping.provider == "scim",
+        )
+    ).all()
+    resources = [_serialize_group_resource(session, org=org, mapping=mapping) for mapping in mappings]
+    resources.sort(key=lambda row: row["displayName"].lower())
+    return {
+        "schemas": [SCIM_LIST_SCHEMA],
+        "totalResults": len(resources),
+        "itemsPerPage": len(resources),
+        "startIndex": 1,
+        "Resources": resources,
+    }
+
+
+@router.get("/Groups/{group_id}")
+def get_group(
+    group_id: int = Path(..., ge=1),
+    org: Organization = Depends(_get_scim_org),
+    session: Session = Depends(get_session),
+):
+    mapping = _resolve_scim_group_mapping(session, org=org, group_id=group_id)
+    return _serialize_group_resource(session, org=org, mapping=mapping)
+
+
+@router.post("/Groups", status_code=status.HTTP_201_CREATED)
+def create_group(
+    payload: dict[str, Any] = Body(...),
+    org: Organization = Depends(_get_scim_org),
+    session: Session = Depends(get_session),
+):
+    display_name = str(payload.get("displayName") or "").strip()
+    if not display_name:
+        raise HTTPException(status_code=400, detail="SCIM group payload is missing displayName")
+    extension = payload.get(LASTPING_GROUP_SCHEMA) or {}
+    if extension is not None and not isinstance(extension, dict):
+        raise HTTPException(status_code=400, detail="SCIM group extension payload must be an object")
+    team_id = extension.get("teamId")
+    role = str(extension.get("role") or TeamRole.MEMBER.value).strip().lower()
+    if role not in {TeamRole.MEMBER.value, TeamRole.LEAD.value}:
+        raise HTTPException(status_code=400, detail="SCIM group role must be member or lead")
+    now = datetime.utcnow()
+
+    existing = session.exec(
+        select(TeamGroupMapping).where(
+            TeamGroupMapping.organization_id == org.id,
+            TeamGroupMapping.provider == "scim",
+            TeamGroupMapping.external_group == display_name,
+        )
+    ).first()
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="SCIM group already exists")
+
+    team = _ensure_group_team(session, org=org, display_name=display_name, team_id=team_id)
+    mapping = TeamGroupMapping(
+        organization_id=org.id,
+        team_id=team.id,
+        provider="scim",
+        external_group=display_name,
+        role=role,
+        created_at=now,
+    )
+    session.add(mapping)
+    session.flush()
+    desired_user_ids = _member_user_ids_from_payload(
+        session,
+        org=org,
+        members_payload=payload.get("members"),
+        occurred_at=now,
+    )
+    sync_totals = _apply_group_membership_sync(
+        session,
+        org=org,
+        mapping=mapping,
+        desired_user_ids=desired_user_ids,
+        occurred_at=now,
+    )
+    session.commit()
+    session.refresh(mapping)
+    _record_scim_audit(
+        session,
+        org=org,
+        action="scim_create_group",
+        target_type="group",
+        target_id=mapping.id,
+        details=(
+            f"display_name={mapping.external_group}, team_id={mapping.team_id}, role={mapping.role}, "
+            f"users_added={sync_totals['users_added']}, users_removed={sync_totals['users_removed']}"
+        ),
+    )
+    return _serialize_group_resource(session, org=org, mapping=mapping)
+
+
+@router.patch("/Groups/{group_id}")
+def patch_group(
+    group_id: int = Path(..., ge=1),
+    payload: dict[str, Any] = Body(...),
+    org: Organization = Depends(_get_scim_org),
+    session: Session = Depends(get_session),
+):
+    schemas = payload.get("schemas") or []
+    if schemas and SCIM_PATCH_SCHEMA not in schemas:
+        raise HTTPException(status_code=400, detail="Unsupported SCIM patch schema")
+    mapping = _resolve_scim_group_mapping(session, org=org, group_id=group_id)
+    now = datetime.utcnow()
+    old_display_name = mapping.external_group
+    new_display_name = mapping.external_group
+    new_team_id = mapping.team_id
+    new_role = mapping.role
+    desired_user_ids: Optional[set[int]] = None
+
+    operations = payload.get("Operations")
+    if not isinstance(operations, list) or not operations:
+        raise HTTPException(status_code=400, detail="SCIM patch payload is missing Operations")
+
+    for operation in operations:
+        if not isinstance(operation, dict):
+            continue
+        op_name = str(operation.get("op") or "").strip().lower()
+        path = str(operation.get("path") or "").strip().lower()
+        value = operation.get("value")
+        if path.endswith("displayname"):
+            new_display_name = str(value or "").strip() or new_display_name
+        elif path.endswith("members"):
+            if op_name == "remove":
+                desired_user_ids = set()
+            else:
+                desired_user_ids = _member_user_ids_from_payload(
+                    session,
+                    org=org,
+                    members_payload=value,
+                    occurred_at=now,
+                )
+        elif path.endswith("teamid"):
+            if value is None:
+                raise HTTPException(status_code=400, detail="SCIM group teamId cannot be empty")
+            new_team_id = int(value)
+        elif path.endswith("role"):
+            candidate_role = str(value or "").strip().lower()
+            if candidate_role not in {TeamRole.MEMBER.value, TeamRole.LEAD.value}:
+                raise HTTPException(status_code=400, detail="SCIM group role must be member or lead")
+            new_role = candidate_role
+        elif not path and isinstance(value, dict):
+            if value.get("displayName"):
+                new_display_name = str(value.get("displayName") or "").strip() or new_display_name
+            if "members" in value:
+                desired_user_ids = _member_user_ids_from_payload(
+                    session,
+                    org=org,
+                    members_payload=value.get("members"),
+                    occurred_at=now,
+                )
+            extension = value.get(LASTPING_GROUP_SCHEMA) or {}
+            if isinstance(extension, dict):
+                if extension.get("teamId") is not None:
+                    new_team_id = int(extension["teamId"])
+                if extension.get("role"):
+                    candidate_role = str(extension["role"]).strip().lower()
+                    if candidate_role not in {TeamRole.MEMBER.value, TeamRole.LEAD.value}:
+                        raise HTTPException(status_code=400, detail="SCIM group role must be member or lead")
+                    new_role = candidate_role
+
+    if new_display_name != old_display_name:
+        conflict = session.exec(
+            select(TeamGroupMapping).where(
+                TeamGroupMapping.organization_id == org.id,
+                TeamGroupMapping.provider == "scim",
+                TeamGroupMapping.external_group == new_display_name,
+                TeamGroupMapping.id != mapping.id,
+            )
+        ).first()
+        if conflict is not None:
+            raise HTTPException(status_code=409, detail="SCIM group displayName already exists")
+        affected_rows = _group_member_rows(session, org=org, external_group=old_display_name)
+        mapping.external_group = new_display_name
+        session.add(mapping)
+        for user, identity in affected_rows:
+            updated_groups = _groups_with(_groups_without(_identity_groups(identity), old_display_name), new_display_name)
+            sync_identity_groups(
+                session,
+                user=user,
+                identity=identity,
+                provider="scim",
+                groups=updated_groups,
+                occurred_at=now,
+            )
+
+    if new_team_id != mapping.team_id:
+        team = session.get(Team, new_team_id)
+        if not team or team.organization_id != org.id:
+            raise HTTPException(status_code=404, detail="SCIM team target not found")
+        mapping.team_id = new_team_id
+        session.add(mapping)
+
+    if new_role != mapping.role:
+        mapping.role = new_role
+        session.add(mapping)
+        if desired_user_ids is None:
+            desired_user_ids = {user.id for user, _identity in _group_member_rows(session, org=org, external_group=mapping.external_group)}
+
+    sync_totals = {
+        "users_added": 0,
+        "users_removed": 0,
+        "org_memberships_added": 0,
+        "org_memberships_removed": 0,
+        "team_memberships_added": 0,
+        "team_memberships_removed": 0,
+    }
+    if desired_user_ids is not None:
+        sync_totals = _apply_group_membership_sync(
+            session,
+            org=org,
+            mapping=mapping,
+            desired_user_ids=desired_user_ids,
+            occurred_at=now,
+        )
+
+    session.commit()
+    session.refresh(mapping)
+    _record_scim_audit(
+        session,
+        org=org,
+        action="scim_patch_group",
+        target_type="group",
+        target_id=mapping.id,
+        details=(
+            f"display_name={mapping.external_group}, team_id={mapping.team_id}, role={mapping.role}, "
+            f"users_added={sync_totals['users_added']}, users_removed={sync_totals['users_removed']}"
+        ),
+    )
+    return _serialize_group_resource(session, org=org, mapping=mapping)
+
+
+@router.delete("/Groups/{group_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_group(
+    group_id: int = Path(..., ge=1),
+    org: Organization = Depends(_get_scim_org),
+    session: Session = Depends(get_session),
+):
+    mapping = _resolve_scim_group_mapping(session, org=org, group_id=group_id)
+    now = datetime.utcnow()
+    display_name = mapping.external_group
+    affected_rows = _group_member_rows(session, org=org, external_group=mapping.external_group)
+    session.delete(mapping)
+    for user, identity in affected_rows:
+        updated_groups = _groups_without(_identity_groups(identity), mapping.external_group)
+        sync_identity_groups(
+            session,
+            user=user,
+            identity=identity,
+            provider="scim",
+            groups=updated_groups,
+            occurred_at=now,
+        )
+    session.commit()
+    _record_scim_audit(
+        session,
+        org=org,
+        action="scim_delete_group",
+        target_type="group",
+        target_id=group_id,
+        details=f"display_name={display_name}",
+    )
 
 
 @router.get("/Users")
