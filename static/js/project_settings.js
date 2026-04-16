@@ -172,22 +172,139 @@ function queueBadgeClass(status){
   return "queue-badge queue-badge-queued";
 }
 
-function renderDeliveryQueueCards(rows){
+function queueSummaryStateClass(state){
+  if(state === "healthy") return "kpi-healthy";
+  if(state === "warning") return "kpi-warning";
+  if(state === "critical") return "kpi-critical";
+  if(state === "flapping") return "kpi-flapping";
+  return "kpi-neutral";
+}
+
+function queueThresholdState(value, warningThreshold, criticalThreshold){
+  const numeric = Number(value || 0);
+  if(numeric >= criticalThreshold) return "kpi-critical";
+  if(numeric >= warningThreshold) return "kpi-warning";
+  return "kpi-healthy";
+}
+
+function queueRateState(rate, warningThreshold, criticalThreshold){
+  const numeric = Number(rate || 0);
+  if(numeric >= criticalThreshold) return "kpi-critical";
+  if(numeric >= warningThreshold) return "kpi-warning";
+  return "kpi-healthy";
+}
+
+function queueFormatDuration(value){
+  if(window.LastPingShell && window.LastPingShell.formatDuration){
+    return window.LastPingShell.formatDuration(value);
+  }
+  if(value === null || value === undefined || Number.isNaN(Number(value))) return "n/a";
+  return `${Math.max(0, Math.floor(Number(value)))}s`;
+}
+
+function queueFormatPerfMs(value){
+  if(window.LastPingShell && window.LastPingShell.formatPerfMs){
+    return window.LastPingShell.formatPerfMs(Number(value));
+  }
+  if(value === null || value === undefined || Number.isNaN(Number(value))) return "n/a";
+  return `${Number(value).toFixed(1)}ms`;
+}
+
+function queueFormatPercent(value, digits = 1){
+  if(value === null || value === undefined || Number.isNaN(Number(value))) return "n/a";
+  return `${(Number(value) * 100).toFixed(digits)}%`;
+}
+
+function renderDeliveryQueueCards(rows, snapshot){
   const root = document.getElementById("deliveryQueueCards");
   if(!root) return;
   const deliveries = Array.isArray(rows) ? rows : [];
-  const count = (status)=> deliveries.filter((row)=> row.delivery_status === status).length;
+  const queue = snapshot || null;
+  if(!queue){
+    const count = (status)=> deliveries.filter((row)=> row.delivery_status === status).length;
+    const items = [
+      ["Queued", count("queued"), count("queued") > 0 ? "kpi-warning" : "kpi-neutral", "Waiting for first send attempt", "Showing visible rows only"],
+      ["Retrying", count("retry"), count("retry") > 0 ? "kpi-warning" : "kpi-neutral", "Backoff or manual replay candidates", "Showing visible rows only"],
+      ["Processing", count("processing"), count("processing") > 0 ? "kpi-warning" : "kpi-healthy", "Currently claimed by a worker", "Showing visible rows only"],
+      ["Dead", count("dead"), count("dead") > 0 ? "kpi-critical" : "kpi-healthy", "Needs inspect, replay, or discard action", "Showing visible rows only"],
+    ];
+    root.innerHTML = items.map(([label, value, state, sub, meta])=> `
+      <article class="card kpi-card ${state}">
+        <div class="metric-label">${escapeHtml(label)}</div>
+        <div class="metric-value">${escapeHtml(value)}</div>
+        <div class="metric-sub">${escapeHtml(sub)}</div>
+        <div class="muted">${escapeHtml(meta)}</div>
+      </article>
+    `).join("");
+    return;
+  }
+
+  const channelParts = queue.per_channel_success
+    ? Object.entries(queue.per_channel_success).map(([channel, row])=> {
+      const completed = Number(row.completed || 0);
+      const delivered = Number(row.delivered || 0);
+      return `${channel} ${queueFormatPercent(row.success_rate, 0)} (${delivered}/${completed || 0})`;
+    })
+    : [];
+  const completedWindow = Number(queue.completed_window || 0);
+  const deliveredWindow = Number(queue.delivered_window || 0);
+  const filteredRows = deliveries.length;
   const items = [
-    ["Queued", count("queued"), count("queued") > 0 ? "kpi-warning" : "kpi-neutral", "Waiting for first send attempt"],
-    ["Retrying", count("retry"), count("retry") > 0 ? "kpi-warning" : "kpi-neutral", "Backoff or manual replay candidates"],
-    ["Processing", count("processing"), count("processing") > 0 ? "kpi-warning" : "kpi-healthy", "Currently claimed by a worker"],
-    ["Dead", count("dead"), count("dead") > 0 ? "kpi-critical" : "kpi-healthy", "Needs inspect, replay, or discard action"],
+    [
+      "Queue backlog",
+      Number(queue.depth || 0) > 0 ? String(queue.depth) : "clear",
+      queueSummaryStateClass(queue.state),
+      `${queue.queued || 0} queued | ${queue.retrying || 0} retry | ${queue.processing || 0} processing`,
+      `Overall async queue health. Table below shows ${filteredRows} filtered rows.`,
+    ],
+    [
+      "Oldest pending",
+      queue.oldest_pending_seconds ? queueFormatDuration(queue.oldest_pending_seconds) : "clear",
+      Number(queue.depth || 0) === 0 ? "kpi-healthy" : queueThresholdState(queue.oldest_pending_seconds, 300, 1800),
+      Number(queue.depth || 0) > 0 ? "Age of the oldest item still waiting to complete" : "No queued or retrying deliveries right now",
+      `Full queue snapshot across all channels.`,
+    ],
+    [
+      "Retry pressure",
+      queueFormatPercent(queue.retry_rate),
+      queueRateState(queue.retry_rate, 0.1, 0.5),
+      `${queue.retrying || 0} items currently retrying`,
+      `Measured over the last ${queue.window_hours || 24}h of queue activity.`,
+    ],
+    [
+      "Dead letters",
+      String(queue.dead_letters || 0),
+      Number(queue.dead_letters || 0) === 0 ? "kpi-healthy" : queueThresholdState(queue.dead_letters, 1, 5),
+      `Deliveries moved to dead state in the last ${queue.window_hours || 24}h`,
+      Number(queue.dead_letters || 0) > 0 ? "Replay, inspect, or poison these intentionally." : "No recent dead-letter pressure.",
+    ],
+    [
+      "Delivery latency",
+      queue.p95_delivery_latency_ms !== null && queue.p95_delivery_latency_ms !== undefined
+        ? queueFormatPerfMs(queue.p95_delivery_latency_ms)
+        : "n/a",
+      queue.p95_delivery_latency_ms === null || queue.p95_delivery_latency_ms === undefined
+        ? "kpi-neutral"
+        : queueThresholdState(queue.p95_delivery_latency_ms, 1500, 5000),
+      queue.avg_delivery_latency_ms !== null && queue.avg_delivery_latency_ms !== undefined
+        ? `avg ${queueFormatPerfMs(queue.avg_delivery_latency_ms)}`
+        : "No recent successful deliveries to time",
+      `${deliveredWindow} delivered / ${completedWindow} completed in the recent window.`,
+    ],
+    [
+      "Success rate",
+      completedWindow > 0 ? queueFormatPercent(queue.success_rate) : "n/a",
+      completedWindow === 0 ? "kpi-neutral" : (Number(queue.success_rate || 0) < 0.8 ? "kpi-critical" : (Number(queue.success_rate || 0) < 0.95 ? "kpi-warning" : "kpi-healthy")),
+      completedWindow > 0 ? `${deliveredWindow} of ${completedWindow} completed deliveries succeeded` : "No recent completed deliveries yet",
+      channelParts.length ? channelParts.join(" | ") : "Per-channel success rates appear here once deliveries complete.",
+    ],
   ];
-  root.innerHTML = items.map(([label, value, state, sub])=> `
+  root.innerHTML = items.map(([label, value, state, sub, meta])=> `
     <article class="card kpi-card ${state}">
       <div class="metric-label">${escapeHtml(label)}</div>
       <div class="metric-value">${escapeHtml(value)}</div>
       <div class="metric-sub">${escapeHtml(sub)}</div>
+      <div class="muted">${escapeHtml(meta)}</div>
     </article>
   `).join("");
 }
@@ -284,11 +401,11 @@ async function inspectNotificationDelivery(deliveryId){
   }
 }
 
-function renderNotificationFailures(rows){
+function renderNotificationFailures(rows, snapshot){
   const root = document.getElementById("notificationFailures");
   if(!root) return;
   const deliveries = Array.isArray(rows) ? rows : [];
-  renderDeliveryQueueCards(deliveries);
+  renderDeliveryQueueCards(deliveries, snapshot);
   if(!deliveries.length){
     root.innerHTML = '<div class="muted">No deliveries match the current filters.</div>';
     renderDeliveryInspect(null);
@@ -436,7 +553,7 @@ async function loadSettings(){
       alert("Failed to load settings");
       const shellData = await shellPromise;
       renderSettingsCards(shellData.checks, shellData.health, null, null, null, null);
-      renderNotificationFailures([]);
+      renderNotificationFailures([], shellData.health && shellData.health.platform ? shellData.health.platform.notification_queue : null);
       return;
     }
 
@@ -446,6 +563,7 @@ async function loadSettings(){
     const pagerduty = pagerdutyRes.data || {};
     const deliveries = deliveryRes.data || [];
     const shellData = await shellPromise;
+    const queueSnapshot = shellData.health && shellData.health.platform ? shellData.health.platform.notification_queue : null;
 
     const render = ()=>{
       document.getElementById("sloTarget").value = slo.slo_target ?? "";
@@ -497,7 +615,7 @@ async function loadSettings(){
       setPagerdutyKeyConfigured(!!pagerduty.integration_key_configured);
 
       renderSettingsCards(shellData.checks, shellData.health, slo, alerts, pagerduty, jira);
-      renderNotificationFailures(deliveries);
+      renderNotificationFailures(deliveries, queueSnapshot);
     };
     if(perf) perf.measureRender("settings-render", render);
     else render();
@@ -511,7 +629,7 @@ async function loadSettings(){
       const shellData = await window.LastPingShell.hydratePageShell(pid, null, {perf});
       renderSettingsCards(shellData.checks, shellData.health, null, null, null, null);
     }
-    renderNotificationFailures([]);
+    renderNotificationFailures([], null);
     alert("Failed to load settings");
   }finally{
     if(perf) perf.finish();

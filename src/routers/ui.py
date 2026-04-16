@@ -1621,7 +1621,7 @@ def project_settings_page(project_id: int = Path(..., ge=1)):
         <section class="card">
           <div class="section-head">
             <h3>Delivery Queue Ops</h3>
-            <div class="muted">Inspect queued work, replay dead letters, and control retry behavior per delivery.</div>
+            <div class="muted">Track full queue pressure here, then inspect filtered deliveries to replay, cancel, or poison specific jobs.</div>
           </div>
           <div class="row">
             <label>Status:
