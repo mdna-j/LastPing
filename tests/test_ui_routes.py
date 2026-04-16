@@ -53,6 +53,7 @@ def test_dashboard_health_returns_expected_summary_fields(tmp_path):
         CheckStatus,
         CheckType,
         Incident,
+        NotificationDelivery,
         OnCallAlert,
         PredictiveModel,
         PredictiveModelQuality,
@@ -168,6 +169,94 @@ def test_dashboard_health_returns_expected_summary_fields(tmp_path):
                 created_at=datetime.utcnow() - timedelta(minutes=5),
             )
         )
+        session.add(
+            NotificationDelivery(
+                project_id=project.id,
+                check_id=down_check.id,
+                channel="slack",
+                event="down",
+                request_kind="slack",
+                target="#ops",
+                payload_json="{}",
+                status="queued",
+                attempt_count=0,
+                max_attempts=5,
+                next_attempt_at=datetime.utcnow() - timedelta(minutes=1),
+                created_at=datetime.utcnow() - timedelta(minutes=20),
+                updated_at=datetime.utcnow() - timedelta(minutes=20),
+            )
+        )
+        session.add(
+            NotificationDelivery(
+                project_id=project.id,
+                check_id=down_check.id,
+                channel="pagerduty",
+                event="down",
+                request_kind="pagerduty",
+                target="service-key",
+                payload_json="{}",
+                status="retry",
+                attempt_count=2,
+                max_attempts=5,
+                next_attempt_at=datetime.utcnow() - timedelta(seconds=30),
+                created_at=datetime.utcnow() - timedelta(minutes=15),
+                updated_at=datetime.utcnow() - timedelta(minutes=2),
+            )
+        )
+        session.add(
+            NotificationDelivery(
+                project_id=project.id,
+                check_id=down_check.id,
+                channel="email",
+                event="down",
+                request_kind="email",
+                target="ops@example.com",
+                payload_json="{}",
+                status="processing",
+                attempt_count=1,
+                max_attempts=5,
+                next_attempt_at=datetime.utcnow() - timedelta(minutes=1),
+                claimed_at=datetime.utcnow() - timedelta(seconds=40),
+                created_at=datetime.utcnow() - timedelta(minutes=5),
+                updated_at=datetime.utcnow() - timedelta(seconds=40),
+            )
+        )
+        session.add(
+            NotificationDelivery(
+                project_id=project.id,
+                check_id=down_check.id,
+                channel="slack",
+                event="down",
+                request_kind="slack",
+                target="#ops",
+                payload_json="{}",
+                status="delivered",
+                attempt_count=1,
+                max_attempts=5,
+                next_attempt_at=datetime.utcnow() - timedelta(minutes=9),
+                delivered_at=datetime.utcnow() - timedelta(minutes=8),
+                created_at=datetime.utcnow() - timedelta(minutes=10),
+                updated_at=datetime.utcnow() - timedelta(minutes=8),
+            )
+        )
+        session.add(
+            NotificationDelivery(
+                project_id=project.id,
+                check_id=down_check.id,
+                channel="pagerduty",
+                event="down",
+                request_kind="pagerduty",
+                target="service-key",
+                payload_json="{}",
+                status="dead",
+                attempt_count=3,
+                max_attempts=5,
+                next_attempt_at=datetime.utcnow() - timedelta(minutes=2),
+                dead_at=datetime.utcnow() - timedelta(minutes=1),
+                created_at=datetime.utcnow() - timedelta(minutes=12),
+                updated_at=datetime.utcnow() - timedelta(minutes=1),
+            )
+        )
         model = PredictiveModel(
             project_id=project.id,
             check_id=down_check.id,
@@ -210,6 +299,11 @@ def test_dashboard_health_returns_expected_summary_fields(tmp_path):
     assert body["platform"]["worker_lag"]["overdue_checks"] == 1
     assert body["platform"]["queue_health"]["open_oncall_alerts"] == 1
     assert body["platform"]["queue_health"]["pending_approvals"] == 1
+    assert body["platform"]["notification_queue"]["depth"] == 3
+    assert body["platform"]["notification_queue"]["retrying"] == 1
+    assert body["platform"]["notification_queue"]["dead_letters"] == 1
+    assert body["platform"]["notification_queue"]["per_channel_success"]["slack"]["success_rate"] == 1.0
+    assert body["platform"]["notification_queue"]["per_channel_success"]["pagerduty"]["success_rate"] == 0.0
     assert body["platform"]["retention"]["truncated_tables"] == ["events"]
     assert body["platform"]["failed_notifications"]["failures_24h"] == 1
     assert body["platform"]["model_ops"]["drifted_models"] == 1

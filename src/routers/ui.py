@@ -24,6 +24,7 @@ from ..models import (
     StatusSubscription,
 )
 from ..deps import limit_public_requests, limit_public_status_requests
+from ..notification_queue import refresh_notification_queue_runtime_metrics
 from ..runtime_metrics import snapshot_request_metrics
 from ..schemas import StrictBaseModel
 
@@ -283,6 +284,8 @@ def _build_platform_observability(session: Session, project_id: int, checks: lis
     if queue_total > 0:
         queue_state = "critical" if queue_total >= 5 or (oldest_queue_seconds or 0) >= 1800 else "warning"
 
+    notification_queue = refresh_notification_queue_runtime_metrics(session, project_id, now=now)
+
     retention_interval_seconds = _env_int("RAW_RETENTION_INTERVAL_SECONDS", 86400, minimum=0)
     latest_retention = session.exec(
         select(AuditLog).where(AuditLog.action == "raw_retention_pruned").order_by(AuditLog.created_at.desc())
@@ -385,6 +388,7 @@ def _build_platform_observability(session: Session, project_id: int, checks: lis
             "pending_approvals": len(pending_approvals),
             "oldest_open_seconds": oldest_queue_seconds,
         },
+        "notification_queue": notification_queue,
         "retention": {
             "state": retention_state,
             "last_pruned_at": latest_retention.created_at.isoformat() if latest_retention and latest_retention.created_at else None,

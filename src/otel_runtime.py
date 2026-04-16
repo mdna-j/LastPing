@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import importlib.util
 import os
+from collections.abc import Mapping as AbcMapping
 from typing import Callable, Mapping, Optional
 
 
 _OTEL_AVAILABLE = importlib.util.find_spec("opentelemetry.sdk") is not None
 
 if _OTEL_AVAILABLE:
+    from opentelemetry.metrics import Observation
     from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
     from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
     from opentelemetry.sdk.metrics import MeterProvider
@@ -27,6 +29,13 @@ _tracer = None
 _meter = None
 _request_counter = None
 _request_duration = None
+_notification_queue_depth_gauge = None
+_notification_queue_oldest_pending_age_gauge = None
+_notification_queue_retry_rate_gauge = None
+_notification_queue_dead_letter_gauge = None
+_notification_queue_success_rate_gauge = None
+_notification_queue_latency_gauge = None
+_notification_queue_metrics: dict[int, dict] = {}
 _runtime_state = {
     "enabled": False,
     "available": _OTEL_AVAILABLE,
@@ -164,8 +173,104 @@ def _create_metric_exporter(endpoint: str, headers: Mapping[str, str], timeout: 
     return OTLPMetricExporter(endpoint=endpoint, headers=dict(headers), timeout=timeout)
 
 
+def _notification_queue_base_attributes(project_id: int, snapshot: Mapping[str, object]) -> dict[str, object]:
+    return {
+        "project_id": int(project_id),
+        "state": str(snapshot.get("state") or "unknown"),
+    }
+
+
+def _observe_notification_queue_depth(_options):
+    observations = []
+    for project_id, snapshot in sorted(_notification_queue_metrics.items()):
+        base = _notification_queue_base_attributes(project_id, snapshot)
+        counts = {
+            "all": int(snapshot.get("depth") or 0),
+            "queued": int(snapshot.get("queued") or 0),
+            "retrying": int(snapshot.get("retrying") or 0),
+            "processing": int(snapshot.get("processing") or 0),
+        }
+        for status, value in counts.items():
+            observations.append(Observation(value, {**base, "status": status}))
+    return observations
+
+
+def _observe_notification_queue_oldest_pending_age(_options):
+    observations = []
+    for project_id, snapshot in sorted(_notification_queue_metrics.items()):
+        observations.append(
+            Observation(
+                float(snapshot.get("oldest_pending_seconds") or 0.0),
+                _notification_queue_base_attributes(project_id, snapshot),
+            )
+        )
+    return observations
+
+
+def _observe_notification_queue_retry_rate(_options):
+    observations = []
+    for project_id, snapshot in sorted(_notification_queue_metrics.items()):
+        observations.append(
+            Observation(
+                float(snapshot.get("retry_rate") or 0.0),
+                _notification_queue_base_attributes(project_id, snapshot),
+            )
+        )
+    return observations
+
+
+def _observe_notification_queue_dead_letters(_options):
+    observations = []
+    for project_id, snapshot in sorted(_notification_queue_metrics.items()):
+        observations.append(
+            Observation(
+                int(snapshot.get("dead_letters") or 0),
+                _notification_queue_base_attributes(project_id, snapshot),
+            )
+        )
+    return observations
+
+
+def _observe_notification_queue_success_rate(_options):
+    observations = []
+    for project_id, snapshot in sorted(_notification_queue_metrics.items()):
+        base = _notification_queue_base_attributes(project_id, snapshot)
+        per_channel = snapshot.get("per_channel_success") or {}
+        if not isinstance(per_channel, AbcMapping):
+            continue
+        for channel, channel_snapshot in sorted(per_channel.items()):
+            if not isinstance(channel_snapshot, AbcMapping):
+                continue
+            observations.append(
+                Observation(
+                    float(channel_snapshot.get("success_rate") or 0.0),
+                    {**base, "channel": str(channel or "unknown")},
+                )
+            )
+    return observations
+
+
+def _observe_notification_queue_latency(_options):
+    observations = []
+    for project_id, snapshot in sorted(_notification_queue_metrics.items()):
+        base = _notification_queue_base_attributes(project_id, snapshot)
+        avg_ms = snapshot.get("avg_delivery_latency_ms")
+        p95_ms = snapshot.get("p95_delivery_latency_ms")
+        if avg_ms is not None:
+            observations.append(Observation(float(avg_ms), {**base, "stat": "avg"}))
+        if p95_ms is not None:
+            observations.append(Observation(float(p95_ms), {**base, "stat": "p95"}))
+    return observations
+
+
+def record_notification_queue_metrics(project_id: int, snapshot: Mapping[str, object]) -> None:
+    _notification_queue_metrics[int(project_id)] = dict(snapshot or {})
+
+
 def shutdown_opentelemetry() -> None:
     global _trace_provider, _metric_provider, _trace_exporter, _metric_exporter, _tracer, _meter, _request_counter, _request_duration
+    global _notification_queue_depth_gauge, _notification_queue_oldest_pending_age_gauge, _notification_queue_retry_rate_gauge
+    global _notification_queue_dead_letter_gauge, _notification_queue_success_rate_gauge, _notification_queue_latency_gauge
     for provider in (_metric_provider, _trace_provider):
         if provider is None:
             continue
@@ -185,6 +290,13 @@ def shutdown_opentelemetry() -> None:
     _meter = None
     _request_counter = None
     _request_duration = None
+    _notification_queue_depth_gauge = None
+    _notification_queue_oldest_pending_age_gauge = None
+    _notification_queue_retry_rate_gauge = None
+    _notification_queue_dead_letter_gauge = None
+    _notification_queue_success_rate_gauge = None
+    _notification_queue_latency_gauge = None
+    _notification_queue_metrics.clear()
     _set_runtime_state(
         enabled=False,
         traces_enabled=False,
@@ -205,6 +317,8 @@ def configure_opentelemetry(
     metric_exporter_factory: Optional[Callable[[str, Mapping[str, str], int], object]] = None,
 ) -> dict:
     global _trace_provider, _metric_provider, _trace_exporter, _metric_exporter, _tracer, _meter, _request_counter, _request_duration
+    global _notification_queue_depth_gauge, _notification_queue_oldest_pending_age_gauge, _notification_queue_retry_rate_gauge
+    global _notification_queue_dead_letter_gauge, _notification_queue_success_rate_gauge, _notification_queue_latency_gauge
     shutdown_opentelemetry()
 
     trace_endpoint = _desired_trace_endpoint()
@@ -249,6 +363,42 @@ def configure_opentelemetry(
             "lastping.http.server.duration",
             unit="ms",
             description="HTTP request duration for the LastPing API.",
+        )
+        _notification_queue_depth_gauge = _meter.create_observable_gauge(
+            "lastping.notification.queue.depth",
+            callbacks=[_observe_notification_queue_depth],
+            unit="1",
+            description="Notification queue depth by project and queue status.",
+        )
+        _notification_queue_oldest_pending_age_gauge = _meter.create_observable_gauge(
+            "lastping.notification.queue.oldest_pending_age",
+            callbacks=[_observe_notification_queue_oldest_pending_age],
+            unit="s",
+            description="Age in seconds of the oldest pending notification delivery.",
+        )
+        _notification_queue_retry_rate_gauge = _meter.create_observable_gauge(
+            "lastping.notification.queue.retry_rate",
+            callbacks=[_observe_notification_queue_retry_rate],
+            unit="1",
+            description="Recent notification delivery retry rate.",
+        )
+        _notification_queue_dead_letter_gauge = _meter.create_observable_gauge(
+            "lastping.notification.queue.dead_letters",
+            callbacks=[_observe_notification_queue_dead_letters],
+            unit="1",
+            description="Recent notification deliveries moved to dead-letter state.",
+        )
+        _notification_queue_success_rate_gauge = _meter.create_observable_gauge(
+            "lastping.notification.queue.channel_success_rate",
+            callbacks=[_observe_notification_queue_success_rate],
+            unit="1",
+            description="Per-channel recent notification delivery success rate.",
+        )
+        _notification_queue_latency_gauge = _meter.create_observable_gauge(
+            "lastping.notification.queue.delivery_latency",
+            callbacks=[_observe_notification_queue_latency],
+            unit="ms",
+            description="Recent delivered notification latency by project.",
         )
 
     return _set_runtime_state(

@@ -187,6 +187,31 @@ function renderPlatformCards(platform){
     : "No queued alerts or approvals.";
   cards.push(`<article class="card kpi-card ${platformStateClass(queue.state)}"><div class="metric-label">Queue health</div><div class="metric-value">${queueValue}</div><div class="metric-sub">${queueSub}</div><div class="muted">${queueMeta}</div></article>`);
 
+  const notificationQueue = platform.notification_queue || {};
+  const notificationDepth = Number(notificationQueue.depth || 0);
+  const notificationValue = notificationDepth > 0 ? `${notificationDepth} pending` : "clear";
+  const notificationSub = `${notificationQueue.queued || 0} queued | ${notificationQueue.retrying || 0} retry | ${notificationQueue.processing || 0} processing`;
+  const notificationMetaParts = [];
+  if(notificationQueue.oldest_pending_seconds){
+    notificationMetaParts.push(`Oldest ${DashboardShell.formatDuration(notificationQueue.oldest_pending_seconds)}`);
+  }
+  notificationMetaParts.push(`Retry ${(Number(notificationQueue.retry_rate || 0) * 100).toFixed(1)}%`);
+  notificationMetaParts.push(`Dead ${notificationQueue.dead_letters || 0} / ${notificationQueue.window_hours || 24}h`);
+  if(notificationQueue.avg_delivery_latency_ms !== null && notificationQueue.avg_delivery_latency_ms !== undefined){
+    notificationMetaParts.push(`avg ${DashboardShell.formatPerfMs(notificationQueue.avg_delivery_latency_ms)}`);
+  }
+  if(notificationQueue.p95_delivery_latency_ms !== null && notificationQueue.p95_delivery_latency_ms !== undefined){
+    notificationMetaParts.push(`p95 ${DashboardShell.formatPerfMs(notificationQueue.p95_delivery_latency_ms)}`);
+  }
+  const successParts = notificationQueue.per_channel_success
+    ? Object.entries(notificationQueue.per_channel_success)
+      .map(([channel, row])=> `${channel} ${((Number(row.success_rate || 0)) * 100).toFixed(0)}%`)
+    : [];
+  if(successParts.length){
+    notificationMetaParts.push(successParts.join(" | "));
+  }
+  cards.push(`<article class="card kpi-card ${platformStateClass(notificationQueue.state)}"><div class="metric-label">Notification queue</div><div class="metric-value">${notificationValue}</div><div class="metric-sub">${notificationSub}</div><div class="muted">${notificationMetaParts.join(" | ") || "No recent async delivery pressure."}</div></article>`);
+
   const retention = platform.retention || {};
   const retentionValue = retention.lag_seconds !== null && retention.lag_seconds !== undefined
     ? DashboardShell.formatDuration(retention.lag_seconds)

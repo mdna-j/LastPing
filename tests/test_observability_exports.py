@@ -18,6 +18,7 @@ def test_prometheus_export_requires_admin_and_exposes_platform_metrics(tmp_path)
         Check,
         CheckStatus,
         CheckType,
+        NotificationDelivery,
         OnCallAlert,
         PredictiveModel,
         PredictiveModelQuality,
@@ -99,6 +100,94 @@ def test_prometheus_export_requires_admin_and_exposes_platform_metrics(tmp_path)
                 project_id=project.id,
             )
         )
+        session.add(
+            NotificationDelivery(
+                project_id=project.id,
+                check_id=check.id,
+                channel="slack",
+                event="down",
+                request_kind="slack",
+                target="#ops",
+                payload_json="{}",
+                status="queued",
+                attempt_count=0,
+                max_attempts=5,
+                next_attempt_at=datetime.utcnow() - timedelta(minutes=1),
+                created_at=datetime.utcnow() - timedelta(minutes=20),
+                updated_at=datetime.utcnow() - timedelta(minutes=20),
+            )
+        )
+        session.add(
+            NotificationDelivery(
+                project_id=project.id,
+                check_id=check.id,
+                channel="pagerduty",
+                event="down",
+                request_kind="pagerduty",
+                target="service-key",
+                payload_json="{}",
+                status="retry",
+                attempt_count=2,
+                max_attempts=5,
+                next_attempt_at=datetime.utcnow() - timedelta(seconds=30),
+                created_at=datetime.utcnow() - timedelta(minutes=15),
+                updated_at=datetime.utcnow() - timedelta(minutes=2),
+            )
+        )
+        session.add(
+            NotificationDelivery(
+                project_id=project.id,
+                check_id=check.id,
+                channel="email",
+                event="down",
+                request_kind="email",
+                target="ops@example.com",
+                payload_json="{}",
+                status="processing",
+                attempt_count=1,
+                max_attempts=5,
+                next_attempt_at=datetime.utcnow() - timedelta(minutes=1),
+                claimed_at=datetime.utcnow() - timedelta(seconds=45),
+                created_at=datetime.utcnow() - timedelta(minutes=5),
+                updated_at=datetime.utcnow() - timedelta(seconds=45),
+            )
+        )
+        session.add(
+            NotificationDelivery(
+                project_id=project.id,
+                check_id=check.id,
+                channel="slack",
+                event="down",
+                request_kind="slack",
+                target="#ops",
+                payload_json="{}",
+                status="delivered",
+                attempt_count=1,
+                max_attempts=5,
+                next_attempt_at=datetime.utcnow() - timedelta(minutes=9),
+                delivered_at=datetime.utcnow() - timedelta(minutes=8),
+                created_at=datetime.utcnow() - timedelta(minutes=10),
+                updated_at=datetime.utcnow() - timedelta(minutes=8),
+            )
+        )
+        session.add(
+            NotificationDelivery(
+                project_id=project.id,
+                check_id=check.id,
+                channel="pagerduty",
+                event="down",
+                request_kind="pagerduty",
+                target="service-key",
+                payload_json="{}",
+                status="dead",
+                attempt_count=3,
+                max_attempts=5,
+                next_attempt_at=datetime.utcnow() - timedelta(minutes=3),
+                dead_at=datetime.utcnow() - timedelta(minutes=1),
+                created_at=datetime.utcnow() - timedelta(minutes=12),
+                updated_at=datetime.utcnow() - timedelta(minutes=1),
+            )
+        )
         model = PredictiveModel(project_id=project.id, check_id=check.id, active=True)
         session.add(model)
         session.commit()
@@ -143,6 +232,11 @@ def test_prometheus_export_requires_admin_and_exposes_platform_metrics(tmp_path)
     assert "lastping_api_requests_window_total" in resp.text
     assert "lastping_project_worker_overdue_checks" in resp.text
     assert "lastping_project_queue_pending_approvals" in resp.text
+    assert "lastping_project_notification_queue_depth" in resp.text
+    assert "lastping_project_notification_queue_retry_rate" in resp.text
+    assert "lastping_project_notification_queue_dead_letters_24h" in resp.text
+    assert "lastping_project_notification_queue_channel_success_rate" in resp.text
+    assert "lastping_project_notification_queue_delivery_latency_ms" in resp.text
     assert "lastping_project_retention_truncated_tables" in resp.text
     assert "lastping_project_failed_notifications_channel_24h" in resp.text
     assert "lastping_project_model_drifted_models" in resp.text

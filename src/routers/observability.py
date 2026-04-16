@@ -190,6 +190,14 @@ def prometheus_export(
     queue_pending_samples: list[str] = []
     queue_oldest_samples: list[str] = []
     queue_state_samples: list[str] = []
+    notification_queue_depth_samples: list[str] = []
+    notification_queue_status_samples: list[str] = []
+    notification_queue_oldest_samples: list[str] = []
+    notification_queue_retry_samples: list[str] = []
+    notification_queue_dead_letter_samples: list[str] = []
+    notification_queue_success_rate_samples: list[str] = []
+    notification_queue_latency_samples: list[str] = []
+    notification_queue_state_samples: list[str] = []
     retention_lag_samples: list[str] = []
     retention_truncated_samples: list[str] = []
     retention_state_samples: list[str] = []
@@ -207,6 +215,7 @@ def prometheus_export(
         base_labels = {"project_id": project.id, "project_name": project.name}
         worker = platform["worker_lag"]
         queue = platform["queue_health"]
+        notification_queue = platform.get("notification_queue") or {}
         retention = platform["retention"]
         failures = platform["failed_notifications"]
         model_ops = platform["model_ops"]
@@ -220,6 +229,93 @@ def prometheus_export(
         queue_pending_samples.append(_metric_line("lastping_project_queue_pending_approvals", queue["pending_approvals"], **base_labels))
         queue_oldest_samples.append(_metric_line("lastping_project_queue_oldest_open_seconds", queue["oldest_open_seconds"] or 0, **base_labels))
         queue_state_samples.append(_metric_line("lastping_project_queue_state", _STATE_VALUES.get(queue["state"], 0), state=queue["state"], **base_labels))
+        notification_queue_depth_samples.append(
+            _metric_line(
+                "lastping_project_notification_queue_depth",
+                notification_queue.get("depth") or 0,
+                **base_labels,
+            )
+        )
+        notification_queue_status_samples.extend(
+            [
+                _metric_line(
+                    "lastping_project_notification_queue_status_count",
+                    notification_queue.get("queued") or 0,
+                    status="queued",
+                    **base_labels,
+                ),
+                _metric_line(
+                    "lastping_project_notification_queue_status_count",
+                    notification_queue.get("retrying") or 0,
+                    status="retrying",
+                    **base_labels,
+                ),
+                _metric_line(
+                    "lastping_project_notification_queue_status_count",
+                    notification_queue.get("processing") or 0,
+                    status="processing",
+                    **base_labels,
+                ),
+            ]
+        )
+        notification_queue_oldest_samples.append(
+            _metric_line(
+                "lastping_project_notification_queue_oldest_pending_seconds",
+                notification_queue.get("oldest_pending_seconds") or 0,
+                **base_labels,
+            )
+        )
+        notification_queue_retry_samples.append(
+            _metric_line(
+                "lastping_project_notification_queue_retry_rate",
+                round(float(notification_queue.get("retry_rate") or 0.0), 6),
+                **base_labels,
+            )
+        )
+        notification_queue_dead_letter_samples.append(
+            _metric_line(
+                "lastping_project_notification_queue_dead_letters_24h",
+                notification_queue.get("dead_letters") or 0,
+                **base_labels,
+            )
+        )
+        notification_queue_state_samples.append(
+            _metric_line(
+                "lastping_project_notification_queue_state",
+                _STATE_VALUES.get(str(notification_queue.get("state") or "neutral"), 0),
+                state=str(notification_queue.get("state") or "neutral"),
+                **base_labels,
+            )
+        )
+        if notification_queue.get("avg_delivery_latency_ms") is not None:
+            notification_queue_latency_samples.append(
+                _metric_line(
+                    "lastping_project_notification_queue_delivery_latency_ms",
+                    round(float(notification_queue.get("avg_delivery_latency_ms") or 0.0), 3),
+                    stat="avg",
+                    **base_labels,
+                )
+            )
+        if notification_queue.get("p95_delivery_latency_ms") is not None:
+            notification_queue_latency_samples.append(
+                _metric_line(
+                    "lastping_project_notification_queue_delivery_latency_ms",
+                    round(float(notification_queue.get("p95_delivery_latency_ms") or 0.0), 3),
+                    stat="p95",
+                    **base_labels,
+                )
+            )
+        for channel, success in sorted((notification_queue.get("per_channel_success") or {}).items()):
+            if not isinstance(success, dict):
+                continue
+            notification_queue_success_rate_samples.append(
+                _metric_line(
+                    "lastping_project_notification_queue_channel_success_rate",
+                    round(float(success.get("success_rate") or 0.0), 6),
+                    channel=channel,
+                    **base_labels,
+                )
+            )
         retention_lag_samples.append(_metric_line("lastping_project_retention_lag_seconds", retention["lag_seconds"] or 0, **base_labels))
         retention_truncated_samples.append(_metric_line("lastping_project_retention_truncated_tables", len(retention["truncated_tables"]), **base_labels))
         retention_state_samples.append(_metric_line("lastping_project_retention_state", _STATE_VALUES.get(retention["state"], 0), state=retention["state"], **base_labels))
@@ -251,6 +347,17 @@ def prometheus_export(
         _append_metric(lines, "lastping_project_queue_pending_approvals", "Pending remediation approvals for a project.", "gauge", *queue_pending_samples)
         _append_metric(lines, "lastping_project_queue_oldest_open_seconds", "Oldest open queue item age in seconds.", "gauge", *queue_oldest_samples)
         _append_metric(lines, "lastping_project_queue_state", "Derived queue state for the project health surface.", "gauge", *queue_state_samples)
+    if notification_queue_depth_samples:
+        _append_metric(lines, "lastping_project_notification_queue_depth", "Current notification queue depth for a project.", "gauge", *notification_queue_depth_samples)
+        _append_metric(lines, "lastping_project_notification_queue_status_count", "Current notification queue depth broken down by queue status.", "gauge", *notification_queue_status_samples)
+        _append_metric(lines, "lastping_project_notification_queue_oldest_pending_seconds", "Age in seconds of the oldest pending notification delivery.", "gauge", *notification_queue_oldest_samples)
+        _append_metric(lines, "lastping_project_notification_queue_retry_rate", "Recent notification queue retry rate for the project.", "gauge", *notification_queue_retry_samples)
+        _append_metric(lines, "lastping_project_notification_queue_dead_letters_24h", "Notification deliveries that reached dead-letter state over the recent window.", "gauge", *notification_queue_dead_letter_samples)
+        if notification_queue_success_rate_samples:
+            _append_metric(lines, "lastping_project_notification_queue_channel_success_rate", "Per-channel notification delivery success rate over the recent window.", "gauge", *notification_queue_success_rate_samples)
+        if notification_queue_latency_samples:
+            _append_metric(lines, "lastping_project_notification_queue_delivery_latency_ms", "Recent notification delivery latency for successful deliveries.", "gauge", *notification_queue_latency_samples)
+        _append_metric(lines, "lastping_project_notification_queue_state", "Derived notification queue state for the project health surface.", "gauge", *notification_queue_state_samples)
     if retention_lag_samples:
         _append_metric(lines, "lastping_project_retention_lag_seconds", "Raw retention lag in seconds for a project.", "gauge", *retention_lag_samples)
         _append_metric(lines, "lastping_project_retention_truncated_tables", "Count of retention tables truncated in the latest prune run.", "gauge", *retention_truncated_samples)

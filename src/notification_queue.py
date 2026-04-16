@@ -1,13 +1,15 @@
 import json
 import logging
+import math
 import os
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
-from sqlalchemy import update
+from sqlalchemy import or_, update
 from sqlmodel import Session, select
 
 from .models import AuditLog, Check, Incident, NotificationDelivery, Project
+from .otel_runtime import record_notification_queue_metrics
 
 logger = logging.getLogger("lastping.notification_queue")
 
@@ -69,6 +71,145 @@ def _safe_error_text(value: Any) -> Optional[str]:
     if not text:
         return None
     return text[:1000]
+
+
+def _p95(values: list[float]) -> Optional[float]:
+    if not values:
+        return None
+    ordered = sorted(max(float(value), 0.0) for value in values)
+    index = max(0, min(len(ordered) - 1, math.ceil(len(ordered) * 0.95) - 1))
+    return ordered[index]
+
+
+def snapshot_notification_queue_metrics(
+    session: Session,
+    project_id: int,
+    *,
+    now: Optional[datetime] = None,
+    window_hours: int = 24,
+) -> dict[str, Any]:
+    now = now or _now()
+    window_hours = max(1, int(window_hours or 24))
+    cutoff = now - timedelta(hours=window_hours)
+    active_statuses = {STATUS_QUEUED, STATUS_RETRY, STATUS_PROCESSING}
+    status_counts = {
+        STATUS_QUEUED: 0,
+        STATUS_RETRY: 0,
+        STATUS_PROCESSING: 0,
+    }
+    rows = session.exec(
+        select(NotificationDelivery).where(
+            NotificationDelivery.project_id == project_id,
+            or_(
+                NotificationDelivery.status.in_(list(active_statuses)),
+                NotificationDelivery.created_at >= cutoff,
+                NotificationDelivery.updated_at >= cutoff,
+                NotificationDelivery.delivered_at >= cutoff,
+                NotificationDelivery.dead_at >= cutoff,
+            ),
+        )
+    ).all()
+
+    oldest_pending_at: Optional[datetime] = None
+    recent_total = 0
+    recent_retried = 0
+    dead_letters = 0
+    delivered_latencies_ms: list[float] = []
+    channel_totals: dict[str, int] = {}
+    channel_successes: dict[str, int] = {}
+
+    for row in rows:
+        status = str(row.status or "").strip().lower()
+        if status in active_statuses:
+            status_counts[status] = status_counts.get(status, 0) + 1
+            pending_timestamp = row.created_at or row.next_attempt_at or row.updated_at or now
+            if oldest_pending_at is None or pending_timestamp < oldest_pending_at:
+                oldest_pending_at = pending_timestamp
+
+        recent_activity = any(
+            timestamp is not None and timestamp >= cutoff
+            for timestamp in (row.created_at, row.updated_at, row.delivered_at, row.dead_at)
+        )
+        if recent_activity:
+            recent_total += 1
+            if int(row.attempt_count or 0) > 1 or status == STATUS_RETRY:
+                recent_retried += 1
+
+        if status == STATUS_DEAD and row.dead_at is not None and row.dead_at >= cutoff:
+            dead_letters += 1
+
+        channel = str(row.channel or "unknown").strip().lower() or "unknown"
+        if status == STATUS_DELIVERED and row.delivered_at is not None and row.delivered_at >= cutoff:
+            channel_totals[channel] = channel_totals.get(channel, 0) + 1
+            channel_successes[channel] = channel_successes.get(channel, 0) + 1
+            if row.created_at is not None:
+                delivered_latencies_ms.append(max((row.delivered_at - row.created_at).total_seconds() * 1000.0, 0.0))
+        elif status == STATUS_DEAD and row.dead_at is not None and row.dead_at >= cutoff:
+            channel_totals[channel] = channel_totals.get(channel, 0) + 1
+
+    depth = sum(status_counts.values())
+    oldest_pending_seconds = None
+    if oldest_pending_at is not None:
+        oldest_pending_seconds = max(int((now - oldest_pending_at).total_seconds()), 0)
+
+    retry_rate = 0.0
+    if recent_total > 0:
+        retry_rate = round(recent_retried / recent_total, 6)
+
+    delivered_count = sum(channel_successes.values())
+    completed_count = sum(channel_totals.values())
+    success_rate = 1.0 if completed_count == 0 else round(delivered_count / completed_count, 6)
+    avg_latency_ms = None
+    if delivered_latencies_ms:
+        avg_latency_ms = round(sum(delivered_latencies_ms) / len(delivered_latencies_ms), 3)
+    p95_latency_ms = _p95(delivered_latencies_ms)
+    if p95_latency_ms is not None:
+        p95_latency_ms = round(p95_latency_ms, 3)
+
+    state = "healthy"
+    if depth >= 20 or dead_letters >= 5 or retry_rate >= 0.5 or (oldest_pending_seconds or 0) >= 1800:
+        state = "critical"
+    elif depth > 0 or dead_letters > 0 or retry_rate >= 0.1 or (oldest_pending_seconds or 0) >= 300:
+        state = "warning"
+
+    per_channel_success: dict[str, dict[str, Any]] = {}
+    for channel, total in sorted(channel_totals.items()):
+        delivered = channel_successes.get(channel, 0)
+        per_channel_success[channel] = {
+            "delivered": delivered,
+            "failed": max(total - delivered, 0),
+            "completed": total,
+            "success_rate": round(delivered / total, 6) if total else 1.0,
+        }
+
+    return {
+        "state": state,
+        "depth": depth,
+        "queued": status_counts[STATUS_QUEUED],
+        "retrying": status_counts[STATUS_RETRY],
+        "processing": status_counts[STATUS_PROCESSING],
+        "oldest_pending_seconds": oldest_pending_seconds,
+        "retry_rate": retry_rate,
+        "dead_letters": dead_letters,
+        "completed_window": completed_count,
+        "success_rate": success_rate,
+        "delivered_window": delivered_count,
+        "avg_delivery_latency_ms": avg_latency_ms,
+        "p95_delivery_latency_ms": p95_latency_ms,
+        "per_channel_success": per_channel_success,
+        "window_hours": window_hours,
+    }
+
+
+def refresh_notification_queue_runtime_metrics(
+    session: Session,
+    project_id: int,
+    *,
+    now: Optional[datetime] = None,
+) -> dict[str, Any]:
+    snapshot = snapshot_notification_queue_metrics(session, project_id, now=now)
+    record_notification_queue_metrics(project_id, snapshot)
+    return snapshot
 
 
 def enqueue_notification_delivery(
@@ -311,6 +452,14 @@ def recover_stuck_notification_deliveries(session: Session, *, now: Optional[dat
     count = max(0, int(getattr(result, "rowcount", 0) or 0))
     if count:
         session.commit()
+        project_ids = session.exec(
+            select(NotificationDelivery.project_id).where(
+                NotificationDelivery.status == STATUS_RETRY,
+                NotificationDelivery.updated_at >= cutoff,
+            )
+        ).all()
+        for project_id in sorted({int(project_id) for project_id in project_ids if project_id is not None}):
+            refresh_notification_queue_runtime_metrics(session, project_id, now=now)
     return count
 
 
@@ -355,11 +504,14 @@ def claim_due_notification_deliveries(
     if not claimed_ids:
         return []
     session.commit()
-    return session.exec(
+    claimed = session.exec(
         select(NotificationDelivery)
         .where(NotificationDelivery.id.in_(claimed_ids))
         .order_by(NotificationDelivery.next_attempt_at.asc(), NotificationDelivery.id.asc())
     ).all()
+    for project_id in sorted({int(row.project_id) for row in claimed if row.project_id is not None}):
+        refresh_notification_queue_runtime_metrics(session, project_id, now=now)
+    return claimed
 
 
 def _delivery_retryable(delivery: NotificationDelivery) -> bool:
@@ -655,6 +807,7 @@ def process_notification_delivery(
             return {"ok": False, "detail": "Notification delivery disappeared during retry"}
         outcome = _mark_delivery_result(session, delivery, now=now, ok=False, detail=str(exc), status_code=None)
         session.commit()
+        refresh_notification_queue_runtime_metrics(session, delivery.project_id, now=now)
         return outcome
 
     ok = bool(result.get("ok"))
@@ -667,6 +820,7 @@ def process_notification_delivery(
         status_code=result.get("status"),
     )
     session.commit()
+    refresh_notification_queue_runtime_metrics(session, delivery.project_id, now=now)
     return outcome
 
 
@@ -715,6 +869,7 @@ def retry_notification_delivery(session: Session, delivery: NotificationDelivery
     refreshed = session.get(NotificationDelivery, delivery.id)
     if refreshed is None:
         return {"ok": False, "detail": "Notification delivery not found"}
+    refresh_notification_queue_runtime_metrics(session, refreshed.project_id, now=now)
     return process_notification_delivery(session, refreshed, now=now)
 
 
@@ -744,6 +899,7 @@ def cancel_notification_delivery(session: Session, delivery: NotificationDeliver
     refreshed = session.get(NotificationDelivery, delivery.id)
     if refreshed is None:
         return {"ok": False, "detail": "Notification delivery not found"}
+    refresh_notification_queue_runtime_metrics(session, refreshed.project_id, now=now)
     return {
         "ok": True,
         "detail": detail,
@@ -778,6 +934,7 @@ def poison_notification_delivery(session: Session, delivery: NotificationDeliver
     refreshed = session.get(NotificationDelivery, delivery.id)
     if refreshed is None:
         return {"ok": False, "detail": "Notification delivery not found"}
+    refresh_notification_queue_runtime_metrics(session, refreshed.project_id, now=now)
     return {
         "ok": True,
         "detail": detail,
