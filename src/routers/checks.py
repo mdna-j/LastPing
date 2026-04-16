@@ -30,6 +30,12 @@ _BROWSER_ACTIONS = {
     "wait_for_url",
     "expect_text",
     "expect_url",
+    "expect_visible",
+    "expect_hidden",
+    "expect_title",
+    "expect_value",
+    "expect_attribute",
+    "expect_count",
     "press",
 }
 
@@ -165,9 +171,11 @@ class CheckCreate(StrictBaseModel):
 
 
 class BrowserStep(StrictBaseModel):
-    action: Literal["goto", "click", "fill", "wait_for_selector", "wait_for_url", "expect_text", "expect_url", "press"]
+    action: Literal["goto", "click", "fill", "wait_for_selector", "wait_for_url", "expect_text", "expect_url", "expect_visible", "expect_hidden", "expect_title", "expect_value", "expect_attribute", "expect_count", "press"]
     selector: Optional[constr(min_length=1, max_length=500)] = None
     value: Optional[constr(min_length=1, max_length=4000)] = None
+    attribute: Optional[constr(min_length=1, max_length=120)] = None
+    count: Optional[conint(ge=0, le=1000)] = None
     timeout_ms: Optional[conint(ge=1, le=120000)] = None
 
     @root_validator
@@ -175,6 +183,8 @@ class BrowserStep(StrictBaseModel):
         action = values.get("action")
         selector = values.get("selector")
         value = values.get("value")
+        attribute = values.get("attribute")
+        count = values.get("count")
 
         if action in {"click", "wait_for_selector"} and not selector:
             raise ValueError(f"selector is required for browser action '{action}'")
@@ -185,6 +195,27 @@ class BrowserStep(StrictBaseModel):
                 raise ValueError(f"value is required for browser action '{action}'")
         if action in {"goto", "wait_for_url", "expect_url"} and not value:
             raise ValueError(f"value is required for browser action '{action}'")
+        if action in {"expect_visible", "expect_hidden"} and not selector:
+            raise ValueError(f"selector is required for browser action '{action}'")
+        if action == "expect_title" and not value:
+            raise ValueError("value is required for browser action 'expect_title'")
+        if action == "expect_value":
+            if not selector:
+                raise ValueError("selector is required for browser action 'expect_value'")
+            if not value:
+                raise ValueError("value is required for browser action 'expect_value'")
+        if action == "expect_attribute":
+            if not selector:
+                raise ValueError("selector is required for browser action 'expect_attribute'")
+            if not attribute:
+                raise ValueError("attribute is required for browser action 'expect_attribute'")
+            if not value:
+                raise ValueError("value is required for browser action 'expect_attribute'")
+        if action == "expect_count":
+            if not selector:
+                raise ValueError("selector is required for browser action 'expect_count'")
+            if count is None:
+                raise ValueError("count is required for browser action 'expect_count'")
         return values
 
 

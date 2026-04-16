@@ -7,6 +7,8 @@ function incidentProjectId(){
   return document.getElementById("projectId").value || "1";
 }
 
+let selectedArtifactId = null;
+
 function escapeHtml(value){
   return String(value || "")
     .replace(/&/g, "&amp;")
@@ -37,6 +39,240 @@ function formatTimestamp(value){
     return new Date(value).toLocaleString();
   }catch(_e){
     return value;
+  }
+}
+
+function formatBytes(value){
+  const bytes = Number(value || 0);
+  if(!bytes) return "n/a";
+  if(bytes < 1024) return `${bytes} bytes`;
+  if(bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function artifactViewerEl(){
+  return document.getElementById("artifactViewer");
+}
+
+function setArtifactViewer(html){
+  const el = artifactViewerEl();
+  if(!el) return;
+  el.innerHTML = html;
+}
+
+function renderPreviewList(items, formatter){
+  if(!items || !items.length) return `<div class="muted">None captured.</div>`;
+  return `
+    <div class="artifact-preview-stack">
+      ${items.map((item, index)=> formatter(item, index)).join("")}
+    </div>
+  `;
+}
+
+function renderArtifactMetaGrid(artifact){
+  return `
+    <div class="artifact-preview-meta">
+      <div><span class="muted">Type</span><div>${escapeHtml(artifact.artifact_type || "artifact")}</div></div>
+      <div><span class="muted">Created</span><div>${formatTimestamp(artifact.created_at)}</div></div>
+      <div><span class="muted">Size</span><div>${formatBytes(artifact.size_bytes)}</div></div>
+      <div><span class="muted">Check Result</span><div>${artifact.check_result_id || "n/a"}</div></div>
+    </div>
+  `;
+}
+
+function renderJsonPreview(rawJson){
+  return `
+    <pre class="queue-payload-preview artifact-preview-json">${escapeHtml(JSON.stringify(rawJson || {}, null, 2))}</pre>
+  `;
+}
+
+function renderHarPreview(summary){
+  const requests = (summary && summary.requests) || [];
+  return `
+    <div class="artifact-preview-summary-grid">
+      <div><span class="muted">Pages</span><div>${summary && summary.pages ? summary.pages : 0}</div></div>
+      <div><span class="muted">Requests</span><div>${summary && summary.entry_count ? summary.entry_count : 0}</div></div>
+      <div><span class="muted">HTTP Errors</span><div>${summary && summary.error_count ? summary.error_count : 0}</div></div>
+      <div><span class="muted">Total Time</span><div>${summary && summary.total_time_ms ? `${summary.total_time_ms} ms` : "n/a"}</div></div>
+    </div>
+    <div class="artifact-preview-table-shell">
+      <table class="artifact-preview-table">
+        <thead>
+          <tr>
+            <th>Method</th>
+            <th>URL</th>
+            <th>Status</th>
+            <th>MIME</th>
+            <th>Time</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${requests.length ? requests.map((row)=> `
+            <tr>
+              <td>${escapeHtml(row.method || "GET")}</td>
+              <td class="artifact-url-cell">${escapeHtml(row.url || "")}</td>
+              <td>${row.status || "n/a"}</td>
+              <td>${escapeHtml(row.mime_type || "n/a")}</td>
+              <td>${row.time_ms != null ? `${row.time_ms} ms` : "n/a"}</td>
+            </tr>
+          `).join("") : `
+            <tr><td colspan="5" class="muted">No request entries captured.</td></tr>
+          `}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderReportPreview(summary, rawJson){
+  const stepResults = (summary && summary.step_results) || [];
+  const consoleItems = (summary && summary.console) || [];
+  const pageErrors = (summary && summary.page_errors) || [];
+  const networkFailures = (summary && summary.network_failures) || [];
+  const httpErrors = (summary && summary.http_errors) || [];
+  return `
+    <div class="artifact-preview-summary-grid">
+      <div><span class="muted">Failure</span><div>${escapeHtml((summary && summary.failure_reason) || "n/a")}</div></div>
+      <div><span class="muted">Attempt</span><div>${summary && summary.attempt ? summary.attempt : "n/a"}</div></div>
+      <div><span class="muted">Start URL</span><div class="artifact-url-cell">${escapeHtml((summary && summary.start_url) || "n/a")}</div></div>
+      <div><span class="muted">Final URL</span><div class="artifact-url-cell">${escapeHtml((summary && summary.final_url) || "n/a")}</div></div>
+      <div><span class="muted">Page Title</span><div>${escapeHtml((summary && summary.page_title) || "n/a")}</div></div>
+      <div><span class="muted">Signals</span><div>${stepResults.length} steps, ${consoleItems.length} console, ${pageErrors.length} page, ${networkFailures.length} network, ${httpErrors.length} HTTP</div></div>
+    </div>
+    <div class="artifact-preview-section">
+      <div class="queue-block-title">Step Results</div>
+      ${renderPreviewList(stepResults, (step)=> `
+        <div class="artifact-preview-entry">
+          <div class="incident-card-head">
+            <strong>${escapeHtml(step.action || "step")}</strong>
+            <span class="badge ${step.status === "failed" ? "status-down" : "status-up"}">${escapeHtml(step.status || "unknown")}</span>
+          </div>
+          <div class="artifact-preview-inline-grid">
+            <div><span class="muted">Selector</span><div>${escapeHtml(step.selector || "n/a")}</div></div>
+            <div><span class="muted">URL</span><div class="artifact-url-cell">${escapeHtml(step.url || "n/a")}</div></div>
+            <div><span class="muted">Duration</span><div>${step.duration_ms != null ? `${step.duration_ms} ms` : "n/a"}</div></div>
+            <div><span class="muted">Value Template</span><div>${escapeHtml(step.value_template || "n/a")}</div></div>
+          </div>
+          ${step.error ? `<div class="artifact-preview-error">${escapeHtml(step.error)}</div>` : ""}
+        </div>
+      `)}
+    </div>
+    <div class="artifact-preview-split">
+      <div class="artifact-preview-section">
+        <div class="queue-block-title">Console</div>
+        ${renderPreviewList(consoleItems, (item)=> `
+          <div class="artifact-preview-entry">
+            <strong>${escapeHtml(item.type || "log")}</strong>
+            <div>${escapeHtml(item.text || "")}</div>
+          </div>
+        `)}
+      </div>
+      <div class="artifact-preview-section">
+        <div class="queue-block-title">Page Errors</div>
+        ${renderPreviewList(pageErrors, (item)=> `
+          <div class="artifact-preview-entry artifact-preview-error">${escapeHtml(item.message || "Unknown error")}</div>
+        `)}
+      </div>
+    </div>
+    <div class="artifact-preview-split">
+      <div class="artifact-preview-section">
+        <div class="queue-block-title">Network Failures</div>
+        ${renderPreviewList(networkFailures, (item)=> `
+          <div class="artifact-preview-entry">
+            <strong>${escapeHtml(item.method || "REQ")} ${escapeHtml(item.resource_type || "resource")}</strong>
+            <div class="artifact-url-cell">${escapeHtml(item.url || "")}</div>
+            ${item.error_text ? `<div class="artifact-preview-error">${escapeHtml(item.error_text)}</div>` : ""}
+          </div>
+        `)}
+      </div>
+      <div class="artifact-preview-section">
+        <div class="queue-block-title">HTTP Errors</div>
+        ${renderPreviewList(httpErrors, (item)=> `
+          <div class="artifact-preview-entry">
+            <strong>${item.status || "n/a"} ${escapeHtml(item.method || "")}</strong>
+            <div class="artifact-url-cell">${escapeHtml(item.url || "")}</div>
+            ${item.status_text ? `<div class="artifact-preview-error">${escapeHtml(item.status_text)}</div>` : ""}
+          </div>
+        `)}
+      </div>
+    </div>
+    <div class="artifact-preview-section">
+      <div class="queue-block-title">Raw Report JSON</div>
+      ${renderJsonPreview(rawJson)}
+    </div>
+  `;
+}
+
+function renderArtifactViewer(payload){
+  const artifact = payload && payload.artifact ? payload.artifact : null;
+  const mode = payload && payload.mode ? payload.mode : "download_only";
+  if(!artifact){
+    setArtifactViewer(`<div class="muted">Artifact preview is unavailable.</div>`);
+    return;
+  }
+  let body = "";
+  if(mode === "image"){
+    body = `<img class="artifact-preview-media artifact-preview-image" src="${escapeHtml(payload.download_url)}" alt="${escapeHtml(artifact.file_name || "artifact")}"/>`;
+  }else if(mode === "video"){
+    body = `<video class="artifact-preview-media artifact-preview-video" controls preload="metadata" src="${escapeHtml(payload.download_url)}"></video>`;
+  }else if(mode === "har"){
+    body = renderHarPreview(payload.summary || {});
+  }else if(mode === "report"){
+    body = renderReportPreview(payload.summary || {}, payload.raw_json || {});
+  }else if(mode === "json"){
+    body = renderJsonPreview(payload.raw_json || {});
+  }else if(mode === "text"){
+    body = `<pre class="queue-payload-preview artifact-preview-json">${escapeHtml(payload.text || "")}</pre>`;
+  }else if(mode === "trace"){
+    const summary = payload.summary || {};
+    body = `
+      <div class="artifact-preview-trace">
+        <div class="artifact-preview-trace-title">Trace Replay Package</div>
+        <div>${escapeHtml(summary.message || "Download the trace to replay it locally.")}</div>
+        <pre class="queue-payload-preview artifact-preview-json">${escapeHtml(summary.open_command || "playwright show-trace trace.zip")}</pre>
+      </div>
+    `;
+  }else{
+    body = `<div class="muted">This artifact type does not support inline preview yet.</div>`;
+  }
+  setArtifactViewer(`
+    <div class="artifact-viewer-card card">
+      <div class="incident-card-head">
+        <div>
+          <h3>${escapeHtml(artifact.file_name || "Artifact Preview")}</h3>
+          <div class="muted">${escapeHtml(artifact.artifact_type || "artifact")} preview</div>
+        </div>
+        <div class="artifact-viewer-actions">
+          <a class="btn btn-secondary" href="${escapeHtml(payload.download_url)}">Download</a>
+        </div>
+      </div>
+      ${renderArtifactMetaGrid(artifact)}
+      <div class="artifact-preview-body">
+        ${body}
+      </div>
+    </div>
+  `);
+}
+
+async function viewArtifact(artifact){
+  if(!artifact || !artifact.view_url) return;
+  selectedArtifactId = artifact.id;
+  renderArtifacts(window.__lastIncidentArtifacts || []);
+  setArtifactViewer(`<div class="muted">Loading artifact preview...</div>`);
+  const resp = await fetch(artifact.view_url, {headers: readHeaders()});
+  if(!resp.ok){
+    setArtifactViewer(`<div class="artifact-viewer-card card"><div class="artifact-preview-error">Failed to load artifact preview.</div></div>`);
+    return;
+  }
+  const payload = await resp.json();
+  renderArtifactViewer(payload);
+}
+
+function viewArtifactById(artifactId){
+  const artifacts = window.__lastIncidentArtifacts || [];
+  const artifact = artifacts.find((item)=> item.id === artifactId);
+  if(artifact){
+    viewArtifact(artifact);
   }
 }
 
@@ -98,26 +334,33 @@ function renderNotes(notes){
 function renderArtifacts(artifacts){
   const artifactsEl = document.getElementById("incidentArtifacts");
   if(!artifactsEl) return;
+  window.__lastIncidentArtifacts = artifacts || [];
   if(!artifacts || !artifacts.length){
     artifactsEl.innerHTML = `<div class="muted">No browser artifacts linked yet.</div>`;
+    setArtifactViewer(`<div class="muted">No preview available until an artifact is captured.</div>`);
+    selectedArtifactId = null;
     return;
   }
-  artifactsEl.innerHTML = artifacts.map((artifact)=> `
-    <div class="card incident-note-card">
+  if(!selectedArtifactId || !artifacts.some((artifact)=> artifact.id === selectedArtifactId)){
+    selectedArtifactId = artifacts[0].id;
+  }
+  artifactsEl.innerHTML = `<div class="artifact-grid">${artifacts.map((artifact)=> `
+    <div class="card incident-note-card artifact-card ${artifact.id === selectedArtifactId ? "artifact-card-active" : ""}">
       <div class="incident-card-head">
         <strong>${escapeHtml(artifact.artifact_type || "artifact")}</strong>
         <span class="muted">${formatTimestamp(artifact.created_at)}</span>
       </div>
       <div class="incident-meta-grid">
         <div><span class="muted">File</span><div>${escapeHtml(artifact.file_name || "artifact")}</div></div>
-        <div><span class="muted">Size</span><div>${artifact.size_bytes ? `${artifact.size_bytes} bytes` : "n/a"}</div></div>
+        <div><span class="muted">Size</span><div>${formatBytes(artifact.size_bytes)}</div></div>
         <div><span class="muted">Check Result</span><div>${artifact.check_result_id || "n/a"}</div></div>
       </div>
-      <div style="margin-top:8px">
+      <div class="artifact-card-actions">
+        <button class="btn btn-secondary" onclick="viewArtifactById(${artifact.id})">View</button>
         <a class="btn btn-secondary" href="${escapeHtml(artifact.download_url)}">Download</a>
       </div>
     </div>
-  `).join("");
+  `).join("")}</div>`;
 }
 
 function renderIncidentSummary(incident){
@@ -224,7 +467,12 @@ async function loadIncidentDetail(){
   renderIncidentSummary(json.incident);
   renderEvents(json);
   renderNotes(json.notes || []);
-  renderArtifacts(json.artifacts || []);
+  const artifacts = json.artifacts || [];
+  renderArtifacts(artifacts);
+  if(artifacts.length){
+    const selected = artifacts.find((artifact)=> artifact.id === selectedArtifactId) || artifacts[0];
+    await viewArtifact(selected);
+  }
   renderTimeline(json.timeline || [], json.timeline_stats || null);
   const shareInfo = document.getElementById("shareInfo");
   if(shareInfo){

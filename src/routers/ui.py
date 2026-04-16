@@ -544,8 +544,9 @@ def checks_page():
       <button id="createBtn" onclick="createCheck()">Create</button>
     </div>
     <div class="row" style="margin-top:8px">
-      <textarea id="browserSteps" placeholder='Browser steps JSON, e.g. [{"action":"fill","selector":"#email","value":"${LASTPING_BROWSER_USER}"}]' style="width:720px;height:120px"></textarea>
+      <textarea id="browserSteps" placeholder='Browser steps JSON, e.g. [{"action":"fill","selector":"#email","value":"${browser_secret:login_email}"},{"action":"fill","selector":"#password","value":"${browser_secret:login_password}"},{"action":"click","selector":"button[type=submit]"},{"action":"expect_visible","selector":"[data-test=dashboard]"}]' style="width:720px;height:120px"></textarea>
     </div>
+    <div class="muted">Supported browser assertions include expect_visible, expect_hidden, expect_title, expect_value, expect_attribute, and expect_count. Secret placeholders use ${browser_secret:name}; env placeholders still use ${LASTPING_BROWSER_*}.</div>
     <div class="row">
       <label><input type="checkbox" id="browserCaptureScreenshot" checked /> Capture screenshot on browser failure</label>
     </div>
@@ -653,8 +654,9 @@ def checks_manage_page(check_id: int = Path(..., ge=1)):
       <button id="delBtn" style="margin-left:8px;display:none">Delete</button>
     </div>
     <div class="row" style="margin-top:8px">
-      <textarea id="browserSteps" placeholder='Browser steps JSON, e.g. [{"action":"click","selector":"button[type=submit]"}]' style="width:720px;height:120px"></textarea>
+      <textarea id="browserSteps" placeholder='Browser steps JSON, e.g. [{"action":"fill","selector":"#email","value":"${browser_secret:login_email}"},{"action":"expect_count","selector":".toast","count":1}]' style="width:720px;height:120px"></textarea>
     </div>
+    <div class="muted">Use ${browser_secret:name} for stored browser secrets, or ${LASTPING_BROWSER_*} for environment-backed values. Assertions support visibility, title, field value, attribute, URL, and count checks.</div>
     <div class="row">
       <label><input type="checkbox" id="browserCaptureScreenshot" checked /> Capture screenshot on browser failure</label>
     </div>
@@ -856,9 +858,12 @@ def incident_detail_page(incident_id: int = Path(..., ge=1)):
         <section class="card">
           <div class="section-head">
             <h3>Browser Artifacts</h3>
-            <div class="muted">Failure screenshots, videos, and HAR captures linked to this incident.</div>
+            <div class="muted">Failure screenshots, videos, traces, reports, and HAR captures linked to this incident.</div>
           </div>
           <div id="incidentArtifacts" class="muted">No browser artifacts linked yet.</div>
+          <div id="artifactViewer" class="artifact-viewer-shell">
+            <div class="muted">Select an artifact to preview screenshots, videos, HAR summaries, or browser execution reports.</div>
+          </div>
         </section>
 
         <section class="card">

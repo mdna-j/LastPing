@@ -30,8 +30,8 @@ from sqlmodel import Session, select
 from sqlalchemy import update, or_, and_, func, delete
 from sqlalchemy.exc import IntegrityError
 
-from .db import engine
-from .models import Check, CheckType, CheckStatus, Event, EventType, Project, Incident, CheckResult, BrowserCheckArtifact
+from .db import engine, ensure_engine
+from .models import Check, CheckType, CheckStatus, Event, EventType, Project, Incident, CheckResult, BrowserCheckArtifact, BrowserCheckSecret
 from .alerts import notify_down, notify_recovery, notify_degraded, notify_escalation, notify_status_subscribers, send_sms
 from .models import UptimeSnapshot, AvailabilityRollup, CheckLease, RemediationHook, RemediationLog, RemediationApproval, OnCallAlert, OnCallEscalation, OnCallRotation, OnCallMember, AuditLog, Anomaly, Heartbeat
 from .notification_queue import process_notification_queue, queue_email_delivery
@@ -39,6 +39,7 @@ from .analytics_ml import find_similar_incidents
 
 logger = logging.getLogger("lastping.worker")
 _BROWSER_ENV_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)\}")
+_BROWSER_SECRET_PATTERN = re.compile(r"\$\{browser_secret:([A-Za-z0-9_.-]{1,64})\}")
 
 # Window (seconds) in which separate failures may be grouped into a single incident
 GROUP_WINDOW = int(os.environ.get("INCIDENT_GROUP_WINDOW", "600"))
@@ -910,10 +911,46 @@ def _parse_browser_steps(steps_json: Optional[str]) -> list[dict]:
 
 
 def _expand_browser_template(value: Optional[str]) -> Optional[str]:
+    return _expand_browser_template_with_secrets(value)
+
+
+def _load_browser_secret(project_id: int, secret_name: str, *, cache: Optional[dict[str, str]] = None) -> str:
+    normalized_name = str(secret_name or "").strip()
+    if not normalized_name:
+        raise ValueError("missing_browser_secret_name")
+    if cache is not None and normalized_name in cache:
+        return cache[normalized_name]
+
+    with Session(ensure_engine()) as session:
+        secret = session.exec(
+            select(BrowserCheckSecret).where(
+                BrowserCheckSecret.project_id == int(project_id),
+                BrowserCheckSecret.name == normalized_name,
+            )
+        ).first()
+        if secret is None or not getattr(secret, "value", None):
+            raise ValueError(f"missing_browser_secret:{normalized_name}")
+        secret.last_used_at = _now()
+        secret.updated_at = _now()
+        session.add(secret)
+        session.commit()
+        resolved_value = str(secret.value)
+
+    if cache is not None:
+        cache[normalized_name] = resolved_value
+    return resolved_value
+
+
+def _expand_browser_template_with_secrets(
+    value: Optional[str],
+    *,
+    project_id: Optional[int] = None,
+    secret_cache: Optional[dict[str, str]] = None,
+) -> Optional[str]:
     if value is None or not isinstance(value, str):
         return value
 
-    def _replace(match: re.Match[str]) -> str:
+    def _replace_env(match: re.Match[str]) -> str:
         env_name = match.group(1)
         if not env_name.startswith("LASTPING_BROWSER_"):
             raise ValueError(f"browser_env_prefix_required:{env_name}")
@@ -922,7 +959,14 @@ def _expand_browser_template(value: Optional[str]) -> Optional[str]:
             raise ValueError(f"missing_browser_env:{env_name}")
         return env_value
 
-    return _BROWSER_ENV_PATTERN.sub(_replace, value)
+    expanded = _BROWSER_ENV_PATTERN.sub(_replace_env, value)
+
+    def _replace_secret(match: re.Match[str]) -> str:
+        if project_id is None:
+            raise ValueError("browser_secret_project_required")
+        return _load_browser_secret(int(project_id), match.group(1), cache=secret_cache)
+
+    return _BROWSER_SECRET_PATTERN.sub(_replace_secret, expanded)
 
 
 def _browser_default_timeout_ms(timeout_seconds: int) -> int:
@@ -1022,6 +1066,16 @@ def _browser_artifact_entry(artifact_type: str, path: Optional[Path]) -> Optiona
     }
 
 
+def _write_browser_report(run_dir: Path, payload: Dict[str, Any]) -> Optional[Path]:
+    try:
+        target = run_dir / "browser_report.json"
+        target.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str), encoding="utf-8")
+        return target
+    except Exception:
+        logger.exception("Failed to write browser report artifact at %s", run_dir)
+        return None
+
+
 def _capture_browser_failure_screenshot(page, project: Project, check: Check, *, run_dir: Optional[Path] = None) -> Optional[Path]:
     try:
         artifact_dir = run_dir or _browser_artifact_dir(project, check)
@@ -1073,11 +1127,17 @@ def _record_browser_artifacts(
     return count
 
 
-def _run_browser_step(page, step: dict, *, default_timeout_ms: int) -> None:
+def _browser_url_matches(current: str, expected: str) -> bool:
+    return current == expected or fnmatch.fnmatch(current, expected)
+
+
+def _run_browser_step(page, step: dict, *, default_timeout_ms: int, project_id: Optional[int] = None, secret_cache: Optional[dict[str, str]] = None) -> None:
     action = str(step.get("action") or "").strip().lower()
     selector = step.get("selector")
-    value = _expand_browser_template(step.get("value"))
+    value = _expand_browser_template_with_secrets(step.get("value"), project_id=project_id, secret_cache=secret_cache)
     timeout_ms = _browser_step_timeout_ms(step, default_timeout_ms)
+    attribute = step.get("attribute")
+    expected_count = step.get("count")
 
     if action == "goto":
         page.goto(value, wait_until="domcontentloaded", timeout=timeout_ms)
@@ -1101,8 +1161,38 @@ def _run_browser_step(page, step: dict, *, default_timeout_ms: int) -> None:
         return
     if action == "expect_url":
         current = page.url or ""
-        if current != value and not fnmatch.fnmatch(current, value):
+        if not _browser_url_matches(current, value):
             raise AssertionError(f"expected_url_mismatch:{current}")
+        return
+    if action == "expect_visible":
+        page.locator(selector).first.wait_for(state="visible", timeout=timeout_ms)
+        return
+    if action == "expect_hidden":
+        page.locator(selector).first.wait_for(state="hidden", timeout=timeout_ms)
+        return
+    if action == "expect_title":
+        title = page.title()
+        if title != value and not fnmatch.fnmatch(title, value):
+            raise AssertionError(f"expected_title_mismatch:{title}")
+        return
+    if action == "expect_value":
+        current_value = page.locator(selector).first.input_value(timeout=timeout_ms)
+        if current_value != value:
+            raise AssertionError(f"expected_value_mismatch:{current_value}")
+        return
+    if action == "expect_attribute":
+        current_attribute = page.locator(selector).first.get_attribute(str(attribute), timeout=timeout_ms)
+        if current_attribute != value:
+            raise AssertionError(f"expected_attribute_mismatch:{attribute}:{current_attribute}")
+        return
+    if action == "expect_count":
+        try:
+            target_count = int(expected_count)
+        except Exception as exc:
+            raise AssertionError("expected_count_invalid") from exc
+        actual_count = page.locator(selector).count()
+        if actual_count != target_count:
+            raise AssertionError(f"expected_count_mismatch:{actual_count}")
         return
     if action == "press":
         page.locator(selector).first.press(value, timeout=timeout_ms)
@@ -1119,7 +1209,7 @@ def _browser_check(check: Check, project: Project, timeout: int, retries: int) -
         return False, "browser_steps_missing", None, []
 
     try:
-        start_url = _expand_browser_template(check.url)
+        start_url = _expand_browser_template_with_secrets(check.url, project_id=getattr(project, "id", None), secret_cache={})
     except ValueError as exc:
         return False, str(exc), None, []
 
@@ -1134,6 +1224,7 @@ def _browser_check(check: Check, project: Project, timeout: int, retries: int) -
     capture_screenshot = bool(getattr(check, "browser_capture_screenshot", True))
     capture_video = _browser_capture_enabled("BROWSER_CHECK_CAPTURE_VIDEO", "1")
     capture_har = _browser_capture_enabled("BROWSER_CHECK_CAPTURE_HAR", "1")
+    capture_trace = _browser_capture_enabled("BROWSER_CHECK_CAPTURE_TRACE", "1")
     last_reason = "browser_check_failed"
     last_artifacts: List[Dict[str, Any]] = []
     last_run_dir: Optional[Path] = None
@@ -1148,9 +1239,18 @@ def _browser_check(check: Check, project: Project, timeout: int, retries: int) -
         failure_screenshot: Optional[Path] = None
         video_handle = None
         failed = False
+        secret_cache: dict[str, str] = {}
+        console_events: List[Dict[str, Any]] = []
+        page_errors: List[Dict[str, Any]] = []
+        network_failures: List[Dict[str, Any]] = []
+        http_errors: List[Dict[str, Any]] = []
+        step_results: List[Dict[str, Any]] = []
+        final_url = start_url
+        page_title = None
         stamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S%f")
         run_dir = _browser_run_artifact_dir(project, check, suffix=f"{stamp}-attempt{attempt + 1}")
         har_path = run_dir / "network.har"
+        trace_path = run_dir / "trace.zip"
         video_dir = run_dir / "video"
         try:
             start = time.time()
@@ -1163,14 +1263,89 @@ def _browser_check(check: Check, project: Project, timeout: int, retries: int) -
                 video_dir.mkdir(parents=True, exist_ok=True)
                 context_kwargs["record_video_dir"] = str(video_dir)
             context = browser.new_context(**context_kwargs)
+            if capture_trace:
+                context.tracing.start(screenshots=True, snapshots=True, sources=False)
             page = context.new_page()
             video_handle = getattr(page, "video", None)
+            page.on(
+                "console",
+                lambda msg: console_events.append(
+                    {
+                        "type": getattr(msg, "type", None) or "log",
+                        "text": _truncate(getattr(msg, "text", lambda: "")(), 500),
+                        "location": getattr(msg, "location", None) or {},
+                    }
+                ),
+            )
+            page.on(
+                "pageerror",
+                lambda exc: page_errors.append(
+                    {
+                        "message": _truncate(str(exc), 500),
+                    }
+                ),
+            )
+            page.on(
+                "requestfailed",
+                lambda req: network_failures.append(
+                    {
+                        "url": _truncate(req.url, 500),
+                        "method": getattr(req, "method", None),
+                        "resource_type": getattr(req, "resource_type", None),
+                        "error_text": _truncate(((req.failure or {}) if isinstance(req.failure, dict) else {}).get("errorText") if getattr(req, "failure", None) else "", 500),
+                    }
+                ),
+            )
+            page.on(
+                "response",
+                lambda resp: http_errors.append(
+                    {
+                        "url": _truncate(resp.url, 500),
+                        "status": int(resp.status),
+                        "status_text": _truncate(getattr(resp, "status_text", "") or "", 160),
+                        "method": getattr(getattr(resp, "request", None), "method", None),
+                    }
+                ) if int(getattr(resp, "status", 0) or 0) >= 400 else None,
+            )
             page.set_default_timeout(default_timeout_ms)
             page.goto(start_url, wait_until="domcontentloaded", timeout=default_timeout_ms)
             for step_index, step in enumerate(steps):
                 step_action = str(step.get("action") or "unknown")
-                _run_browser_step(page, step, default_timeout_ms=default_timeout_ms)
+                step_started = time.time()
+                step_record = {
+                    "index": step_index,
+                    "action": step_action,
+                    "selector": step.get("selector"),
+                    "value_template": _truncate(str(step.get("value") or ""), 300) if step.get("value") is not None else None,
+                }
+                try:
+                    _run_browser_step(
+                        page,
+                        step,
+                        default_timeout_ms=default_timeout_ms,
+                        project_id=getattr(project, "id", None),
+                        secret_cache=secret_cache,
+                    )
+                    step_record["status"] = "ok"
+                    step_record["duration_ms"] = round((time.time() - step_started) * 1000.0, 3)
+                    step_record["url"] = _truncate(page.url or "", 500)
+                    step_results.append(step_record)
+                except Exception as step_exc:
+                    step_record["status"] = "failed"
+                    step_record["duration_ms"] = round((time.time() - step_started) * 1000.0, 3)
+                    step_record["url"] = _truncate(page.url or "", 500)
+                    step_record["error"] = _truncate(str(step_exc), 500)
+                    step_results.append(step_record)
+                    raise
             latency_ms = (time.time() - start) * 1000.0
+            try:
+                final_url = page.url or start_url
+            except Exception:
+                final_url = start_url
+            try:
+                page_title = _truncate(page.title(), 300)
+            except Exception:
+                page_title = None
             if last_run_dir is not None:
                 _cleanup_browser_artifact_path(last_run_dir)
                 last_run_dir = None
@@ -1179,9 +1354,27 @@ def _browser_check(check: Check, project: Project, timeout: int, retries: int) -
         except Exception as exc:
             failed = True
             last_reason = f"browser_step_failed:{step_index}:{step_action}:{_truncate(str(exc), 300)}"
+            try:
+                if page is not None:
+                    final_url = page.url or start_url
+            except Exception:
+                final_url = start_url
+            try:
+                if page is not None:
+                    page_title = _truncate(page.title(), 300)
+            except Exception:
+                page_title = None
             if capture_screenshot and page is not None:
                 failure_screenshot = _capture_browser_failure_screenshot(page, project, check, run_dir=run_dir)
         finally:
+            if context is not None and capture_trace:
+                try:
+                    if failed:
+                        context.tracing.stop(path=str(trace_path))
+                    else:
+                        context.tracing.stop()
+                except Exception:
+                    logger.exception("Failed collecting browser trace for check_id=%s", getattr(check, "id", None))
             try:
                 if context is not None:
                     context.close()
@@ -1206,6 +1399,9 @@ def _browser_check(check: Check, project: Project, timeout: int, retries: int) -
                     har_entry = _browser_artifact_entry("har", har_path)
                     if har_entry is not None:
                         attempt_artifacts.append(har_entry)
+                trace_entry = _browser_artifact_entry("trace", trace_path) if capture_trace else None
+                if trace_entry is not None:
+                    attempt_artifacts.append(trace_entry)
                 if capture_video and video_handle is not None:
                     try:
                         raw_video_path = Path(video_handle.path())
@@ -1219,6 +1415,26 @@ def _browser_check(check: Check, project: Project, timeout: int, retries: int) -
                                 attempt_artifacts.append(video_entry)
                     except Exception:
                         logger.exception("Failed collecting browser video for check_id=%s", getattr(check, "id", None))
+                report_path = _write_browser_report(
+                    run_dir,
+                    {
+                        "attempt": attempt + 1,
+                        "check_id": getattr(check, "id", None),
+                        "project_id": getattr(project, "id", None),
+                        "start_url": start_url,
+                        "final_url": final_url,
+                        "page_title": page_title,
+                        "failure_reason": last_reason,
+                        "step_results": step_results,
+                        "console": console_events[-100:],
+                        "page_errors": page_errors[-50:],
+                        "network_failures": network_failures[-100:],
+                        "http_errors": http_errors[-100:],
+                    },
+                )
+                report_entry = _browser_artifact_entry("report", report_path)
+                if report_entry is not None:
+                    attempt_artifacts.append(report_entry)
                 if attempt_artifacts:
                     if last_run_dir is not None and last_run_dir != run_dir:
                         _cleanup_browser_artifact_path(last_run_dir)

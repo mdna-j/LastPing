@@ -14,7 +14,7 @@ from pydantic import BaseModel, EmailStr, AnyHttpUrl, confloat, constr, root_val
 from sqlmodel import select, Session
 
 from ..db import get_session
-from ..models import AuditLog, ApiKey, NotificationDelivery, OrgRole, Project as ProjectModel, ProjectMembership, Role
+from ..models import AuditLog, ApiKey, BrowserCheckSecret, NotificationDelivery, OrgRole, Project as ProjectModel, ProjectMembership, Role
 from ..notification_queue import (
     STATUS_DEAD,
     STATUS_DELIVERED,
@@ -199,6 +199,26 @@ class SecretLifecycleRead(BaseModel):
     usable_now: bool = False
 
 
+class BrowserSecretRead(BaseModel):
+    id: int
+    project_id: int
+    name: str
+    description: Optional[str] = None
+    configured: bool = True
+    last_used_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        orm_mode = True
+
+
+class BrowserSecretUpsert(StrictBaseModel):
+    name: constr(min_length=1, max_length=64, regex=r"^[A-Za-z0-9_.-]+$")
+    value: Optional[constr(min_length=1, max_length=4000)] = None
+    description: Optional[constr(max_length=240)] = None
+
+
 def _token_lifecycle_update_kwargs(payload: ProjectTokenLifecycleUpdate) -> dict:
     expires_at = UNSET
     rotation_interval_days = UNSET
@@ -260,6 +280,19 @@ def _project_scope_kwargs(project: ProjectModel) -> dict:
         "project_id": project.id,
         "org_id": getattr(project, "org_id", None),
     }
+
+
+def _serialize_browser_secret(row: BrowserCheckSecret) -> BrowserSecretRead:
+    return BrowserSecretRead(
+        id=row.id,
+        project_id=row.project_id,
+        name=row.name,
+        description=row.description,
+        configured=bool(row.value),
+        last_used_at=row.last_used_at,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
 
 
 @router.post("/", status_code=status.HTTP_201_CREATED, dependencies=[Depends(limit_public_requests)])
@@ -1527,6 +1560,130 @@ def _notification_failure_out(session: Session, row: NotificationDelivery) -> No
         last_retry_action=last_retry.action if last_retry else None,
         last_retry_at=last_retry.created_at if last_retry else None,
     )
+
+
+@router.get("/{project_id}/browser-secrets", response_model=List[BrowserSecretRead])
+def list_browser_secrets(
+    project_id: int = Path(..., ge=1),
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    authorize_project_operation(
+        project_id,
+        min_role=Role.OWNER.value,
+        x_admin_token=x_admin_token,
+        authorization=authorization,
+        session=session,
+    )
+    rows = session.exec(
+        select(BrowserCheckSecret)
+        .where(BrowserCheckSecret.project_id == project_id)
+        .order_by(BrowserCheckSecret.name.asc(), BrowserCheckSecret.id.asc())
+    ).all()
+    return [_serialize_browser_secret(row) for row in rows]
+
+
+@router.post("/{project_id}/browser-secrets", response_model=BrowserSecretRead)
+def upsert_browser_secret(
+    project_id: int = Path(..., ge=1),
+    payload: BrowserSecretUpsert = Body(...),
+    request: Request = None,
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    project = authorize_project_operation(
+        project_id,
+        min_role=Role.OWNER.value,
+        x_admin_token=x_admin_token,
+        authorization=authorization,
+        session=session,
+    )
+    row = session.exec(
+        select(BrowserCheckSecret).where(
+            BrowserCheckSecret.project_id == project_id,
+            BrowserCheckSecret.name == payload.name,
+        )
+    ).first()
+    actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
+    created = row is None
+    if row is None:
+        row = BrowserCheckSecret(
+            project_id=project_id,
+            name=payload.name,
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+        )
+    if payload.value is not None:
+        row.value = payload.value
+    row.description = payload.description
+    row.updated_at = datetime.utcnow()
+    session.add(row)
+    session.commit()
+    session.refresh(row)
+    session.add(
+        AuditLog(
+            actor=actor,
+            action="create_browser_secret" if created else "update_browser_secret",
+            target_type="browser_secret",
+            target_id=row.id,
+            details=json.dumps(
+                {
+                    "name": row.name,
+                    "configured": bool(row.value),
+                    "description": row.description,
+                }
+            ),
+            actor_ip=actor_ip,
+            user_agent=user_agent,
+            **_project_scope_kwargs(project),
+        )
+    )
+    session.commit()
+    return _serialize_browser_secret(row)
+
+
+@router.delete("/{project_id}/browser-secrets/{secret_name}")
+def delete_browser_secret(
+    project_id: int = Path(..., ge=1),
+    secret_name: str = Path(..., min_length=1, max_length=64, regex=r"^[A-Za-z0-9_.-]+$"),
+    request: Request = None,
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    project = authorize_project_operation(
+        project_id,
+        min_role=Role.OWNER.value,
+        x_admin_token=x_admin_token,
+        authorization=authorization,
+        session=session,
+    )
+    row = session.exec(
+        select(BrowserCheckSecret).where(
+            BrowserCheckSecret.project_id == project_id,
+            BrowserCheckSecret.name == secret_name,
+        )
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Browser secret not found")
+    actor, actor_ip, user_agent = get_audit_context(request, authorization, x_admin_token, session)
+    session.delete(row)
+    session.add(
+        AuditLog(
+            actor=actor,
+            action="delete_browser_secret",
+            target_type="browser_secret",
+            target_id=row.id,
+            details=json.dumps({"name": row.name}),
+            actor_ip=actor_ip,
+            user_agent=user_agent,
+            **_project_scope_kwargs(project),
+        )
+    )
+    session.commit()
+    return {"ok": True, "name": secret_name}
 
 
 @router.get("/{project_id}/pagerduty-settings", response_model=PagerDutySettingsOut)

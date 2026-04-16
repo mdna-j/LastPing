@@ -482,6 +482,22 @@ class ProjectSecretLifecycle(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+class BrowserCheckSecret(SQLModel, table=True):
+    __tablename__ = "browser_check_secret"
+    __table_args__ = (
+        sa.UniqueConstraint("project_id", "name", name="uq_browser_check_secret_project_name"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    name: str = Field(index=True, description="project-scoped browser secret name referenced by browser steps")
+    value: Optional[str] = _encrypted_field(description="encrypted browser secret value")
+    description: Optional[str] = Field(default=None, description="operator-facing description for the secret")
+    last_used_at: Optional[datetime] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    updated_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+
+
 class ApiKeyUsage(SQLModel, table=True):
     __tablename__ = "api_key_usage"
     """Simple per-minute counter for API key usage enforcement."""
@@ -555,7 +571,7 @@ class BrowserCheckArtifact(SQLModel, table=True):
     check_id: int = Field(foreign_key="check.id", index=True)
     check_result_id: Optional[int] = Field(default=None, foreign_key="check_result.id", index=True)
     incident_id: Optional[int] = Field(default=None, foreign_key="incident.id", index=True)
-    artifact_type: str = Field(index=True, description="screenshot, video, or har")
+    artifact_type: str = Field(index=True, description="screenshot, video, har, trace, or report")
     file_path: str
     content_type: Optional[str] = None
     size_bytes: Optional[int] = None

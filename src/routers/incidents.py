@@ -1,7 +1,8 @@
+import json
 import os
 from pathlib import Path as FilePath
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Header, Request, Path, Body
 from fastapi.responses import FileResponse, PlainTextResponse, Response
@@ -70,7 +71,98 @@ def _serialize_browser_artifact(project_id: int, incident_id: int, artifact: Bro
         "check_result_id": artifact.check_result_id,
         "file_name": file_path.name,
         "download_url": f"/projects/{project_id}/incidents/{incident_id}/artifacts/{artifact.id}",
+        "view_url": f"/projects/{project_id}/incidents/{incident_id}/artifacts/{artifact.id}/view",
     }
+
+
+def _artifact_download_url(project_id: int, incident_id: int, artifact: BrowserCheckArtifact) -> str:
+    return f"/projects/{project_id}/incidents/{incident_id}/artifacts/{artifact.id}"
+
+
+def _har_preview_payload(raw: dict[str, Any]) -> dict[str, Any]:
+    log = raw.get("log") if isinstance(raw, dict) else {}
+    pages = log.get("pages") if isinstance(log, dict) else []
+    entries = log.get("entries") if isinstance(log, dict) else []
+    items = []
+    failures = 0
+    total_time_ms = 0.0
+    for entry in entries[:150]:
+        request = entry.get("request") if isinstance(entry, dict) else {}
+        response = entry.get("response") if isinstance(entry, dict) else {}
+        timing = entry.get("time") if isinstance(entry, dict) else None
+        status = int(response.get("status") or 0) if isinstance(response, dict) else 0
+        if status >= 400:
+            failures += 1
+        if timing is not None:
+            try:
+                total_time_ms += max(float(timing), 0.0)
+            except Exception:
+                pass
+        items.append(
+            {
+                "method": request.get("method"),
+                "url": request.get("url"),
+                "status": status or None,
+                "mime_type": response.get("content", {}).get("mimeType") if isinstance(response, dict) else None,
+                "time_ms": timing,
+            }
+        )
+    return {
+        "pages": len(pages) if isinstance(pages, list) else 0,
+        "entry_count": len(entries) if isinstance(entries, list) else 0,
+        "error_count": failures,
+        "total_time_ms": round(total_time_ms, 3),
+        "requests": items,
+    }
+
+
+def _report_preview_payload(raw: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "failure_reason": raw.get("failure_reason"),
+        "start_url": raw.get("start_url"),
+        "final_url": raw.get("final_url"),
+        "page_title": raw.get("page_title"),
+        "attempt": raw.get("attempt"),
+        "step_results": raw.get("step_results") or [],
+        "console": raw.get("console") or [],
+        "page_errors": raw.get("page_errors") or [],
+        "network_failures": raw.get("network_failures") or [],
+        "http_errors": raw.get("http_errors") or [],
+    }
+
+
+def _load_artifact_preview(path: FilePath, artifact: BrowserCheckArtifact) -> dict[str, Any]:
+    artifact_type = (artifact.artifact_type or "").lower()
+    content_type = (artifact.content_type or "").lower()
+    if content_type.startswith("image/"):
+        return {"mode": "image"}
+    if content_type.startswith("video/"):
+        return {"mode": "video"}
+    if artifact_type == "trace" or path.suffix.lower() == ".zip":
+        return {
+            "mode": "trace",
+            "summary": {
+                "message": "Download this trace and open it with `playwright show-trace` for full replay.",
+                "open_command": "playwright show-trace trace.zip",
+            },
+        }
+
+    if artifact_type in {"har", "report"} or content_type.startswith("application/json") or path.suffix.lower() == ".json":
+        raw_text = path.read_text(encoding="utf-8", errors="replace")
+        parsed = json.loads(raw_text)
+        if artifact_type == "har":
+            return {"mode": "har", "summary": _har_preview_payload(parsed)}
+        if artifact_type == "report":
+            return {"mode": "report", "summary": _report_preview_payload(parsed), "raw_json": parsed}
+        return {"mode": "json", "raw_json": parsed}
+
+    if content_type.startswith("text/") or path.suffix.lower() in {".log", ".txt"}:
+        return {
+            "mode": "text",
+            "text": path.read_text(encoding="utf-8", errors="replace")[:200000],
+        }
+
+    return {"mode": "download_only"}
 
 
 def _normalize_utc_naive(value: Optional[datetime]) -> Optional[datetime]:
@@ -318,6 +410,41 @@ def download_incident_artifact(
         media_type=artifact.content_type or "application/octet-stream",
         filename=path.name,
     )
+
+
+@router.get("/incidents/{incident_id}/artifacts/{artifact_id}/view")
+def preview_incident_artifact(
+    project_id: int = Path(..., ge=1),
+    incident_id: int = Path(..., ge=1),
+    artifact_id: int = Path(..., ge=1),
+    session: Session = Depends(get_session),
+    _proj: Project = Depends(require_project_access),
+):
+    incident = _get_incident_or_404(session, project_id, incident_id)
+    artifact = session.get(BrowserCheckArtifact, artifact_id)
+    if (
+        artifact is None
+        or artifact.project_id != project_id
+        or artifact.incident_id != incident.id
+    ):
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    path = FilePath(artifact.file_path)
+    if not _artifact_path_allowed(path) or not path.exists():
+        raise HTTPException(status_code=404, detail="Artifact file not found")
+
+    preview = _load_artifact_preview(path, artifact)
+    payload = {
+        "artifact": _serialize_browser_artifact(project_id, incident_id, artifact),
+        "mode": preview.get("mode", "download_only"),
+        "download_url": _artifact_download_url(project_id, incident_id, artifact),
+    }
+    if "summary" in preview:
+        payload["summary"] = preview["summary"]
+    if "raw_json" in preview:
+        payload["raw_json"] = preview["raw_json"]
+    if "text" in preview:
+        payload["text"] = preview["text"]
+    return payload
 
 
 @router.get("/incidents/{incident_id}/postmortem.md", response_class=PlainTextResponse)
