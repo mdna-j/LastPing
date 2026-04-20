@@ -172,3 +172,71 @@ def test_error_budget_endpoint_reports_burn_rate(tmp_path):
     assert payload["alert"]["triggered"] is True
     assert len(payload["burn_rate_windows"]) == 2
     assert payload["burn_rate_windows"][0]["burn_rate"] >= payload["burn_rate_windows"][0]["threshold"]
+
+
+def test_slo_dashboard_endpoint_returns_budget_split_and_history(tmp_path):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'slo_dashboard.db'}"
+    from sqlmodel import Session
+    from src import db as dbmod
+    from src.models import Project, Check, Event, UptimeSnapshot
+    from src.main import app
+    from fastapi.testclient import TestClient
+
+    dbmod.create_db_and_tables()
+    client = TestClient(app)
+
+    now = datetime.utcnow().replace(microsecond=0)
+    start = now - timedelta(days=30)
+
+    with Session(dbmod.engine) as s:
+        from src.security import hash_api_key
+        plain = "slo-dashboard-key"
+        p = Project(name="slo-proj", api_key_hash=hash_api_key(plain), slo_target=99.0, sla_target=99.5)
+        s.add(p)
+        s.commit()
+        s.refresh(p)
+
+        checkout = Check(project_id=p.id, name="checkout")
+        login = Check(project_id=p.id, name="login")
+        s.add(checkout)
+        s.add(login)
+        s.commit()
+        s.refresh(checkout)
+        s.refresh(login)
+
+        s.add(Event(check_id=checkout.id, project_id=p.id, event_type="down", created_at=now - timedelta(hours=8)))
+        s.add(Event(check_id=checkout.id, project_id=p.id, event_type="up", created_at=now - timedelta(hours=6)))
+        s.add(Event(check_id=login.id, project_id=p.id, event_type="down", created_at=now - timedelta(hours=2)))
+        s.add(Event(check_id=login.id, project_id=p.id, event_type="up", created_at=now - timedelta(hours=1, minutes=30)))
+
+        for day_offset, checkout_uptime, login_uptime in [
+            (3, 99.8, 99.6),
+            (2, 98.7, 99.1),
+            (1, 97.9, 98.9),
+        ]:
+            window_end = (now - timedelta(days=day_offset)).replace(hour=12, minute=0, second=0)
+            window_start = window_end - timedelta(hours=24)
+            s.add(UptimeSnapshot(project_id=p.id, check_id=checkout.id, window_start=window_start, window_end=window_end, uptime_percent=checkout_uptime, mttr_seconds=90))
+            s.add(UptimeSnapshot(project_id=p.id, check_id=login.id, window_start=window_start, window_end=window_end, uptime_percent=login_uptime, mttr_seconds=45))
+        s.commit()
+        pid = p.id
+
+    headers = {"X-API-KEY": plain}
+    resp = client.get(
+        f"/projects/{pid}/metrics/slo-dashboard?start={start.isoformat()}&end={now.isoformat()}",
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+
+    assert payload["project_id"] == pid
+    assert payload["summary"]["slo_target"] == 99.0
+    assert len(payload["burn_rate_windows"]) == 3
+    assert [row["label"] for row in payload["burn_rate_windows"]] == ["1h", "6h", "24h"]
+    assert len(payload["service_budget_split"]["checks"]) == 2
+    assert payload["service_budget_split"]["checks"][0]["name"] in {"checkout", "login"}
+    assert "consumed_share_percent" in payload["service_budget_split"]["checks"][0]
+    assert len(payload["top_offenders"]) <= 2
+    assert payload["historical_compliance"]["daily"]["summary"]["total"] >= 3
+    assert len(payload["historical_compliance"]["daily"]["series"]) >= 3
+    assert "monthly" in payload["historical_compliance"]

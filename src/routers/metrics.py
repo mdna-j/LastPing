@@ -135,6 +135,77 @@ def _compute_project_check_rows(session: Session, project: Project, start_dt: da
     return checks, check_rows, agg
 
 
+def _compute_budget_breakdown(uptime_percent: float, slo_target: Optional[float], total_seconds: float) -> dict:
+    target = float(slo_target or 100.0)
+    budget_percent = max(0.0, 100.0 - target)
+    error_rate_percent = max(0.0, 100.0 - float(uptime_percent or 0.0))
+    consumed_seconds = max(0.0, total_seconds) * error_rate_percent / 100.0
+    budget_seconds = max(0.0, total_seconds) * budget_percent / 100.0
+    consumed_percent = (consumed_seconds / budget_seconds * 100.0) if budget_seconds > 0 else None
+    remaining_seconds = max(0.0, budget_seconds - consumed_seconds)
+    remaining_percent = max(0.0, 100.0 - consumed_percent) if consumed_percent is not None else None
+    return {
+        "slo_target": target,
+        "error_budget_percent": budget_percent,
+        "uptime_percent": uptime_percent,
+        "error_rate_percent": error_rate_percent,
+        "budget_seconds": budget_seconds,
+        "consumed_seconds": consumed_seconds,
+        "remaining_seconds": remaining_seconds,
+        "consumed_percent": consumed_percent,
+        "remaining_percent": remaining_percent,
+    }
+
+
+def _compute_burn_rate_windows(
+    session: Session,
+    project_id: int,
+    *,
+    start_dt: datetime,
+    end_dt: datetime,
+    checks: List[Check],
+    error_budget_percent: float,
+    window_specs: List[tuple[str, int, float]],
+) -> List[dict]:
+    windows = []
+    for label, minutes, threshold in window_specs:
+        window_start = max(start_dt, end_dt - timedelta(minutes=max(1, minutes)))
+        uptime_percent = _compute_project_uptime_percent(session, project_id, window_start, end_dt, checks=checks)
+        error_rate_percent = max(0.0, 100.0 - uptime_percent)
+        burn_rate = (error_rate_percent / error_budget_percent) if error_budget_percent > 0 else None
+        windows.append(
+            {
+                "label": label,
+                "minutes": max(1, minutes),
+                "uptime_percent": uptime_percent,
+                "error_rate_percent": error_rate_percent,
+                "burn_rate": burn_rate,
+                "threshold": threshold,
+            }
+        )
+    return windows
+
+
+def _compliance_summary(series: List[dict]) -> dict:
+    met = 0
+    missed = 0
+    unknown = 0
+    for row in series:
+        value = row.get("slo_met")
+        if value is True:
+            met += 1
+        elif value is False:
+            missed += 1
+        else:
+            unknown += 1
+    return {
+        "total": len(series),
+        "met": met,
+        "missed": missed,
+        "unknown": unknown,
+    }
+
+
 def _compute_error_budget_status(
     session: Session,
     project_id: int,
@@ -154,22 +225,25 @@ def _compute_error_budget_status(
         raise HTTPException(status_code=404, detail="Project not found")
 
     checks, check_rows, agg = _compute_project_check_rows(session, project, start_dt, end_dt)
-    budget_percent = max(0.0, 100.0 - float(project.slo_target or 100.0))
     total_seconds = max(0.0, (end_dt - start_dt).total_seconds())
-    consumed_seconds = total_seconds * max(0.0, (100.0 - agg)) / 100.0
-    budget_seconds = total_seconds * budget_percent / 100.0
-    consumed_percent = (consumed_seconds / budget_seconds * 100.0) if budget_seconds > 0 else None
-    remaining_seconds = max(0.0, budget_seconds - consumed_seconds)
-    remaining_percent = max(0.0, 100.0 - consumed_percent) if consumed_percent is not None else None
-
-    short_start = max(start_dt, end_dt - timedelta(minutes=max(1, short_window_minutes)))
-    long_start = max(start_dt, end_dt - timedelta(minutes=max(1, long_window_minutes)))
-    short_uptime = _compute_project_uptime_percent(session, project_id, short_start, end_dt, checks=checks)
-    long_uptime = _compute_project_uptime_percent(session, project_id, long_start, end_dt, checks=checks)
-    short_error_rate = max(0.0, 100.0 - short_uptime)
-    long_error_rate = max(0.0, 100.0 - long_uptime)
-    short_burn = (short_error_rate / budget_percent) if budget_percent > 0 else None
-    long_burn = (long_error_rate / budget_percent) if budget_percent > 0 else None
+    budget = _compute_budget_breakdown(agg, project.slo_target, total_seconds)
+    budget_percent = budget["error_budget_percent"]
+    burn_windows = _compute_burn_rate_windows(
+        session,
+        project_id,
+        start_dt=start_dt,
+        end_dt=end_dt,
+        checks=checks,
+        error_budget_percent=budget_percent,
+        window_specs=[
+            (f"{max(1, short_window_minutes)}m", short_window_minutes, short_burn_threshold),
+            (f"{max(1, long_window_minutes)}m", long_window_minutes, long_burn_threshold),
+        ],
+    )
+    short_window = burn_windows[0]
+    long_window = burn_windows[1]
+    short_burn = short_window["burn_rate"]
+    long_burn = long_window["burn_rate"]
 
     alert_triggered = (
         budget_percent > 0
@@ -192,32 +266,15 @@ def _compute_error_budget_status(
         "start": start_dt.isoformat(),
         "end": end_dt.isoformat(),
         "slo_target": project.slo_target,
-        "error_budget_percent": budget_percent,
+        "error_budget_percent": budget["error_budget_percent"],
         "project_uptime_percent": agg,
-        "budget_seconds": budget_seconds,
-        "consumed_seconds": consumed_seconds,
-        "remaining_seconds": remaining_seconds,
-        "consumed_percent": consumed_percent,
-        "remaining_percent": remaining_percent,
+        "budget_seconds": budget["budget_seconds"],
+        "consumed_seconds": budget["consumed_seconds"],
+        "remaining_seconds": budget["remaining_seconds"],
+        "consumed_percent": budget["consumed_percent"],
+        "remaining_percent": budget["remaining_percent"],
         "top_offenders": top_offenders,
-        "burn_rate_windows": [
-            {
-                "label": f"{max(1, short_window_minutes)}m",
-                "minutes": max(1, short_window_minutes),
-                "uptime_percent": short_uptime,
-                "error_rate_percent": short_error_rate,
-                "burn_rate": short_burn,
-                "threshold": short_burn_threshold,
-            },
-            {
-                "label": f"{max(1, long_window_minutes)}m",
-                "minutes": max(1, long_window_minutes),
-                "uptime_percent": long_uptime,
-                "error_rate_percent": long_error_rate,
-                "burn_rate": long_burn,
-                "threshold": long_burn_threshold,
-            },
-        ],
+        "burn_rate_windows": burn_windows,
         "alert": {
             "triggered": alert_triggered,
             "reason": burn_reason,
@@ -247,6 +304,139 @@ def _compute_availability_report(session: Session, project_id: int, start_dt: da
         "project_slo_met": project_slo_met,
         "project_sla_met": project_sla_met,
         "checks": check_rows,
+    }
+
+
+def _compute_slo_dashboard(
+    session: Session,
+    project_id: int,
+    start_dt: datetime,
+    end_dt: datetime,
+) -> dict:
+    if start_dt >= end_dt:
+        raise HTTPException(status_code=400, detail="start must be before end")
+
+    project = session.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    checks, check_rows, agg = _compute_project_check_rows(session, project, start_dt, end_dt)
+    total_seconds = max(0.0, (end_dt - start_dt).total_seconds())
+    project_budget = _compute_budget_breakdown(agg, project.slo_target, total_seconds)
+    burn_windows = _compute_burn_rate_windows(
+        session,
+        project_id,
+        start_dt=start_dt,
+        end_dt=end_dt,
+        checks=checks,
+        error_budget_percent=project_budget["error_budget_percent"],
+        window_specs=[
+            ("1h", 60, 14.4),
+            ("6h", 360, 6.0),
+            ("24h", 1440, 3.0),
+        ],
+    )
+
+    component_rows = []
+    total_component_consumed_seconds = 0.0
+    for row in check_rows:
+        budget = _compute_budget_breakdown(row["uptime_percent"], project.slo_target, total_seconds)
+        total_component_consumed_seconds += float(budget["consumed_seconds"] or 0.0)
+        component_rows.append(
+            {
+                **row,
+                "error_rate_percent": budget["error_rate_percent"],
+                "budget_seconds": budget["budget_seconds"],
+                "consumed_seconds": budget["consumed_seconds"],
+                "remaining_seconds": budget["remaining_seconds"],
+                "consumed_percent": budget["consumed_percent"],
+                "remaining_percent": budget["remaining_percent"],
+            }
+        )
+
+    for row in component_rows:
+        consumed_seconds = float(row.get("consumed_seconds") or 0.0)
+        row["consumed_share_percent"] = (
+            consumed_seconds / total_component_consumed_seconds * 100.0
+            if total_component_consumed_seconds > 0
+            else 0.0
+        )
+
+    component_rows.sort(
+        key=lambda row: (
+            -(float(row.get("consumed_percent") or 0.0)),
+            float(row.get("uptime_percent") or 0.0),
+            str(row.get("name") or ""),
+        )
+    )
+
+    daily_history = availability_history(
+        project_id=project_id,
+        check_id=None,
+        start=start_dt.isoformat(),
+        end=end_dt.isoformat(),
+        session=session,
+        _proj=project,
+    )
+    monthly_history = availability_rollup(
+        project_id=project_id,
+        period="month",
+        check_id=None,
+        start=start_dt.isoformat(),
+        end=end_dt.isoformat(),
+        session=session,
+        _proj=project,
+    )
+
+    top_offenders = component_rows[:5]
+    critical_burn = any(
+        window.get("burn_rate") is not None and float(window["burn_rate"]) >= float(window.get("threshold") or 0.0)
+        for window in burn_windows
+    )
+    warning_burn = any(
+        window.get("burn_rate") is not None and float(window["burn_rate"]) >= 1.0
+        for window in burn_windows
+    )
+    remaining_pct = project_budget["remaining_percent"]
+    if critical_burn:
+        overall_state = "critical"
+    elif warning_burn or (remaining_pct is not None and remaining_pct <= 25):
+        overall_state = "warning"
+    else:
+        overall_state = "healthy"
+
+    return {
+        "project_id": project_id,
+        "start": start_dt.isoformat(),
+        "end": end_dt.isoformat(),
+        "summary": {
+            "state": overall_state,
+            "slo_target": project.slo_target,
+            "project_uptime_percent": agg,
+            "error_budget_percent": project_budget["error_budget_percent"],
+            "budget_seconds": project_budget["budget_seconds"],
+            "consumed_seconds": project_budget["consumed_seconds"],
+            "remaining_seconds": project_budget["remaining_seconds"],
+            "consumed_percent": project_budget["consumed_percent"],
+            "remaining_percent": project_budget["remaining_percent"],
+        },
+        "burn_rate_windows": burn_windows,
+        "service_budget_split": {
+            "component_count": len(component_rows),
+            "total_consumed_seconds": total_component_consumed_seconds,
+            "checks": component_rows,
+        },
+        "top_offenders": top_offenders,
+        "historical_compliance": {
+            "daily": {
+                "series": daily_history.get("series", []),
+                "summary": _compliance_summary(daily_history.get("series", [])),
+            },
+            "monthly": {
+                "series": monthly_history.get("series", []),
+                "summary": _compliance_summary(monthly_history.get("series", [])),
+            },
+        },
     }
 
 
@@ -354,6 +544,19 @@ def error_budget_report(
         short_window_minutes=short_window_minutes,
         long_window_minutes=long_window_minutes,
     )
+
+
+@router.get("/metrics/slo-dashboard")
+def slo_dashboard(
+    project_id: int = Path(..., ge=1),
+    start: Optional[str] = Query(None, max_length=40),
+    end: Optional[str] = Query(None, max_length=40),
+    session: Session = Depends(get_session),
+    _proj: Project = Depends(require_project_api_key),
+):
+    start_dt = _parse_dt("start", start) if start else datetime.utcnow() - timedelta(days=30)
+    end_dt = _parse_dt("end", end) if end else datetime.utcnow()
+    return _compute_slo_dashboard(session, project_id, start_dt, end_dt)
 
 
 @router.get("/metrics/availability/history")

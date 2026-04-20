@@ -1129,6 +1129,11 @@ tbody tr:hover {
   margin-top: 14px;
 }
 
+.table-wrap {
+  width: 100%;
+  overflow-x: auto;
+}
+
 .insight-grid {
   margin-top: 14px;
   display: grid;

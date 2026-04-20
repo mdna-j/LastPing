@@ -1305,6 +1305,7 @@ def reports_page():
         <nav class="rail-links">
           <a class="rail-link" href="/ui/dashboard">Dashboard</a>
           <a class="rail-link" href="/ui/snapshots">Snapshots</a>
+          <a class="rail-link" href="/ui/slo">SLO</a>
           <a class="rail-link active" href="/ui/reports">Reports</a>
           <a class="rail-link" href="/ui/incidents">Incidents</a>
           <a class="rail-link" href="/ui/projects/1/settings">Settings</a>
@@ -1367,6 +1368,7 @@ def reports_page():
               <button id="exportBtn" class="btn btn-secondary">Export CSV</button>
               <a class="btn btn-secondary" href="/ui/dashboard">Dashboard</a>
               <a class="btn btn-secondary" href="/ui/snapshots">Snapshots</a>
+              <a class="btn btn-secondary" href="/ui/slo">SLO</a>
               <a class="btn btn-secondary" href="/ui/incidents">Incidents</a>
             </div>
           </div>
@@ -1414,6 +1416,177 @@ def reports_page():
     <script src="/static/js/vendor/chart.min.js"></script>
     <script src="/static/js/ui_shell.js"></script>
     <script src="/static/js/report.js"></script>
+    </body>
+    </html>
+    """
+
+
+@router.get("/slo", response_class=HTMLResponse)
+def slo_dashboard_page():
+    return """
+    <html>
+    <head>
+      <title>SLO Dashboard</title>
+      <meta name="viewport" content="width=device-width,initial-scale=1" />
+      <link rel="stylesheet" href="/static/css/ui.css" />
+    </head>
+    <body class="page-reports">
+    <div class="app-shell">
+      <aside class="nav-rail">
+        <div class="rail-brand">LP</div>
+        <nav class="rail-links">
+          <a class="rail-link" href="/ui/dashboard">Dashboard</a>
+          <a class="rail-link" href="/ui/snapshots">Snapshots</a>
+          <a class="rail-link active" href="/ui/slo">SLO</a>
+          <a class="rail-link" href="/ui/reports">Reports</a>
+          <a class="rail-link" href="/ui/incidents">Incidents</a>
+          <a class="rail-link" href="/ui/projects/1/settings">Settings</a>
+        </nav>
+      </aside>
+
+      <main class="main-stage">
+        <header class="topbar">
+          <div>
+            <h1>SLO / Error Budget</h1>
+            <div class="muted">Budget remaining, multi-window burn rates, component split, offenders, and historical compliance.</div>
+          </div>
+        </header>
+
+        <section id="incidentHeroBanner" class="card hero-banner hero-banner-hidden" role="status" aria-live="polite">
+          <div class="hero-banner-icon">!</div>
+          <div class="hero-banner-content">
+            <div class="hero-banner-title" id="incidentHeroTitle">No active outages</div>
+            <div class="hero-banner-sub" id="incidentHeroSub">All checks currently healthy.</div>
+          </div>
+        </section>
+
+        <section class="card health-strip">
+          <div class="health-item">
+            <span class="health-label">Last refresh</span>
+            <span class="health-value" id="healthLastRefresh">-</span>
+          </div>
+          <div class="health-item">
+            <span class="health-label">Active incidents</span>
+            <span class="health-value" id="healthActiveIncidents">-</span>
+          </div>
+          <div class="health-item">
+            <span class="health-label">Workers online</span>
+            <span class="health-value" id="healthWorkersOnline">-</span>
+          </div>
+          <div class="health-item health-item-wide">
+            <span class="health-label">Region health</span>
+            <span class="health-value" id="healthRegionHealth">-</span>
+          </div>
+        </section>
+
+        <section class="card controls-card">
+          <div class="row dashboard-controls-row">
+            <div class="dashboard-inputs">
+              <label>Project: <input id="projectId" value="1" style="width:80px"/></label>
+              <label>API Key: <input id="apiKey" type="password" autocomplete="off" placeholder="optional" style="width:220px"/></label>
+              <label>Start: <input id="start" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:190px"/></label>
+              <label>End: <input id="end" placeholder="YYYY-MM-DDTHH:MM:SS" style="width:190px"/></label>
+            </div>
+            <div class="dashboard-actions">
+              <button id="loadSloBtn" class="btn">Load</button>
+              <a class="btn btn-secondary" href="/ui/dashboard">Dashboard</a>
+              <a class="btn btn-secondary" href="/ui/reports">Reports</a>
+              <a class="btn btn-secondary" href="/ui/incidents">Incidents</a>
+            </div>
+          </div>
+          <div class="row">
+            <button class="btn btn-secondary" id="slo7d">Last 7d</button>
+            <button class="btn btn-secondary" id="slo30d">Last 30d</button>
+            <button class="btn btn-secondary" id="slo90d">Last 90d</button>
+            <button class="btn btn-secondary" id="slo180d">Last 180d</button>
+          </div>
+        </section>
+
+        <section id="sloSummaryCards" class="kpi-grid"></section>
+
+        <section class="card">
+          <div class="section-head">
+            <h3>Burn Windows</h3>
+            <div class="muted">Error-budget burn over 1h, 6h, and 24h windows.</div>
+          </div>
+          <div id="sloBurnCards" class="kpi-grid"></div>
+        </section>
+
+        <section class="chart-grid">
+          <article id="sloHistoryChartCard" class="card chart-card">
+            <div class="section-head">
+              <h3>Historical SLO Compliance</h3>
+              <div class="muted">Daily uptime versus target across the selected range.</div>
+            </div>
+            <div class="chart-frame">
+              <canvas id="sloHistoryChart" height="140"></canvas>
+              <div id="sloHistoryChartEmpty" class="chart-empty hidden">No recent data for selected range.</div>
+            </div>
+          </article>
+
+          <article id="sloComponentChartCard" class="card chart-card">
+            <div class="section-head">
+              <h3>Component Budget Split</h3>
+              <div class="muted">Share of consumed error budget by component.</div>
+            </div>
+            <div class="chart-frame">
+              <canvas id="sloComponentChart" height="140"></canvas>
+              <div id="sloComponentChartEmpty" class="chart-empty hidden">No component budget pressure in selected range.</div>
+            </div>
+          </article>
+        </section>
+
+        <section class="insight-grid">
+          <article class="card">
+            <div class="section-head">
+              <h3>Top Offenders</h3>
+              <div class="muted">Components consuming the most budget.</div>
+            </div>
+            <div id="sloTopOffenders" class="muted">Load the dashboard to see current offenders.</div>
+          </article>
+          <article class="card">
+            <div class="section-head">
+              <h3>Compliance Summary</h3>
+              <div class="muted">Daily and monthly SLO pass / miss counts.</div>
+            </div>
+            <div id="sloComplianceSummary" class="muted">No compliance summary loaded yet.</div>
+          </article>
+          <article class="card">
+            <div class="section-head">
+              <h3>Monthly Rollups</h3>
+              <div class="muted">Longer-term compliance periods from rollups.</div>
+            </div>
+            <div id="sloMonthlySummary" class="muted">No monthly rollups loaded yet.</div>
+          </article>
+        </section>
+
+        <section class="card table-card">
+          <div class="section-head">
+            <h3>Component Budget Table</h3>
+            <div class="muted">Per-component remaining budget, burn contribution, and compliance.</div>
+          </div>
+          <div class="table-wrap">
+            <table id="sloComponentTable">
+              <thead>
+                <tr>
+                  <th>Component</th>
+                  <th>Uptime %</th>
+                  <th>Consumed %</th>
+                  <th>Remaining %</th>
+                  <th>Budget Share</th>
+                  <th>SLO</th>
+                  <th>SLA</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script src="/static/js/vendor/chart.min.js"></script>
+    <script src="/static/js/ui_shell.js"></script>
+    <script src="/static/js/slo_dashboard.js"></script>
     </body>
     </html>
     """
