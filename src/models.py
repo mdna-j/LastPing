@@ -430,6 +430,34 @@ class AvailabilityRollup(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+class SLOCompliancePeriod(SQLModel, table=True):
+    __tablename__ = "slo_compliance_period"
+    __table_args__ = (
+        sa.UniqueConstraint("project_id", "check_id", "period_type", "period", name="uq_slo_compliance_period_scope"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    check_id: Optional[int] = Field(default=None, foreign_key="check.id", index=True)
+    period_type: str = Field(default="day", index=True, description="day, month, or quarter")
+    period: str = Field(index=True, description="normalized period label such as 2026-04-19 or 2026-04")
+    period_start: datetime = Field(index=True)
+    period_end: datetime = Field(index=True)
+    slo_target: Optional[float] = Field(default=None)
+    sla_target: Optional[float] = Field(default=None)
+    uptime_percent: float
+    error_budget_percent: Optional[float] = Field(default=None)
+    error_rate_percent: Optional[float] = Field(default=None)
+    budget_seconds: Optional[float] = Field(default=None)
+    consumed_seconds: Optional[float] = Field(default=None)
+    remaining_seconds: Optional[float] = Field(default=None)
+    consumed_percent: Optional[float] = Field(default=None)
+    remaining_percent: Optional[float] = Field(default=None)
+    slo_met: Optional[bool] = Field(default=None)
+    sla_met: Optional[bool] = Field(default=None)
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+
+
 class PredictiveModel(SQLModel, table=True):
     __tablename__ = "predictive_model"
     id: Optional[int] = Field(default=None, primary_key=True)

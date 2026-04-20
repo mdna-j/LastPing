@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Path, Response
 from sqlmodel import Session, select
 
 from ..db import get_session
-from ..models import Event, Check, Project, AvailabilityRollup
+from ..models import Event, Check, Project, AvailabilityRollup, SLOCompliancePeriod
 from ..deps import require_project_api_key
 from ..models import UptimeSnapshot
 
@@ -60,6 +60,65 @@ def _rollup_series(series: List[dict], period: str, slo_target: Optional[float],
             "sla_met": (sla_target is not None and avg >= sla_target) if sla_target is not None else None,
         })
     return out
+
+
+def _load_slo_compliance_series(
+    session: Session,
+    *,
+    project_id: int,
+    period_type: str,
+    check_id: Optional[int],
+    start_dt: datetime,
+    end_dt: datetime,
+) -> List[dict]:
+    stmt = (
+        select(SLOCompliancePeriod)
+        .where(
+            SLOCompliancePeriod.project_id == project_id,
+            SLOCompliancePeriod.period_type == period_type,
+            SLOCompliancePeriod.period_end > start_dt,
+            SLOCompliancePeriod.period_start < end_dt,
+        )
+        .order_by(SLOCompliancePeriod.period_start)
+    )
+    if check_id is None:
+        stmt = stmt.where(SLOCompliancePeriod.check_id == None)
+    else:
+        stmt = stmt.where(SLOCompliancePeriod.check_id == check_id)
+
+    rows = session.exec(stmt).all()
+    key_name = "day" if period_type == "day" else "period"
+    return [
+        {
+            key_name: row.period,
+            "uptime_percent": row.uptime_percent,
+            "slo_met": row.slo_met,
+            "sla_met": row.sla_met,
+            "source": "stored",
+        }
+        for row in rows
+    ]
+
+
+def _merge_series_with_preference(primary_series: List[dict], fallback_series: List[dict], key_name: str) -> List[dict]:
+    merged = {}
+    for row in fallback_series:
+        key = row.get(key_name)
+        if key:
+            merged[key] = row
+    for row in primary_series:
+        key = row.get(key_name)
+        if key:
+            merged[key] = row
+    return [merged[key] for key in sorted(merged.keys())]
+
+
+def _historical_backing_store(stored_series: List[dict], fallback_series: List[dict], fallback_name: str) -> str:
+    if stored_series and fallback_series:
+        return "mixed"
+    if stored_series:
+        return "slo_compliance_period"
+    return fallback_name
 
 
 def _compute_check_uptime_percent(session: Session, project_id: int, check_id: int, start_dt: datetime, end_dt: datetime) -> float:
@@ -387,6 +446,24 @@ def _compute_slo_dashboard(
         session=session,
         _proj=project,
     )
+    stored_daily_series = _load_slo_compliance_series(
+        session,
+        project_id=project_id,
+        period_type="day",
+        check_id=None,
+        start_dt=start_dt,
+        end_dt=end_dt,
+    )
+    stored_monthly_series = _load_slo_compliance_series(
+        session,
+        project_id=project_id,
+        period_type="month",
+        check_id=None,
+        start_dt=start_dt,
+        end_dt=end_dt,
+    )
+    daily_series = _merge_series_with_preference(stored_daily_series, daily_history.get("series", []), "day")
+    monthly_series = _merge_series_with_preference(stored_monthly_series, monthly_history.get("series", []), "period")
 
     top_offenders = component_rows[:5]
     critical_burn = any(
@@ -429,12 +506,22 @@ def _compute_slo_dashboard(
         "top_offenders": top_offenders,
         "historical_compliance": {
             "daily": {
-                "series": daily_history.get("series", []),
-                "summary": _compliance_summary(daily_history.get("series", [])),
+                "series": daily_series,
+                "summary": _compliance_summary(daily_series),
+                "backing_store": _historical_backing_store(
+                    stored_daily_series,
+                    daily_history.get("series", []),
+                    "uptime_snapshot",
+                ),
             },
             "monthly": {
-                "series": monthly_history.get("series", []),
-                "summary": _compliance_summary(monthly_history.get("series", [])),
+                "series": monthly_series,
+                "summary": _compliance_summary(monthly_series),
+                "backing_store": _historical_backing_store(
+                    stored_monthly_series,
+                    monthly_history.get("series", []),
+                    "availability_rollup",
+                ),
             },
         },
     }

@@ -33,7 +33,7 @@ from sqlalchemy.exc import IntegrityError
 from .db import engine, ensure_engine
 from .models import Check, CheckType, CheckStatus, Event, EventType, Project, Incident, CheckResult, BrowserCheckArtifact, BrowserCheckSecret
 from .alerts import notify_down, notify_recovery, notify_degraded, notify_escalation, notify_status_subscribers, send_sms
-from .models import UptimeSnapshot, AvailabilityRollup, CheckLease, RemediationHook, RemediationLog, RemediationApproval, OnCallAlert, OnCallEscalation, OnCallRotation, OnCallMember, AuditLog, Anomaly, Heartbeat
+from .models import UptimeSnapshot, AvailabilityRollup, SLOCompliancePeriod, CheckLease, RemediationHook, RemediationLog, RemediationApproval, OnCallAlert, OnCallEscalation, OnCallRotation, OnCallMember, AuditLog, Anomaly, Heartbeat
 from .notification_queue import process_notification_queue, queue_email_delivery
 from .analytics_ml import find_similar_incidents
 
@@ -47,6 +47,7 @@ _LAST_EARLY_WARNING_RUN: Optional[datetime] = None
 _LAST_PREDICTIVE_RUN: Optional[datetime] = None
 _LAST_ARCHIVE_RUN: Optional[datetime] = None
 _LAST_QUARTERLY_RUN: Optional[datetime] = None
+_LAST_SLO_ARCHIVE_RUN: Optional[datetime] = None
 _LAST_RAW_RETENTION_RUN: Optional[datetime] = None
 _LAST_BURN_RATE_RUN: Optional[datetime] = None
 _LAST_BROWSER_ARTIFACT_RETENTION_RUN: Optional[datetime] = None
@@ -1565,6 +1566,10 @@ def _month_start(dt: datetime) -> datetime:
     return dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
 
+def _day_start(dt: datetime) -> datetime:
+    return dt.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
 def _compute_monthly_rollups(session: Session, project: Project, month_start: datetime, month_end: datetime):
     return _compute_rollups_for_range(session, project, month_start, month_end)
 
@@ -1573,6 +1578,231 @@ def _quarter_start(dt: datetime) -> datetime:
     q = (dt.month - 1) // 3
     month = q * 3 + 1
     return dt.replace(month=month, day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+def _slo_period_label(period_type: str, period_start: datetime) -> str:
+    if period_type == "month":
+        return period_start.strftime("%Y-%m")
+    if period_type == "quarter":
+        quarter_number = (period_start.month - 1) // 3 + 1
+        return f"{period_start.year}-Q{quarter_number}"
+    return period_start.date().isoformat()
+
+
+def _project_period_slo_exists(session: Session, project_id: int, period_type: str, period: str) -> bool:
+    existing = session.exec(
+        select(SLOCompliancePeriod.id).where(
+            SLOCompliancePeriod.project_id == project_id,
+            SLOCompliancePeriod.check_id == None,
+            SLOCompliancePeriod.period_type == period_type,
+            SLOCompliancePeriod.period == period,
+        )
+    ).first()
+    return existing is not None
+
+
+def _compute_slo_period_rows(session: Session, project: Project, start: datetime, end: datetime) -> List[dict]:
+    from .routers.metrics import _compute_check_uptime_percent, _compute_budget_breakdown
+
+    total_seconds = max(0.0, (end - start).total_seconds())
+    if total_seconds <= 0:
+        return []
+
+    checks = session.exec(
+        select(Check).where(
+            Check.project_id == project.id,
+            Check.created_at < end,
+        )
+    ).all()
+
+    rows: List[dict] = []
+    for check in checks:
+        uptime_percent = _compute_check_uptime_percent(session, project.id, check.id, start, end)
+        budget = _compute_budget_breakdown(uptime_percent, project.slo_target, total_seconds)
+        rows.append(
+            {
+                "check_id": check.id,
+                "uptime_percent": uptime_percent,
+                "slo_target": project.slo_target,
+                "sla_target": project.sla_target,
+                "error_budget_percent": budget["error_budget_percent"],
+                "error_rate_percent": budget["error_rate_percent"],
+                "budget_seconds": budget["budget_seconds"],
+                "consumed_seconds": budget["consumed_seconds"],
+                "remaining_seconds": budget["remaining_seconds"],
+                "consumed_percent": budget["consumed_percent"],
+                "remaining_percent": budget["remaining_percent"],
+                "slo_met": (project.slo_target is not None and uptime_percent >= project.slo_target)
+                if project.slo_target is not None
+                else None,
+                "sla_met": (project.sla_target is not None and uptime_percent >= project.sla_target)
+                if project.sla_target is not None
+                else None,
+            }
+        )
+
+    aggregate_uptime = sum(row["uptime_percent"] for row in rows) / len(rows) if rows else 100.0
+    aggregate_budget = _compute_budget_breakdown(aggregate_uptime, project.slo_target, total_seconds)
+    rows.append(
+        {
+            "check_id": None,
+            "uptime_percent": aggregate_uptime,
+            "slo_target": project.slo_target,
+            "sla_target": project.sla_target,
+            "error_budget_percent": aggregate_budget["error_budget_percent"],
+            "error_rate_percent": aggregate_budget["error_rate_percent"],
+            "budget_seconds": aggregate_budget["budget_seconds"],
+            "consumed_seconds": aggregate_budget["consumed_seconds"],
+            "remaining_seconds": aggregate_budget["remaining_seconds"],
+            "consumed_percent": aggregate_budget["consumed_percent"],
+            "remaining_percent": aggregate_budget["remaining_percent"],
+            "slo_met": (project.slo_target is not None and aggregate_uptime >= project.slo_target)
+            if project.slo_target is not None
+            else None,
+            "sla_met": (project.sla_target is not None and aggregate_uptime >= project.sla_target)
+            if project.sla_target is not None
+            else None,
+        }
+    )
+    return rows
+
+
+def _upsert_slo_period_row(
+    session: Session,
+    *,
+    project_id: int,
+    check_id: Optional[int],
+    period_type: str,
+    period: str,
+    period_start: datetime,
+    period_end: datetime,
+    row_data: dict,
+) -> None:
+    existing = session.exec(
+        select(SLOCompliancePeriod).where(
+            SLOCompliancePeriod.project_id == project_id,
+            SLOCompliancePeriod.check_id == check_id,
+            SLOCompliancePeriod.period_type == period_type,
+            SLOCompliancePeriod.period == period,
+        )
+    ).first()
+    if existing is None:
+        existing = SLOCompliancePeriod(
+            project_id=project_id,
+            check_id=check_id,
+            period_type=period_type,
+            period=period,
+            period_start=period_start,
+            period_end=period_end,
+        )
+
+    existing.period_start = period_start
+    existing.period_end = period_end
+    existing.slo_target = row_data.get("slo_target")
+    existing.sla_target = row_data.get("sla_target")
+    existing.uptime_percent = float(row_data.get("uptime_percent") or 0.0)
+    existing.error_budget_percent = row_data.get("error_budget_percent")
+    existing.error_rate_percent = row_data.get("error_rate_percent")
+    existing.budget_seconds = row_data.get("budget_seconds")
+    existing.consumed_seconds = row_data.get("consumed_seconds")
+    existing.remaining_seconds = row_data.get("remaining_seconds")
+    existing.consumed_percent = row_data.get("consumed_percent")
+    existing.remaining_percent = row_data.get("remaining_percent")
+    existing.slo_met = row_data.get("slo_met")
+    existing.sla_met = row_data.get("sla_met")
+    session.add(existing)
+
+
+def _archive_slo_period(
+    session: Session,
+    project: Project,
+    *,
+    period_type: str,
+    period_start: datetime,
+    period_end: datetime,
+) -> None:
+    if period_start >= period_end:
+        return
+    if getattr(project, "created_at", None) and project.created_at >= period_end:
+        return
+
+    period = _slo_period_label(period_type, period_start)
+    if _project_period_slo_exists(session, project.id, period_type, period):
+        return
+
+    rows = _compute_slo_period_rows(session, project, period_start, period_end)
+    if not rows:
+        return
+
+    try:
+        for row in rows:
+            _upsert_slo_period_row(
+                session,
+                project_id=project.id,
+                check_id=row.get("check_id"),
+                period_type=period_type,
+                period=period,
+                period_start=period_start,
+                period_end=period_end,
+                row_data=row,
+            )
+        _commit_pending(
+            session,
+            context=f"archiving slo {period_type} period {period} for project {project.id}",
+        )
+    except Exception:
+        session.rollback()
+        logger.exception(
+            "Failed to archive slo %s period for project %s",
+            period_type,
+            getattr(project, "id", None),
+        )
+
+
+def _maybe_archive_slo_periods(session: Session, now: datetime, project_ids) -> None:
+    if os.environ.get("SLO_ARCHIVE_ENABLED", "1") != "1":
+        return
+
+    interval = int(os.environ.get("SLO_ARCHIVE_INTERVAL_SECONDS", "3600"))
+    global _LAST_SLO_ARCHIVE_RUN
+    if _LAST_SLO_ARCHIVE_RUN and (now - _LAST_SLO_ARCHIVE_RUN).total_seconds() < interval:
+        return
+    _LAST_SLO_ARCHIVE_RUN = now
+
+    previous_day_end = _day_start(now)
+    previous_day_start = previous_day_end - timedelta(days=1)
+
+    previous_month_end = _month_start(now)
+    previous_month_start = _month_start(previous_month_end - timedelta(days=1))
+
+    previous_quarter_end = _quarter_start(now)
+    previous_quarter_start = _quarter_start(previous_quarter_end - timedelta(days=1))
+
+    for pid in project_ids:
+        project = session.get(Project, pid)
+        if not project:
+            continue
+        _archive_slo_period(
+            session,
+            project,
+            period_type="day",
+            period_start=previous_day_start,
+            period_end=previous_day_end,
+        )
+        _archive_slo_period(
+            session,
+            project,
+            period_type="month",
+            period_start=previous_month_start,
+            period_end=previous_month_end,
+        )
+        _archive_slo_period(
+            session,
+            project,
+            period_type="quarter",
+            period_start=previous_quarter_start,
+            period_end=previous_quarter_end,
+        )
 
 
 def _compute_rollups_for_range(session: Session, project: Project, start: datetime, end: datetime):
@@ -4026,6 +4256,10 @@ def scan_checks_once(session: Session):
         _maybe_archive_quarterly_rollups(session, now, project_ids)
     except Exception:
         logger.exception("Error archiving quarterly rollups")
+    try:
+        _maybe_archive_slo_periods(session, now, project_ids)
+    except Exception:
+        logger.exception("Error archiving slo compliance periods")
     try:
         _maybe_prune_raw_data(session, now)
     except Exception:

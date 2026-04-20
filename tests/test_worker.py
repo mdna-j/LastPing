@@ -1956,6 +1956,112 @@ def test_compute_uptime_snapshots_skips_fresh_healthy_checks(tmp_path, monkeypat
         assert len(new_rows) == 1
 
 
+def test_archive_slo_periods_persists_closed_day_month_and_quarter(tmp_path, monkeypatch):
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_slo_archive.sqlite'}"
+    monkeypatch.setenv("SLO_ARCHIVE_INTERVAL_SECONDS", "0")
+
+    from sqlmodel import Session, select
+    from src import db as dbmod
+    from src.models import Project, Check, CheckType, Event, EventType, SLOCompliancePeriod
+    from src import worker
+
+    dbmod.create_db_and_tables()
+    monkeypatch.setattr(worker, "_LAST_SLO_ARCHIVE_RUN", None)
+
+    now = datetime(2026, 4, 20, 12, 0, 0)
+    previous_day_start = datetime(2026, 4, 19, 0, 0, 0)
+
+    with Session(dbmod.engine) as session:
+        project = Project(
+            name="proj_slo_archive",
+            slo_target=99.0,
+            sla_target=99.5,
+            created_at=datetime(2026, 1, 1, 0, 0, 0),
+        )
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        check = Check(
+            project_id=project.id,
+            name="api",
+            type=CheckType.HTTP,
+            url="http://example.invalid/api",
+            created_at=datetime(2026, 1, 15, 0, 0, 0),
+        )
+        session.add(check)
+        session.commit()
+        session.refresh(check)
+
+        session.add(
+            Event(
+                check_id=check.id,
+                project_id=project.id,
+                event_type=EventType.DOWN,
+                created_at=previous_day_start + timedelta(hours=4),
+            )
+        )
+        session.add(
+            Event(
+                check_id=check.id,
+                project_id=project.id,
+                event_type=EventType.UP,
+                created_at=previous_day_start + timedelta(hours=6),
+            )
+        )
+        session.add(
+            Event(
+                check_id=check.id,
+                project_id=project.id,
+                event_type=EventType.DOWN,
+                created_at=datetime(2026, 3, 15, 1, 0, 0),
+            )
+        )
+        session.add(
+            Event(
+                check_id=check.id,
+                project_id=project.id,
+                event_type=EventType.UP,
+                created_at=datetime(2026, 3, 15, 2, 0, 0),
+            )
+        )
+        session.commit()
+
+        worker._maybe_archive_slo_periods(session, now, {project.id})
+
+        rows = session.exec(
+            select(SLOCompliancePeriod)
+            .where(SLOCompliancePeriod.project_id == project.id)
+            .order_by(SLOCompliancePeriod.period_type, SLOCompliancePeriod.check_id, SLOCompliancePeriod.period)
+        ).all()
+
+        daily_project = next(
+            row
+            for row in rows
+            if row.period_type == "day" and row.check_id is None and row.period == "2026-04-19"
+        )
+        daily_check = next(
+            row
+            for row in rows
+            if row.period_type == "day" and row.check_id == check.id and row.period == "2026-04-19"
+        )
+        monthly_project = next(
+            row
+            for row in rows
+            if row.period_type == "month" and row.check_id is None and row.period == "2026-03"
+        )
+        quarterly_project = next(
+            row
+            for row in rows
+            if row.period_type == "quarter" and row.check_id is None and row.period == "2026-Q1"
+        )
+
+        assert round(daily_project.uptime_percent, 2) == round(((24 - 2) / 24) * 100.0, 2)
+        assert round(daily_check.uptime_percent, 2) == round(daily_project.uptime_percent, 2)
+        assert monthly_project.uptime_percent < 100.0
+        assert quarterly_project.uptime_percent < 100.0
+
+
 def test_raw_retention_prunes_old_events_results_anomalies_heartbeats(tmp_path, monkeypatch):
     os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'db_raw_retention.sqlite'}"
     monkeypatch.setenv("RAW_RETENTION_ENABLED", "1")

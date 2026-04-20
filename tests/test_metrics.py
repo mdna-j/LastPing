@@ -178,7 +178,7 @@ def test_slo_dashboard_endpoint_returns_budget_split_and_history(tmp_path):
     os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'slo_dashboard.db'}"
     from sqlmodel import Session
     from src import db as dbmod
-    from src.models import Project, Check, Event, UptimeSnapshot
+    from src.models import Project, Check, Event, UptimeSnapshot, SLOCompliancePeriod
     from src.main import app
     from fastapi.testclient import TestClient
 
@@ -218,6 +218,54 @@ def test_slo_dashboard_endpoint_returns_budget_split_and_history(tmp_path):
             window_start = window_end - timedelta(hours=24)
             s.add(UptimeSnapshot(project_id=p.id, check_id=checkout.id, window_start=window_start, window_end=window_end, uptime_percent=checkout_uptime, mttr_seconds=90))
             s.add(UptimeSnapshot(project_id=p.id, check_id=login.id, window_start=window_start, window_end=window_end, uptime_percent=login_uptime, mttr_seconds=45))
+        stored_daily_start = (now - timedelta(days=10)).replace(hour=0, minute=0, second=0)
+        stored_daily_end = stored_daily_start + timedelta(days=1)
+        s.add(
+            SLOCompliancePeriod(
+                project_id=p.id,
+                check_id=None,
+                period_type="day",
+                period=stored_daily_start.date().isoformat(),
+                period_start=stored_daily_start,
+                period_end=stored_daily_end,
+                slo_target=99.0,
+                sla_target=99.5,
+                uptime_percent=96.5,
+                error_budget_percent=1.0,
+                error_rate_percent=3.5,
+                budget_seconds=864.0,
+                consumed_seconds=3024.0,
+                remaining_seconds=0.0,
+                consumed_percent=350.0,
+                remaining_percent=0.0,
+                slo_met=False,
+                sla_met=False,
+            )
+        )
+        previous_month_start = (now.replace(day=1, hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)).replace(day=1)
+        previous_month_end = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        s.add(
+            SLOCompliancePeriod(
+                project_id=p.id,
+                check_id=None,
+                period_type="month",
+                period=previous_month_start.strftime("%Y-%m"),
+                period_start=previous_month_start,
+                period_end=previous_month_end,
+                slo_target=99.0,
+                sla_target=99.5,
+                uptime_percent=98.8,
+                error_budget_percent=1.0,
+                error_rate_percent=1.2,
+                budget_seconds=26784.0,
+                consumed_seconds=32140.8,
+                remaining_seconds=0.0,
+                consumed_percent=120.0,
+                remaining_percent=0.0,
+                slo_met=False,
+                sla_met=False,
+            )
+        )
         s.commit()
         pid = p.id
 
@@ -240,3 +288,15 @@ def test_slo_dashboard_endpoint_returns_budget_split_and_history(tmp_path):
     assert payload["historical_compliance"]["daily"]["summary"]["total"] >= 3
     assert len(payload["historical_compliance"]["daily"]["series"]) >= 3
     assert "monthly" in payload["historical_compliance"]
+    daily_row = next(
+        row for row in payload["historical_compliance"]["daily"]["series"]
+        if row["day"] == stored_daily_start.date().isoformat()
+    )
+    assert daily_row["uptime_percent"] == 96.5
+    assert payload["historical_compliance"]["daily"]["backing_store"] == "mixed"
+    monthly_row = next(
+        row for row in payload["historical_compliance"]["monthly"]["series"]
+        if row["period"] == previous_month_start.strftime("%Y-%m")
+    )
+    assert monthly_row["uptime_percent"] == 98.8
+    assert payload["historical_compliance"]["monthly"]["backing_store"] == "mixed"
