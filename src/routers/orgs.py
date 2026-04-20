@@ -5,13 +5,14 @@ import secrets
 import os
 from typing import List, Optional
 
-from fastapi import APIRouter, Body, Depends, Header, HTTPException, Path, Request, status
-from pydantic import BaseModel, EmailStr, constr
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Path, Query, Request, status
+from pydantic import BaseModel, EmailStr, constr, root_validator
 from sqlmodel import Session, select
 
 from ..db import get_session
 from ..deps import authorize_org_operation, authorize_project_operation, get_audit_context, get_current_user
 from ..models import (
+    ApiKey,
     AuditLog,
     OrgRole,
     Organization,
@@ -27,7 +28,8 @@ from ..models import (
     User,
 )
 from ..schemas import StrictBaseModel
-from ..security import hash_password
+from ..security import generate_api_key, hash_api_key, hash_password
+from ..secret_lifecycle import api_key_rotation_due_at, api_key_rotation_required
 
 
 router = APIRouter(prefix="/orgs", tags=["orgs"])
@@ -202,6 +204,111 @@ class GroupMappingRead(BaseModel):
     created_at: datetime
 
 
+class OrgOverviewItemRead(BaseModel):
+    organization_id: int
+    organization_name: str
+    slug: Optional[str] = None
+    role: str
+    team_count: int
+    project_count: int
+    owner_project_count: int
+    service_account_count: int
+
+
+class OwnerTeamUpdate(StrictBaseModel):
+    team_id: int
+
+
+class ServiceAccountCreate(StrictBaseModel):
+    name: constr(min_length=1, max_length=120)
+    description: Optional[constr(max_length=240)] = None
+    role: constr(regex=r"^(owner|admin|editor|viewer)$") = Role.EDITOR.value
+    team_id: Optional[int] = None
+    rate_limit_per_minute: Optional[int] = 0
+    expires_at: Optional[datetime] = None
+    rotation_interval_days: Optional[int] = None
+
+    @root_validator
+    def _validate_lifecycle(cls, values):
+        expires_at = values.get("expires_at")
+        rotation_interval_days = values.get("rotation_interval_days")
+        if expires_at and expires_at <= datetime.utcnow():
+            raise ValueError("expires_at must be in the future")
+        if rotation_interval_days is not None and int(rotation_interval_days) <= 0:
+            raise ValueError("rotation_interval_days must be positive")
+        return values
+
+
+def _serialize_team_summary(session: Session, team: Team, *, access_rows: list[ProjectTeamAccess]) -> dict:
+    member_count = len(
+        session.exec(select(TeamMembership).where(TeamMembership.team_id == team.id)).all()
+    )
+    owned_project_count = sum(1 for row in access_rows if row.team_id == team.id and row.role == Role.OWNER.value)
+    accessible_project_count = sum(1 for row in access_rows if row.team_id == team.id)
+    return {
+        "id": team.id,
+        "name": team.name,
+        "slug": team.slug,
+        "member_count": member_count,
+        "owned_project_count": owned_project_count,
+        "accessible_project_count": accessible_project_count,
+    }
+
+
+def _serialize_token_inventory_row(
+    token: ApiKey,
+    *,
+    project: Project,
+    team: Optional[Team],
+    creator: Optional[User],
+) -> dict:
+    return {
+        "id": token.id,
+        "project_id": token.project_id,
+        "project_name": project.name,
+        "name": token.name,
+        "description": getattr(token, "description", None),
+        "role": token.role,
+        "token_type": getattr(token, "token_type", "project_token"),
+        "managed_by_team_id": getattr(token, "managed_by_team_id", None),
+        "managed_by_team_name": team.name if team else None,
+        "is_active": token.is_active,
+        "revoked_at": token.revoked_at,
+        "last_used_at": token.last_used_at,
+        "expires_at": token.expires_at,
+        "last_rotated_at": token.last_rotated_at or token.created_at,
+        "rotation_interval_days": token.rotation_interval_days,
+        "rotation_due_at": api_key_rotation_due_at(token),
+        "rotation_required": api_key_rotation_required(token),
+        "created_by_user_id": token.created_by_user_id,
+        "created_by_email": creator.email if creator else None,
+        "created_at": token.created_at,
+        "is_primary": bool(project.api_key_hash and token.key_hash == project.api_key_hash),
+    }
+
+
+def _org_projects(session: Session, org_id: int) -> list[Project]:
+    return session.exec(select(Project).where(Project.org_id == org_id).order_by(Project.name)).all()
+
+
+def _org_access_rows(session: Session, org_id: int) -> list[ProjectTeamAccess]:
+    project_ids = [project.id for project in _org_projects(session, org_id) if project.id is not None]
+    if not project_ids:
+        return []
+    return session.exec(
+        select(ProjectTeamAccess).where(ProjectTeamAccess.project_id.in_(project_ids))
+    ).all()
+
+
+def _org_token_rows(session: Session, org_id: int) -> list[ApiKey]:
+    project_ids = [project.id for project in _org_projects(session, org_id) if project.id is not None]
+    if not project_ids:
+        return []
+    return session.exec(
+        select(ApiKey).where(ApiKey.project_id.in_(project_ids)).order_by(ApiKey.created_at.desc())
+    ).all()
+
+
 @router.post("/", response_model=OrgRead, status_code=status.HTTP_201_CREATED)
 def create_org(
     payload: OrgCreate,
@@ -259,6 +366,37 @@ def list_my_orgs(current_user: User = Depends(get_current_user), session: Sessio
     return [OrgRead.from_orm(row) for row in session.exec(stmt).all()]
 
 
+@router.get("/mine/overview", response_model=List[OrgOverviewItemRead])
+def list_my_org_overview(current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+    memberships = session.exec(
+        select(OrganizationMembership).where(OrganizationMembership.user_id == current_user.id)
+    ).all()
+    rows: List[OrgOverviewItemRead] = []
+    for membership in memberships:
+        org = session.get(Organization, membership.organization_id)
+        if not org:
+            continue
+        projects = _org_projects(session, org.id)
+        access_rows = _org_access_rows(session, org.id)
+        tokens = _org_token_rows(session, org.id)
+        rows.append(
+            OrgOverviewItemRead(
+                organization_id=org.id,
+                organization_name=org.name,
+                slug=org.slug,
+                role=membership.role,
+                team_count=len(session.exec(select(Team).where(Team.organization_id == org.id)).all()),
+                project_count=len(projects),
+                owner_project_count=len({row.project_id for row in access_rows if row.role == Role.OWNER.value}),
+                service_account_count=sum(
+                    1 for token in tokens if getattr(token, "token_type", "project_token") == "service_account"
+                ),
+            )
+        )
+    rows.sort(key=lambda row: row.organization_name.lower())
+    return rows
+
+
 @router.get("/{org_id}/members", response_model=List[OrgMemberRead])
 def list_org_members(
     org_id: int = Path(..., ge=1),
@@ -273,6 +411,89 @@ def list_org_members(
         user = session.get(User, membership.user_id)
         out.append(OrgMemberRead(user_id=membership.user_id, email=user.email if user else "unknown", role=membership.role))
     return out
+
+
+@router.get("/{org_id}/overview", response_model=dict)
+def get_org_overview(
+    org_id: int = Path(..., ge=1),
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    membership = authorize_org_operation(
+        org_id,
+        min_role=OrgRole.MEMBER.value,
+        authorization=authorization,
+        x_admin_token=x_admin_token,
+        session=session,
+    )
+    org = session.get(Organization, org_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    teams = session.exec(select(Team).where(Team.organization_id == org_id).order_by(Team.name)).all()
+    projects = _org_projects(session, org_id)
+    access_rows = _org_access_rows(session, org_id)
+    tokens = _org_token_rows(session, org_id)
+    team_by_id = {team.id: team for team in teams}
+    access_by_project: dict[int, list[ProjectTeamAccess]] = {}
+    for row in access_rows:
+        access_by_project.setdefault(row.project_id, []).append(row)
+    tokens_by_project: dict[int, list[ApiKey]] = {}
+    for token in tokens:
+        tokens_by_project.setdefault(token.project_id, []).append(token)
+
+    return {
+        "organization": {
+            "id": org.id,
+            "name": org.name,
+            "slug": org.slug,
+            "created_at": org.created_at,
+        },
+        "current_role": membership.role,
+        "summary": {
+            "team_count": len(teams),
+            "project_count": len(projects),
+            "owner_team_count": len({row.team_id for row in access_rows if row.role == Role.OWNER.value}),
+            "service_account_count": sum(
+                1 for token in tokens if getattr(token, "token_type", "project_token") == "service_account"
+            ),
+        },
+        "teams": [_serialize_team_summary(session, team, access_rows=access_rows) for team in teams],
+        "projects": [
+            {
+                "id": project.id,
+                "name": project.name,
+                "created_at": project.created_at,
+                "owner_teams": [
+                    {
+                        "id": row.team_id,
+                        "name": team_by_id[row.team_id].name if row.team_id in team_by_id else f"Team {row.team_id}",
+                        "role": row.role,
+                    }
+                    for row in access_by_project.get(project.id, [])
+                    if row.role == Role.OWNER.value
+                ],
+                "accessible_teams": [
+                    {
+                        "id": row.team_id,
+                        "name": team_by_id[row.team_id].name if row.team_id in team_by_id else f"Team {row.team_id}",
+                        "role": row.role,
+                    }
+                    for row in access_by_project.get(project.id, [])
+                ],
+                "service_account_count": sum(
+                    1
+                    for token in tokens_by_project.get(project.id, [])
+                    if getattr(token, "token_type", "project_token") == "service_account"
+                ),
+                "active_token_count": sum(
+                    1 for token in tokens_by_project.get(project.id, []) if token.is_active and token.revoked_at is None
+                ),
+            }
+            for project in projects
+        ],
+    }
 
 
 @router.post("/{org_id}/members", response_model=OrgMemberRead)
@@ -498,6 +719,254 @@ def grant_team_project_access(
     )
     session.commit()
     return {"project_id": project_id, "team_id": team_id, "role": access.role}
+
+
+@router.put("/{org_id}/projects/{project_id}/owner-team", response_model=dict)
+def set_project_owner_team(
+    org_id: int = Path(..., ge=1),
+    project_id: int = Path(..., ge=1),
+    payload: OwnerTeamUpdate = Body(...),
+    request: Request = None,
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    authorize_org_operation(org_id, min_role=OrgRole.ADMIN.value, authorization=authorization, x_admin_token=x_admin_token, session=session)
+    team = _ensure_team_in_org(session, org_id, payload.team_id)
+    project = session.get(Project, project_id)
+    if not project or project.org_id != org_id:
+        raise HTTPException(status_code=404, detail="Project not found in organization")
+
+    existing_rows = session.exec(
+        select(ProjectTeamAccess).where(ProjectTeamAccess.project_id == project_id)
+    ).all()
+    previous_owner_team_ids = [row.team_id for row in existing_rows if row.role == Role.OWNER.value]
+    for row in existing_rows:
+        if row.role == Role.OWNER.value and row.team_id != team.id:
+            session.delete(row)
+
+    owner_row = next((row for row in existing_rows if row.team_id == team.id), None)
+    if owner_row is None:
+        owner_row = ProjectTeamAccess(project_id=project_id, team_id=team.id, role=Role.OWNER.value)
+    else:
+        owner_row.role = Role.OWNER.value
+    session.add(owner_row)
+    session.commit()
+    session.refresh(owner_row)
+
+    _record_org_audit(
+        session,
+        request=request,
+        authorization=authorization,
+        x_admin_token=x_admin_token,
+        org_id=org_id,
+        action="set_project_owner_team",
+        target_type="project_team_access",
+        target_id=owner_row.id,
+        details=f"project_id={project_id}, previous_owner_team_ids={previous_owner_team_ids}, new_owner_team_id={team.id}",
+        team_id=team.id,
+        project_id=project_id,
+    )
+    return {"project_id": project_id, "team_id": team.id, "team_name": team.name, "role": owner_row.role}
+
+
+@router.get("/{org_id}/token-inventory", response_model=dict)
+def get_org_token_inventory(
+    org_id: int = Path(..., ge=1),
+    token_type: Optional[str] = Query(None, max_length=40),
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    authorize_org_operation(org_id, min_role=OrgRole.ADMIN.value, authorization=authorization, x_admin_token=x_admin_token, session=session)
+    org = session.get(Organization, org_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    projects = _org_projects(session, org_id)
+    project_by_id = {project.id: project for project in projects}
+    team_by_id = {
+        team.id: team for team in session.exec(select(Team).where(Team.organization_id == org_id)).all()
+    }
+    tokens = _org_token_rows(session, org_id)
+    if token_type:
+        tokens = [token for token in tokens if getattr(token, "token_type", "project_token") == token_type]
+    creator_ids = [token.created_by_user_id for token in tokens if token.created_by_user_id is not None]
+    creators = {}
+    if creator_ids:
+        for user in session.exec(select(User).where(User.id.in_(creator_ids))).all():
+            creators[user.id] = user
+    rows = [
+        _serialize_token_inventory_row(
+            token,
+            project=project_by_id[token.project_id],
+            team=team_by_id.get(getattr(token, "managed_by_team_id", None)),
+            creator=creators.get(token.created_by_user_id),
+        )
+        for token in tokens
+        if token.project_id in project_by_id
+    ]
+    return {
+        "organization": {"id": org.id, "name": org.name},
+        "summary": {
+            "token_count": len(rows),
+            "service_account_count": sum(1 for row in rows if row["token_type"] == "service_account"),
+            "expiring_count": sum(1 for row in rows if row["expires_at"] is not None and row["revoked_at"] is None),
+            "active_count": sum(1 for row in rows if row["is_active"] and row["revoked_at"] is None),
+        },
+        "tokens": rows,
+    }
+
+
+@router.post("/{org_id}/projects/{project_id}/service-accounts", status_code=status.HTTP_201_CREATED)
+def create_service_account(
+    org_id: int = Path(..., ge=1),
+    project_id: int = Path(..., ge=1),
+    payload: ServiceAccountCreate = Body(...),
+    request: Request = None,
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    authorize_org_operation(org_id, min_role=OrgRole.ADMIN.value, authorization=authorization, x_admin_token=x_admin_token, session=session)
+    project = session.get(Project, project_id)
+    if not project or project.org_id != org_id:
+        raise HTTPException(status_code=404, detail="Project not found in organization")
+    team = None
+    if payload.team_id is not None:
+        team = _ensure_team_in_org(session, org_id, payload.team_id)
+
+    creator = None
+    if isinstance(authorization, str) and authorization:
+        try:
+            creator = get_current_user(authorization=authorization, session=session)
+        except HTTPException:
+            creator = None
+
+    plain = generate_api_key()
+    token = ApiKey(
+        project_id=project_id,
+        key_hash=hash_api_key(plain),
+        name=payload.name,
+        description=payload.description,
+        role=payload.role,
+        token_type="service_account",
+        managed_by_team_id=payload.team_id,
+        rate_limit_per_minute=payload.rate_limit_per_minute or 0,
+        created_by_user_id=creator.id if creator else None,
+        expires_at=payload.expires_at,
+        rotation_interval_days=payload.rotation_interval_days,
+        last_rotated_at=datetime.utcnow(),
+    )
+    session.add(token)
+    session.commit()
+    session.refresh(token)
+
+    _record_org_audit(
+        session,
+        request=request,
+        authorization=authorization,
+        x_admin_token=x_admin_token,
+        org_id=org_id,
+        action="create_service_account_token",
+        target_type="api_key",
+        target_id=token.id,
+        details=f"project_id={project_id}, role={payload.role}, managed_by_team_id={payload.team_id}",
+        team_id=payload.team_id,
+        project_id=project_id,
+    )
+    return {
+        "api_key": plain,
+        "token": _serialize_token_inventory_row(
+            token,
+            project=project,
+            team=team,
+            creator=creator,
+        ),
+    }
+
+
+@router.post("/{org_id}/tokens/{api_key_id}/revoke", response_model=dict)
+def revoke_org_token(
+    org_id: int = Path(..., ge=1),
+    api_key_id: int = Path(..., ge=1),
+    request: Request = None,
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    authorize_org_operation(org_id, min_role=OrgRole.ADMIN.value, authorization=authorization, x_admin_token=x_admin_token, session=session)
+    token = session.get(ApiKey, api_key_id)
+    if not token:
+        raise HTTPException(status_code=404, detail="Token not found")
+    project = session.get(Project, token.project_id)
+    if not project or project.org_id != org_id:
+        raise HTTPException(status_code=404, detail="Token not found in organization")
+    if project.api_key_hash and token.key_hash == project.api_key_hash:
+        raise HTTPException(status_code=400, detail="Use project key rotation for the primary token")
+    token.is_active = False
+    token.revoked_at = datetime.utcnow()
+    session.add(token)
+    session.commit()
+    _record_org_audit(
+        session,
+        request=request,
+        authorization=authorization,
+        x_admin_token=x_admin_token,
+        org_id=org_id,
+        action="revoke_org_token",
+        target_type="api_key",
+        target_id=token.id,
+        details=f"project_id={project.id}, token_type={getattr(token, 'token_type', 'project_token')}",
+        team_id=getattr(token, "managed_by_team_id", None),
+        project_id=project.id,
+    )
+    return {"revoked": True, "api_key_id": token.id}
+
+
+@router.get("/{org_id}/membership-audit", response_model=dict)
+def get_membership_audit_history(
+    org_id: int = Path(..., ge=1),
+    limit: int = Query(50, ge=1, le=200),
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    authorize_org_operation(org_id, min_role=OrgRole.ADMIN.value, authorization=authorization, x_admin_token=x_admin_token, session=session)
+    actions = {
+        "upsert_org_member",
+        "upsert_team_member",
+        "attach_project_to_org",
+        "grant_team_project_access",
+        "set_project_owner_team",
+        "create_service_account_token",
+        "revoke_org_token",
+        "upsert_org_group_mapping",
+        "upsert_team_group_mapping",
+        "delete_org_group_mapping",
+        "delete_team_group_mapping",
+    }
+    rows = session.exec(
+        select(AuditLog)
+        .where(AuditLog.org_id == org_id, AuditLog.action.in_(actions))
+        .order_by(AuditLog.created_at.desc())
+        .limit(limit)
+    ).all()
+    return {
+        "items": [
+            {
+                "id": row.id,
+                "created_at": row.created_at,
+                "actor": row.actor,
+                "action": row.action,
+                "target_type": row.target_type,
+                "target_id": row.target_id,
+                "team_id": row.team_id,
+                "project_id": row.project_id,
+                "details": row.details,
+            }
+            for row in rows
+        ]
+    }
 
 
 @router.get("/{org_id}/scim-settings", response_model=ScimSettingsRead)

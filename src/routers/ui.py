@@ -2224,6 +2224,7 @@ def account_page():
           <div class="muted" style="text-transform:uppercase;letter-spacing:.12em;">Identity</div>
           <h1>Enterprise Access</h1>
           <div class="muted">Password login, SSO entry points, org-scoped roles, MFA enrollment, and session management in one place.</div>
+          <div style="margin-top:12px;"><a class="btn btn-secondary" href="/ui/tenant">Open Tenant Console</a></div>
         </header>
 
         <section class="card" style="margin-bottom:16px;">
@@ -2314,6 +2315,159 @@ def account_page():
         </section>
       </main>
       <script src="/static/js/account.js"></script>
+    </body>
+    </html>
+    """
+
+
+@router.get("/tenant", response_class=HTMLResponse)
+def tenant_console_page():
+    return """
+    <html>
+    <head>
+      <title>Tenant Console</title>
+      <meta name="viewport" content="width=device-width,initial-scale=1" />
+      <link rel="stylesheet" href="/static/css/ui.css" />
+    </head>
+    <body>
+      <main style="max-width:1240px;margin:0 auto;">
+        <header style="margin-bottom:18px;">
+          <div class="muted" style="text-transform:uppercase;letter-spacing:.12em;">Tenant Ops</div>
+          <h1>Tenant Console</h1>
+          <div class="muted">Organization switcher, team ownership of projects, scoped service accounts, token inventory, and membership audit history.</div>
+          <div style="margin-top:12px;" class="row">
+            <a class="btn btn-secondary" href="/ui/account">Enterprise Access</a>
+          </div>
+        </header>
+
+        <section class="card" style="margin-bottom:16px;">
+          <div class="section-head">
+            <h3>Organization Switcher</h3>
+            <div id="tenantStatus" class="muted">Use an existing bearer session from Enterprise Access to load tenant management.</div>
+          </div>
+          <div class="row">
+            <label>Organization:
+              <select id="tenantOrgSelect" style="width:320px"></select>
+            </label>
+            <button id="tenantRefreshBtn" class="btn">Refresh</button>
+          </div>
+          <div id="tenantSummary" class="row"></div>
+        </section>
+
+        <section class="card" style="margin-bottom:16px;">
+          <div class="section-head">
+            <h3>Projects</h3>
+            <div class="muted">Set a primary owner team and review service-account coverage per project.</div>
+          </div>
+          <div id="tenantProjectsWrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Project</th>
+                  <th>Owner Team</th>
+                  <th>Accessible Teams</th>
+                  <th>Service Accounts</th>
+                  <th>Active Tokens</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody id="tenantProjectsRows">
+                <tr><td colspan="6" class="muted">No org selected.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="card" style="margin-bottom:16px;">
+          <div class="section-head">
+            <h3>Scoped Service Accounts</h3>
+            <div class="muted">Mint project-scoped automation credentials with optional team ownership metadata.</div>
+          </div>
+          <div class="row">
+            <label>Project:
+              <select id="serviceAccountProject" style="width:220px"></select>
+            </label>
+            <label>Team:
+              <select id="serviceAccountTeam" style="width:220px"></select>
+            </label>
+            <label>Name:
+              <input id="serviceAccountName" placeholder="deploy-bot" style="width:180px"/>
+            </label>
+            <label>Role:
+              <select id="serviceAccountRole" style="width:140px">
+                <option value="viewer">viewer</option>
+                <option value="editor" selected>editor</option>
+                <option value="admin">admin</option>
+                <option value="owner">owner</option>
+              </select>
+            </label>
+          </div>
+          <div class="row">
+            <label>Description:
+              <input id="serviceAccountDescription" placeholder="deploy pipeline credential" style="width:320px"/>
+            </label>
+            <label>Expires At:
+              <input id="serviceAccountExpiresAt" placeholder="optional ISO8601" style="width:240px"/>
+            </label>
+            <label>Rotate Every (days):
+              <input id="serviceAccountRotationDays" placeholder="optional" style="width:160px"/>
+            </label>
+            <button id="createServiceAccountBtn" class="btn">Create Service Account</button>
+          </div>
+          <div id="serviceAccountStatus" class="muted" style="margin-top:8px;">No service account minted in this session.</div>
+          <div class="row" style="margin-top:10px;">
+            <label>Plaintext API Key:
+              <input id="serviceAccountPlaintext" readonly style="width:420px"/>
+            </label>
+          </div>
+        </section>
+
+        <section class="card" style="margin-bottom:16px;">
+          <div class="section-head">
+            <h3>Token Inventory</h3>
+            <div class="muted">Expiry, last-used, and rotation posture for project tokens and service accounts.</div>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Type</th>
+                <th>Project</th>
+                <th>Team</th>
+                <th>Last Used</th>
+                <th>Expires</th>
+                <th>Status</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="tenantTokenRows">
+              <tr><td colspan="8" class="muted">No org selected.</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="card">
+          <div class="section-head">
+            <h3>Membership Audit History</h3>
+            <div class="muted">Team access, owner-team changes, service account lifecycle, and org membership-related audit events.</div>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>When</th>
+                <th>Actor</th>
+                <th>Action</th>
+                <th>Scope</th>
+                <th>Details</th>
+              </tr>
+            </thead>
+            <tbody id="tenantAuditRows">
+              <tr><td colspan="5" class="muted">No org selected.</td></tr>
+            </tbody>
+          </table>
+        </section>
+      </main>
+      <script src="/static/js/tenant.js"></script>
     </body>
     </html>
     """

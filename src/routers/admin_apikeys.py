@@ -25,7 +25,10 @@ class ApiKeyRead(BaseModel):
     id: int
     project_id: int
     name: Optional[str]
+    description: Optional[str]
     role: str
+    token_type: str
+    managed_by_team_id: Optional[int]
     is_active: bool
     revoked_at: Optional[datetime]
     rate_limit_per_minute: Optional[int]
@@ -56,7 +59,10 @@ def list_apikeys(x_admin_token: Optional[str] = Header(None), session: Session =
                 id=a.id,
                 project_id=a.project_id,
                 name=a.name,
+                description=getattr(a, "description", None),
                 role=a.role,
+                token_type=getattr(a, "token_type", "project_token"),
+                managed_by_team_id=getattr(a, "managed_by_team_id", None),
                 is_active=a.is_active,
                 revoked_at=a.revoked_at,
                 rate_limit_per_minute=a.rate_limit_per_minute,

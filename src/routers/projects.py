@@ -119,6 +119,7 @@ class ProjectRead(BaseModel):
 
 class ProjectTokenCreate(StrictBaseModel):
     name: constr(min_length=1, max_length=120)
+    description: Optional[constr(max_length=240)] = None
     role: constr(regex=r"^(owner|admin|editor|viewer)$") = Role.EDITOR.value
     rate_limit_per_minute: Optional[int] = 0
     expires_at: Optional[datetime] = None
@@ -169,7 +170,10 @@ class ProjectTokenRead(BaseModel):
     id: int
     project_id: int
     name: Optional[str]
+    description: Optional[str]
     role: str
+    token_type: str
+    managed_by_team_id: Optional[int]
     is_active: bool
     revoked_at: Optional[datetime]
     rate_limit_per_minute: Optional[int]
@@ -241,7 +245,10 @@ def _serialize_project_token(token: ApiKey, project: ProjectModel) -> ProjectTok
         id=token.id,
         project_id=token.project_id,
         name=token.name,
+        description=getattr(token, "description", None),
         role=token.role,
+        token_type=getattr(token, "token_type", "project_token"),
+        managed_by_team_id=getattr(token, "managed_by_team_id", None),
         is_active=token.is_active,
         revoked_at=token.revoked_at,
         rate_limit_per_minute=token.rate_limit_per_minute,
@@ -424,6 +431,7 @@ def create_project_token(
         project_id=project_id,
         key_hash=hash_api_key(plain),
         name=payload.name,
+        description=payload.description,
         role=payload.role,
         rate_limit_per_minute=payload.rate_limit_per_minute or 0,
         created_by_user_id=creator.id if creator else None,
