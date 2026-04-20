@@ -2334,7 +2334,7 @@ def tenant_console_page():
         <header style="margin-bottom:18px;">
           <div class="muted" style="text-transform:uppercase;letter-spacing:.12em;">Tenant Ops</div>
           <h1>Tenant Console</h1>
-          <div class="muted">Organization switcher, team ownership of projects, scoped service accounts, token inventory, and membership audit history.</div>
+          <div class="muted">Organization switcher, team ownership of projects, inline membership editing, scoped service accounts, token inventory, and membership audit history.</div>
           <div style="margin-top:12px;" class="row">
             <a class="btn btn-secondary" href="/ui/account">Enterprise Access</a>
           </div>
@@ -2445,6 +2445,76 @@ def tenant_console_page():
             </tbody>
           </table>
         </section>
+
+        <div class="row" style="align-items:flex-start;">
+          <section class="card" style="flex:1;min-width:320px;margin-bottom:16px;">
+            <div class="section-head">
+              <h3>Organization Members</h3>
+              <div class="muted">Invite members, change org roles, and remove access without leaving the tenant console.</div>
+            </div>
+            <div class="row">
+              <label>Email:
+                <input id="orgMemberEmail" placeholder="new-member@example.com" style="width:240px"/>
+              </label>
+              <label>Role:
+                <select id="orgMemberRole" style="width:140px">
+                  <option value="member" selected>member</option>
+                  <option value="admin">admin</option>
+                  <option value="owner">owner</option>
+                </select>
+              </label>
+              <button id="orgMemberAddBtn" class="btn">Add / Update</button>
+            </div>
+            <div id="orgMemberStatus" class="muted" style="margin-top:8px;">No org membership changes in this session.</div>
+            <table style="margin-top:12px;">
+              <thead>
+                <tr>
+                  <th>Email</th>
+                  <th>Role</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody id="orgMemberRows">
+                <tr><td colspan="3" class="muted">No org selected.</td></tr>
+              </tbody>
+            </table>
+          </section>
+
+          <section class="card" style="flex:1;min-width:320px;margin-bottom:16px;">
+            <div class="section-head">
+              <h3>Team Memberships</h3>
+              <div class="muted">Manage team-level access inline, including role changes for leads and members.</div>
+            </div>
+            <div class="row">
+              <label>Team:
+                <select id="teamMemberTeamSelect" style="width:220px"></select>
+              </label>
+              <label>Email:
+                <input id="teamMemberEmail" placeholder="teammate@example.com" style="width:240px"/>
+              </label>
+              <label>Role:
+                <select id="teamMemberRole" style="width:140px">
+                  <option value="member" selected>member</option>
+                  <option value="lead">lead</option>
+                </select>
+              </label>
+              <button id="teamMemberAddBtn" class="btn">Add / Update</button>
+            </div>
+            <div id="teamMemberStatus" class="muted" style="margin-top:8px;">Select a team to edit its membership.</div>
+            <table style="margin-top:12px;">
+              <thead>
+                <tr>
+                  <th>Email</th>
+                  <th>Role</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody id="teamMemberRows">
+                <tr><td colspan="3" class="muted">No team selected.</td></tr>
+              </tbody>
+            </table>
+          </section>
+        </div>
 
         <section class="card">
           <div class="section-head">

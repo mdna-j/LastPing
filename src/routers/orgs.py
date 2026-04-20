@@ -147,6 +147,12 @@ class OrgMemberRead(BaseModel):
     role: str
 
 
+class TeamMemberRead(BaseModel):
+    user_id: int
+    email: str
+    role: str
+
+
 class TeamCreate(StrictBaseModel):
     name: constr(min_length=1, max_length=120)
     slug: Optional[constr(min_length=1, max_length=120)] = None
@@ -237,6 +243,24 @@ class ServiceAccountCreate(StrictBaseModel):
         if rotation_interval_days is not None and int(rotation_interval_days) <= 0:
             raise ValueError("rotation_interval_days must be positive")
         return values
+
+
+def _clear_managed_membership_fields(membership: OrganizationMembership | TeamMembership) -> None:
+    membership.managed_provider = None
+    membership.managed_group = None
+    membership.managed_fallback_role = None
+    membership.managed_last_synced_at = None
+
+
+def _count_org_owners(session: Session, org_id: int) -> int:
+    return len(
+        session.exec(
+            select(OrganizationMembership).where(
+                OrganizationMembership.organization_id == org_id,
+                OrganizationMembership.role == OrgRole.OWNER.value,
+            )
+        ).all()
+    )
 
 
 def _serialize_team_summary(session: Session, team: Team, *, access_rows: list[ProjectTeamAccess]) -> dict:
@@ -410,6 +434,7 @@ def list_org_members(
     for membership in memberships:
         user = session.get(User, membership.user_id)
         out.append(OrgMemberRead(user_id=membership.user_id, email=user.email if user else "unknown", role=membership.role))
+    out.sort(key=lambda row: row.email.lower())
     return out
 
 
@@ -519,11 +544,14 @@ def add_org_member(
         )
     ).first()
     if existing:
+        if (
+            existing.role == OrgRole.OWNER.value
+            and payload.role != OrgRole.OWNER.value
+            and _count_org_owners(session, org_id) <= 1
+        ):
+            raise HTTPException(status_code=400, detail="Cannot remove the last organization owner")
         existing.role = payload.role
-        existing.managed_provider = None
-        existing.managed_group = None
-        existing.managed_fallback_role = None
-        existing.managed_last_synced_at = None
+        _clear_managed_membership_fields(existing)
         membership = existing
     else:
         membership = OrganizationMembership(organization_id=org_id, user_id=user.id, role=payload.role)
@@ -544,6 +572,54 @@ def add_org_member(
     )
     session.commit()
     return OrgMemberRead(user_id=user.id, email=user.email, role=membership.role)
+
+
+@router.delete("/{org_id}/members/{user_id}", response_model=dict)
+def remove_org_member(
+    org_id: int = Path(..., ge=1),
+    user_id: int = Path(..., ge=1),
+    request: Request = None,
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    authorize_org_operation(org_id, min_role=OrgRole.ADMIN.value, authorization=authorization, x_admin_token=x_admin_token, session=session)
+    membership = session.exec(
+        select(OrganizationMembership).where(
+            OrganizationMembership.organization_id == org_id,
+            OrganizationMembership.user_id == user_id,
+        )
+    ).first()
+    if not membership:
+        raise HTTPException(status_code=404, detail="Organization member not found")
+    if membership.role == OrgRole.OWNER.value and _count_org_owners(session, org_id) <= 1:
+        raise HTTPException(status_code=400, detail="Cannot remove the last organization owner")
+
+    team_ids = [team.id for team in session.exec(select(Team).where(Team.organization_id == org_id)).all()]
+    team_memberships = []
+    if team_ids:
+        team_memberships = session.exec(
+            select(TeamMembership).where(TeamMembership.user_id == user_id, TeamMembership.team_id.in_(team_ids))
+        ).all()
+    removed_team_ids = [row.team_id for row in team_memberships]
+    membership_id = membership.id
+    for row in team_memberships:
+        session.delete(row)
+    session.delete(membership)
+    session.commit()
+
+    _record_org_audit(
+        session,
+        request=request,
+        authorization=authorization,
+        x_admin_token=x_admin_token,
+        org_id=org_id,
+        action="remove_org_member",
+        target_type="organization_membership",
+        target_id=membership_id,
+        details=f"user_id={user_id}, removed_team_ids={removed_team_ids}",
+    )
+    return {"removed": True, "user_id": user_id, "removed_team_memberships": len(removed_team_ids)}
 
 
 @router.get("/{org_id}/teams", response_model=List[TeamRead])
@@ -607,15 +683,25 @@ def add_team_member(
         session.add(user)
         session.commit()
         session.refresh(user)
+    org_membership = session.exec(
+        select(OrganizationMembership).where(
+            OrganizationMembership.organization_id == org_id,
+            OrganizationMembership.user_id == user.id,
+        )
+    ).first()
+    org_membership_created = False
+    if not org_membership:
+        org_membership = OrganizationMembership(organization_id=org_id, user_id=user.id, role=OrgRole.MEMBER.value)
+        session.add(org_membership)
+        session.commit()
+        session.refresh(org_membership)
+        org_membership_created = True
     existing = session.exec(
         select(TeamMembership).where(TeamMembership.team_id == team_id, TeamMembership.user_id == user.id)
     ).first()
     if existing:
         existing.role = payload.role
-        existing.managed_provider = None
-        existing.managed_group = None
-        existing.managed_fallback_role = None
-        existing.managed_last_synced_at = None
+        _clear_managed_membership_fields(existing)
         membership = existing
     else:
         membership = TeamMembership(team_id=team_id, user_id=user.id, role=payload.role)
@@ -628,7 +714,7 @@ def add_team_member(
             action="upsert_team_member",
             target_type="team_membership",
             target_id=membership.id,
-            details=f"user_id={user.id}, role={payload.role}",
+            details=f"user_id={user.id}, role={payload.role}, org_membership_created={org_membership_created}",
             actor_ip=actor_ip,
             user_agent=user_agent,
             **_audit_scope(org_id, team_id=team_id),
@@ -636,6 +722,60 @@ def add_team_member(
     )
     session.commit()
     return {"team_id": team_id, "user_id": user.id, "email": user.email, "role": membership.role}
+
+
+@router.get("/{org_id}/teams/{team_id}/members", response_model=List[TeamMemberRead])
+def list_team_members(
+    org_id: int = Path(..., ge=1),
+    team_id: int = Path(..., ge=1),
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    authorize_org_operation(org_id, min_role=OrgRole.MEMBER.value, authorization=authorization, x_admin_token=x_admin_token, session=session)
+    _ensure_team_in_org(session, org_id, team_id)
+    memberships = session.exec(select(TeamMembership).where(TeamMembership.team_id == team_id)).all()
+    out: List[TeamMemberRead] = []
+    for membership in memberships:
+        user = session.get(User, membership.user_id)
+        out.append(TeamMemberRead(user_id=membership.user_id, email=user.email if user else "unknown", role=membership.role))
+    out.sort(key=lambda row: row.email.lower())
+    return out
+
+
+@router.delete("/{org_id}/teams/{team_id}/members/{user_id}", response_model=dict)
+def remove_team_member(
+    org_id: int = Path(..., ge=1),
+    team_id: int = Path(..., ge=1),
+    user_id: int = Path(..., ge=1),
+    request: Request = None,
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    _ensure_team_in_org(session, org_id, team_id)
+    _require_team_write_access(session, org_id=org_id, team_id=team_id, authorization=authorization, x_admin_token=x_admin_token)
+    membership = session.exec(
+        select(TeamMembership).where(TeamMembership.team_id == team_id, TeamMembership.user_id == user_id)
+    ).first()
+    if not membership:
+        raise HTTPException(status_code=404, detail="Team member not found")
+    membership_id = membership.id
+    session.delete(membership)
+    session.commit()
+    _record_org_audit(
+        session,
+        request=request,
+        authorization=authorization,
+        x_admin_token=x_admin_token,
+        org_id=org_id,
+        action="remove_team_member",
+        target_type="team_membership",
+        target_id=membership_id,
+        details=f"user_id={user_id}",
+        team_id=team_id,
+    )
+    return {"removed": True, "team_id": team_id, "user_id": user_id}
 
 
 @router.post("/{org_id}/projects/{project_id}/attach", response_model=dict)
@@ -935,6 +1075,8 @@ def get_membership_audit_history(
     actions = {
         "upsert_org_member",
         "upsert_team_member",
+        "remove_org_member",
+        "remove_team_member",
         "attach_project_to_org",
         "grant_team_project_access",
         "set_project_owner_team",
