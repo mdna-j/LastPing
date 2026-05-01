@@ -1313,8 +1313,8 @@ def reports_page():
         <nav class="rail-links">
           <a class="rail-link" href="/ui/dashboard">Dashboard</a>
           <a class="rail-link" href="/ui/snapshots">Snapshots</a>
-          <a class="rail-link" href="/ui/slo">SLO</a>
           <a class="rail-link active" href="/ui/reports">Reports</a>
+          <a class="rail-link" href="/ui/slo">SLO</a>
           <a class="rail-link" href="/ui/incidents">Incidents</a>
           <a class="rail-link" href="/ui/projects/1/settings">Settings</a>
           <a class="rail-link" href="/ui/projects/1/oncall">On-call</a>
@@ -1446,8 +1446,8 @@ def slo_dashboard_page():
         <nav class="rail-links">
           <a class="rail-link" href="/ui/dashboard">Dashboard</a>
           <a class="rail-link" href="/ui/snapshots">Snapshots</a>
-          <a class="rail-link active" href="/ui/slo">SLO</a>
           <a class="rail-link" href="/ui/reports">Reports</a>
+          <a class="rail-link active" href="/ui/slo">SLO</a>
           <a class="rail-link" href="/ui/incidents">Incidents</a>
           <a class="rail-link" href="/ui/projects/1/settings">Settings</a>
           <a class="rail-link" href="/ui/projects/1/oncall">On-call</a>
@@ -1618,8 +1618,8 @@ def project_settings_page(project_id: int = Path(..., ge=1)):
         <nav class="rail-links">
           <a class="rail-link" href="/ui/dashboard">Dashboard</a>
           <a class="rail-link" href="/ui/snapshots">Snapshots</a>
-          <a class="rail-link" href="/ui/slo">SLO</a>
           <a class="rail-link" href="/ui/reports">Reports</a>
+          <a class="rail-link" href="/ui/slo">SLO</a>
           <a class="rail-link" href="/ui/incidents">Incidents</a>
           <a class="rail-link active" href="/ui/projects/{project_id}/settings">Settings</a>
           <a class="rail-link" href="/ui/projects/{project_id}/oncall">On-call</a>
@@ -1873,8 +1873,8 @@ def oncall_page(project_id: int = Path(..., ge=1)):
         <nav class="rail-links">
           <a class="rail-link" href="/ui/dashboard">Dashboard</a>
           <a class="rail-link" href="/ui/snapshots">Snapshots</a>
-          <a class="rail-link" href="/ui/slo">SLO</a>
           <a class="rail-link" href="/ui/reports">Reports</a>
+          <a class="rail-link" href="/ui/slo">SLO</a>
           <a class="rail-link" href="/ui/incidents">Incidents</a>
           <a class="rail-link" href="/ui/projects/{project_id}/settings">Settings</a>
           <a class="rail-link active" href="/ui/projects/{project_id}/oncall">On-call</a>
