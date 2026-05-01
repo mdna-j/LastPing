@@ -1,5 +1,131 @@
 // Shared shell helpers for /ui pages outside dashboard.
 (function(){
+  const UI_STATE_KEYS = {
+    projectId: "lastping.ui.project_id",
+    apiKey: "lastping.ui.api_key",
+    adminToken: "lastping.ui.admin_token",
+    userToken: "lastping.ui.user_token",
+  };
+
+  function getUiStateStore(){
+    try{
+      return window.sessionStorage;
+    }catch(_e){
+      return null;
+    }
+  }
+
+  function getStoredUiValue(key){
+    const store = getUiStateStore();
+    if(!store) return "";
+    try{
+      return store.getItem(key) || "";
+    }catch(_e){
+      return "";
+    }
+  }
+
+  function setStoredUiValue(key, value){
+    const store = getUiStateStore();
+    if(!store) return;
+    try{
+      if(value && String(value).trim()){
+        store.setItem(key, String(value));
+      }else{
+        store.removeItem(key);
+      }
+    }catch(_e){
+      // ignore storage failures
+    }
+  }
+
+  function readFieldValue(id){
+    const el = document.getElementById(id);
+    return el ? (el.value || "") : "";
+  }
+
+  function normalizeProjectId(value){
+    const raw = String(value || "").trim();
+    if(/^\d+$/.test(raw) && Number(raw) >= 1) return raw;
+    const stored = String(getStoredUiValue(UI_STATE_KEYS.projectId) || "").trim();
+    if(/^\d+$/.test(stored) && Number(stored) >= 1) return stored;
+    return "1";
+  }
+
+  function currentOrStoredValue(fieldId, storageKey){
+    const current = readFieldValue(fieldId);
+    if(current && String(current).trim()) return current;
+    return getStoredUiValue(storageKey) || "";
+  }
+
+  function syncProjectAwareLinks(projectId){
+    const pid = normalizeProjectId(projectId);
+    document.querySelectorAll('a[href]').forEach((anchor)=>{
+      const href = anchor.getAttribute("href") || "";
+      if(/^\/ui\/projects\/(?:\d+|\{project_id\})\/settings$/.test(href)){
+        anchor.setAttribute("href", `/ui/projects/${pid}/settings`);
+      }else if(/^\/ui\/projects\/(?:\d+|\{project_id\})\/oncall$/.test(href)){
+        anchor.setAttribute("href", `/ui/projects/${pid}/oncall`);
+      }else if(/^\/ui\/projects\/(?:\d+|\{project_id\})\/remediation$/.test(href)){
+        anchor.setAttribute("href", `/ui/projects/${pid}/remediation`);
+      }
+    });
+  }
+
+  function hydrateUiInputsFromSession(){
+    const projectInput = document.getElementById("projectId");
+    if(projectInput && !(projectInput.value || "").trim()){
+      projectInput.value = normalizeProjectId(getStoredUiValue(UI_STATE_KEYS.projectId));
+    }
+
+    const apiInput = document.getElementById("apiKey");
+    if(apiInput && !apiInput.value){
+      apiInput.value = getStoredUiValue(UI_STATE_KEYS.apiKey);
+    }
+
+    const adminInput = document.getElementById("adminToken");
+    if(adminInput && !adminInput.value){
+      adminInput.value = getStoredUiValue(UI_STATE_KEYS.adminToken);
+    }
+
+    const userInput = document.getElementById("userToken");
+    if(userInput && !userInput.value){
+      userInput.value = getStoredUiValue(UI_STATE_KEYS.userToken);
+    }
+  }
+
+  function persistUiInputsToSession(){
+    const bind = (id, storageKey, callback)=>{
+      const el = document.getElementById(id);
+      if(!el) return;
+
+      const sync = ()=>{
+        setStoredUiValue(storageKey, el.value || "");
+        if(callback) callback(el.value || "");
+      };
+
+      el.addEventListener("input", sync);
+      el.addEventListener("change", sync);
+      sync();
+    };
+
+    bind("projectId", UI_STATE_KEYS.projectId, (value)=> syncProjectAwareLinks(value));
+    bind("apiKey", UI_STATE_KEYS.apiKey);
+    bind("adminToken", UI_STATE_KEYS.adminToken);
+    bind("userToken", UI_STATE_KEYS.userToken);
+  }
+
+  function buildProjectHeaders(){
+    const headers = {};
+    const apiKey = currentOrStoredValue("apiKey", UI_STATE_KEYS.apiKey);
+    const adminToken = currentOrStoredValue("adminToken", UI_STATE_KEYS.adminToken);
+    const userToken = currentOrStoredValue("userToken", UI_STATE_KEYS.userToken);
+    if(apiKey) headers["X-API-KEY"] = apiKey;
+    if(adminToken) headers["X-ADMIN-TOKEN"] = adminToken;
+    if(userToken) headers["Authorization"] = `Bearer ${userToken}`;
+    return headers;
+  }
+
   function byteLength(text){
     if(!text) return 0;
     try{
@@ -303,12 +429,13 @@
   }
 
   async function fetchChecks(projectId, perf){
+    const headers = buildProjectHeaders();
     try{
       if(perf){
-        const res = await perf.fetchJson("checks", `/projects/${projectId}/checks`);
+        const res = await perf.fetchJson("checks", `/projects/${projectId}/checks`, {headers});
         return res.ok ? (res.data || []) : [];
       }
-      const res = await fetch(`/projects/${projectId}/checks`);
+      const res = await fetch(`/projects/${projectId}/checks`, {headers});
       if(!res.ok) return [];
       return await res.json();
     }catch(_e){
@@ -399,5 +526,13 @@
     createPerfTracker,
     formatPerfBytes,
     formatPerfMs,
+    projectHeaders: buildProjectHeaders,
+    syncProjectAwareLinks,
   };
+
+  document.addEventListener("DOMContentLoaded", ()=>{
+    hydrateUiInputsFromSession();
+    syncProjectAwareLinks(readFieldValue("projectId"));
+    persistUiInputsToSession();
+  });
 })();

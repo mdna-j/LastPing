@@ -30,9 +30,15 @@ function renderOncallCards(checks, health, alerts){
 }
 
 function headersOncall(){
+  const shellHeaders = window.LastPingShell && window.LastPingShell.projectHeaders
+    ? window.LastPingShell.projectHeaders()
+    : {};
   const apiKey = document.getElementById('apiKey').value;
   const admin = document.getElementById('adminToken').value;
   const h = {'Content-Type':'application/json'};
+  if(shellHeaders["Authorization"]) h["Authorization"] = shellHeaders["Authorization"];
+  if(shellHeaders["X-API-KEY"]) h['X-API-KEY'] = shellHeaders["X-API-KEY"];
+  if(shellHeaders["X-ADMIN-TOKEN"]) h['X-ADMIN-TOKEN'] = shellHeaders["X-ADMIN-TOKEN"];
   if(apiKey) h['X-API-KEY'] = apiKey;
   if(admin) h['X-ADMIN-TOKEN'] = admin;
   return h;

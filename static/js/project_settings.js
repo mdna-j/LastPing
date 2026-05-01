@@ -1,7 +1,13 @@
 function headersSettings(){
+  const shellHeaders = window.LastPingShell && window.LastPingShell.projectHeaders
+    ? window.LastPingShell.projectHeaders()
+    : {};
   const apiKey = document.getElementById("apiKey").value || "";
   const admin = document.getElementById("adminToken").value || "";
   const headers = {"Content-Type": "application/json"};
+  if(shellHeaders["Authorization"]) headers["Authorization"] = shellHeaders["Authorization"];
+  if(shellHeaders["X-API-KEY"]) headers["X-API-KEY"] = shellHeaders["X-API-KEY"];
+  if(shellHeaders["X-ADMIN-TOKEN"]) headers["X-ADMIN-TOKEN"] = shellHeaders["X-ADMIN-TOKEN"];
   if(apiKey) headers["X-API-KEY"] = apiKey;
   if(admin) headers["X-ADMIN-TOKEN"] = admin;
   return headers;
@@ -526,8 +532,8 @@ async function loadSettings(){
   try{
     const [checksRes, sloRes, alertRes, jiraRes, pagerdutyRes, deliveryRes] = await Promise.all([
       perf && window.LastPingShell
-        ? perf.fetchJson("checks", `/projects/${pid}/checks`)
-        : fetch(`/projects/${pid}/checks`).then(async (res)=> ({ok: res.ok, status: res.status, data: res.ok ? await res.json() : null})),
+        ? perf.fetchJson("checks", `/projects/${pid}/checks`, {headers})
+        : fetch(`/projects/${pid}/checks`, {headers}).then(async (res)=> ({ok: res.ok, status: res.status, data: res.ok ? await res.json() : null})),
       perf && window.LastPingShell
         ? perf.fetchJson("slo", `/projects/${pid}/slo`, {headers})
         : fetch(`/projects/${pid}/slo`, {headers}).then(async (res)=> ({ok: res.ok, status: res.status, data: res.ok ? await res.json() : null})),
@@ -544,7 +550,7 @@ async function loadSettings(){
         ? perf.fetchJson("notification-deliveries", notificationQueueUrl(pid), {headers})
         : fetch(notificationQueueUrl(pid), {headers}).then(async (res)=> ({ok: res.ok, status: res.status, data: res.ok ? await res.json() : null})),
     ]);
-    const checks = checksRes.ok ? (checksRes.data || []) : [];
+    const checks = checksRes.ok ? (checksRes.data || []) : null;
     const shellPromise = window.LastPingShell
       ? window.LastPingShell.hydratePageShell(pid, checks, {perf})
       : Promise.resolve({checks, health: null});

@@ -434,8 +434,10 @@ def incidents_page():
           <a class="rail-link" href="/ui/dashboard">Dashboard</a>
           <a class="rail-link" href="/ui/snapshots">Snapshots</a>
           <a class="rail-link" href="/ui/reports">Reports</a>
+          <a class="rail-link" href="/ui/slo">SLO</a>
           <a class="rail-link active" href="/ui/incidents">Incidents</a>
           <a class="rail-link" href="/ui/projects/1/settings">Settings</a>
+          <a class="rail-link" href="/ui/projects/1/oncall">On-call</a>
         </nav>
       </aside>
 
@@ -783,8 +785,10 @@ def incident_detail_page(incident_id: int = Path(..., ge=1)):
           <a class="rail-link" href="/ui/dashboard">Dashboard</a>
           <a class="rail-link" href="/ui/snapshots">Snapshots</a>
           <a class="rail-link" href="/ui/reports">Reports</a>
+          <a class="rail-link" href="/ui/slo">SLO</a>
           <a class="rail-link active" href="/ui/incidents">Incidents</a>
           <a class="rail-link" href="/ui/projects/1/settings">Settings</a>
+          <a class="rail-link" href="/ui/projects/1/oncall">On-call</a>
         </nav>
       </aside>
 
@@ -919,8 +923,10 @@ def snapshots_page():
           <a class="rail-link" href="/ui/dashboard">Dashboard</a>
           <a class="rail-link active" href="/ui/snapshots">Snapshots</a>
           <a class="rail-link" href="/ui/reports">Reports</a>
+          <a class="rail-link" href="/ui/slo">SLO</a>
           <a class="rail-link" href="/ui/incidents">Incidents</a>
           <a class="rail-link" id="settingsLink" href="/ui/projects/1/settings">Settings</a>
+          <a class="rail-link" href="/ui/projects/1/oncall">On-call</a>
         </nav>
       </aside>
 
@@ -1034,8 +1040,10 @@ def dashboard_page():
           <a class="rail-link active" href="/ui/dashboard">Dashboard</a>
           <a class="rail-link" href="/ui/snapshots">Snapshots</a>
           <a class="rail-link" href="/ui/reports">Reports</a>
+          <a class="rail-link" href="/ui/slo">SLO</a>
           <a class="rail-link" href="/ui/incidents">Incidents</a>
           <a class="rail-link" href="/ui/projects/1/settings">Settings</a>
+          <a class="rail-link" href="/ui/projects/1/oncall">On-call</a>
         </nav>
       </aside>
 
@@ -1309,6 +1317,7 @@ def reports_page():
           <a class="rail-link active" href="/ui/reports">Reports</a>
           <a class="rail-link" href="/ui/incidents">Incidents</a>
           <a class="rail-link" href="/ui/projects/1/settings">Settings</a>
+          <a class="rail-link" href="/ui/projects/1/oncall">On-call</a>
         </nav>
       </aside>
 
@@ -1441,6 +1450,7 @@ def slo_dashboard_page():
           <a class="rail-link" href="/ui/reports">Reports</a>
           <a class="rail-link" href="/ui/incidents">Incidents</a>
           <a class="rail-link" href="/ui/projects/1/settings">Settings</a>
+          <a class="rail-link" href="/ui/projects/1/oncall">On-call</a>
         </nav>
       </aside>
 
@@ -1608,6 +1618,7 @@ def project_settings_page(project_id: int = Path(..., ge=1)):
         <nav class="rail-links">
           <a class="rail-link" href="/ui/dashboard">Dashboard</a>
           <a class="rail-link" href="/ui/snapshots">Snapshots</a>
+          <a class="rail-link" href="/ui/slo">SLO</a>
           <a class="rail-link" href="/ui/reports">Reports</a>
           <a class="rail-link" href="/ui/incidents">Incidents</a>
           <a class="rail-link active" href="/ui/projects/{project_id}/settings">Settings</a>
@@ -1862,6 +1873,7 @@ def oncall_page(project_id: int = Path(..., ge=1)):
         <nav class="rail-links">
           <a class="rail-link" href="/ui/dashboard">Dashboard</a>
           <a class="rail-link" href="/ui/snapshots">Snapshots</a>
+          <a class="rail-link" href="/ui/slo">SLO</a>
           <a class="rail-link" href="/ui/reports">Reports</a>
           <a class="rail-link" href="/ui/incidents">Incidents</a>
           <a class="rail-link" href="/ui/projects/{project_id}/settings">Settings</a>
