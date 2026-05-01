@@ -1,20 +1,20 @@
 :root {
-  --bg-0: #06080e;
-  --bg-1: #090d16;
-  --bg-2: #0e1523;
-  --panel: #101b2b;
-  --panel-strong: #122034;
-  --panel-soft: #0d1726;
-  --border: #253247;
-  --border-strong: #32435e;
-  --text: #e8eef8;
-  --muted: #97a8c2;
-  --accent: #4f8cff;
-  --accent-2: #18d7c0;
+  --bg-0: #111315;
+  --bg-1: #111315;
+  --bg-2: #111315;
+  --panel: #1a1d21;
+  --panel-strong: #20242a;
+  --panel-soft: #171a1f;
+  --border: #2d333b;
+  --border-strong: #414952;
+  --text: #edf1f5;
+  --muted: #9ca6b1;
+  --accent: #c98631;
+  --accent-2: #c98631;
   --danger: #ff5d7d;
   --warning: #ffb454;
   --success: #2ad18a;
-  --shadow-lg: 0 22px 50px rgba(2, 6, 14, 0.45);
+  --shadow-lg: 0 1px 2px rgba(0, 0, 0, 0.22);
 }
 
 * {
@@ -25,10 +25,7 @@ body {
   margin: 0;
   padding: 22px;
   color: var(--text);
-  background:
-    radial-gradient(1200px 700px at 8% -20%, rgba(79, 140, 255, 0.28), transparent 60%),
-    radial-gradient(900px 600px at 90% -15%, rgba(24, 215, 192, 0.15), transparent 65%),
-    linear-gradient(180deg, var(--bg-0) 0%, var(--bg-1) 55%, #08111d 100%);
+  background: var(--bg-0);
   font-family: "Sora", "Segoe UI Variable", "Trebuchet MS", "Helvetica Neue", sans-serif;
   line-height: 1.45;
 }
@@ -56,12 +53,12 @@ h3 {
 }
 
 a {
-  color: #8bb8ff;
+  color: var(--accent);
   text-decoration: none;
 }
 
 a:hover {
-  color: #b8d4ff;
+  color: #e1aa64;
 }
 
 .row {
@@ -80,7 +77,7 @@ textarea {
   padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: 11px;
-  background: linear-gradient(180deg, #0f1929 0%, #0b1422 100%);
+  background: var(--panel-soft);
   color: var(--text);
   font-size: 0.93rem;
   transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.08s ease;
@@ -90,16 +87,16 @@ input:focus,
 select:focus,
 textarea:focus {
   outline: none;
-  border-color: #4e7cc7;
-  box-shadow: 0 0 0 3px rgba(79, 140, 255, 0.2);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(201, 134, 49, 0.18);
 }
 
 input::placeholder {
-  color: #7f95b4;
+  color: #7d8792;
 }
 
 textarea::placeholder {
-  color: #7f95b4;
+  color: #7d8792;
 }
 
 button:hover,
@@ -120,9 +117,8 @@ button:active,
   padding: 14px;
   border-radius: 16px;
   margin-bottom: 10px;
-  background:
-    linear-gradient(180deg, rgba(17, 29, 46, 0.96) 0%, rgba(12, 21, 34, 0.97) 100%);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), var(--shadow-lg);
+  background: var(--panel);
+  box-shadow: var(--shadow-lg);
 }
 
 .muted {
@@ -135,13 +131,13 @@ button:active,
   align-items: center;
   justify-content: center;
   gap: 8px;
-  background: linear-gradient(135deg, #4f8cff 0%, #3a73df 100%);
+  background: var(--accent);
   color: #ffffff;
   padding: 7px 12px;
   border-radius: 10px;
   text-decoration: none;
-  border: 1px solid rgba(146, 184, 255, 0.35);
-  box-shadow: 0 6px 16px rgba(53, 109, 208, 0.35);
+  border: 1px solid var(--accent);
+  box-shadow: none;
 }
 
 .btn-secondary {
@@ -149,11 +145,11 @@ button:active,
   align-items: center;
   justify-content: center;
   gap: 8px;
-  background: linear-gradient(180deg, #21324b 0%, #19283d 100%);
-  color: #d6e5fd;
+  background: var(--panel-strong);
+  color: var(--text);
   padding: 7px 12px;
   border-radius: 10px;
-  border: 1px solid #2c3f5c;
+  border: 1px solid var(--border);
 }
 
 .btn:disabled,
@@ -167,7 +163,7 @@ table {
   border-collapse: collapse;
   overflow: hidden;
   border-radius: 12px;
-  background: #0f1a29;
+  background: var(--panel-soft);
 }
 
 th,
@@ -178,17 +174,17 @@ td {
 }
 
 th {
-  background: #132238;
-  color: #d2e0f5;
+  background: var(--panel-strong);
+  color: var(--text);
   font-weight: 600;
 }
 
 tbody tr:nth-child(even) {
-  background: rgba(255, 255, 255, 0.02);
+  background: #1c2025;
 }
 
 tbody tr:hover {
-  background: rgba(79, 140, 255, 0.09);
+  background: #23282f;
 }
 
 .checks-row-clickable {
@@ -197,14 +193,14 @@ tbody tr:hover {
 }
 
 .checks-row-clickable:hover {
-  background: rgba(92, 153, 255, 0.14);
-  box-shadow: inset 0 0 0 1px rgba(123, 169, 245, 0.2);
+  background: #23282f;
+  box-shadow: inset 0 0 0 1px rgba(201, 134, 49, 0.22);
 }
 
 .checks-row-clickable:focus-visible {
-  outline: 2px solid rgba(108, 162, 255, 0.65);
+  outline: 2px solid rgba(201, 134, 49, 0.65);
   outline-offset: -2px;
-  background: rgba(92, 153, 255, 0.18);
+  background: #2a241d;
 }
 
 .incident-feed-card,
@@ -255,8 +251,8 @@ tbody tr:hover {
 }
 
 .artifact-card-active {
-  border-color: rgba(109, 152, 227, 0.56);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 14px 28px rgba(37, 74, 135, 0.28);
+  border-color: rgba(201, 134, 49, 0.56);
+  box-shadow: none;
 }
 
 .artifact-card-actions,
@@ -296,14 +292,14 @@ tbody tr:hover {
   object-fit: contain;
   border-radius: 14px;
   border: 1px solid #2b4060;
-  background: linear-gradient(180deg, rgba(10, 16, 26, 0.96) 0%, rgba(6, 11, 18, 0.98) 100%);
+  background: var(--panel-soft);
 }
 
 .artifact-preview-section {
   border: 1px solid #22354f;
   border-radius: 14px;
   padding: 12px;
-  background: linear-gradient(180deg, rgba(14, 23, 37, 0.86) 0%, rgba(10, 17, 28, 0.94) 100%);
+  background: var(--panel-strong);
 }
 
 .artifact-preview-split {
@@ -321,7 +317,7 @@ tbody tr:hover {
   border: 1px solid rgba(46, 67, 97, 0.74);
   border-radius: 12px;
   padding: 10px 11px;
-  background: rgba(12, 19, 30, 0.72);
+  background: var(--panel-soft);
 }
 
 .artifact-preview-error {
@@ -333,7 +329,7 @@ tbody tr:hover {
   border: 1px dashed rgba(96, 132, 192, 0.44);
   border-radius: 14px;
   padding: 12px;
-  background: rgba(13, 21, 34, 0.78);
+  background: var(--panel-soft);
 }
 
 .artifact-preview-trace-title {
@@ -366,7 +362,7 @@ tbody tr:hover {
 
 .incident-child-card {
   margin-top: 8px;
-  background: linear-gradient(180deg, rgba(14, 24, 40, 0.9) 0%, rgba(10, 17, 29, 0.96) 100%);
+  background: var(--panel-soft);
 }
 
 .hidden {
@@ -384,47 +380,21 @@ tbody tr:hover {
 }
 
 .status-up {
-  background: rgba(42, 209, 138, 0.18);
+  background: #173328;
   color: #8df0bd;
   border: 1px solid rgba(42, 209, 138, 0.35);
 }
 
 .status-down {
-  background: rgba(255, 93, 125, 0.17);
+  background: #3a1c24;
   color: #ffc0cf;
   border: 1px solid rgba(255, 93, 125, 0.34);
-  animation: statusPulseCritical 1.55s ease-in-out infinite;
 }
 
 .status-degraded {
-  background: rgba(255, 180, 84, 0.17);
+  background: #3b2d18;
   color: #ffd7a5;
   border: 1px solid rgba(255, 180, 84, 0.32);
-  animation: statusPulseWarning 2.1s ease-in-out infinite;
-}
-
-@keyframes statusPulseCritical {
-  0% {
-    box-shadow: 0 0 0 0 rgba(255, 93, 125, 0.0);
-  }
-  55% {
-    box-shadow: 0 0 0 5px rgba(255, 93, 125, 0.18);
-  }
-  100% {
-    box-shadow: 0 0 0 0 rgba(255, 93, 125, 0.0);
-  }
-}
-
-@keyframes statusPulseWarning {
-  0% {
-    box-shadow: 0 0 0 0 rgba(255, 180, 84, 0.0);
-  }
-  55% {
-    box-shadow: 0 0 0 4px rgba(255, 180, 84, 0.16);
-  }
-  100% {
-    box-shadow: 0 0 0 0 rgba(255, 180, 84, 0.0);
-  }
 }
 
 .policy-step {
@@ -435,7 +405,7 @@ tbody tr:hover {
   cursor: grab;
   font-weight: bold;
   padding: 4px 8px;
-  background: #1f304a;
+  background: var(--panel-strong);
   border-radius: 8px;
 }
 
@@ -469,13 +439,13 @@ tbody tr:hover {
   font-weight: 700;
   font-size: 1.25rem;
   color: #f4f8ff;
-  background: linear-gradient(135deg, #4f8cff 0%, #2c5ec4 100%);
-  border: 1px solid rgba(146, 184, 255, 0.38);
-  box-shadow: 0 18px 34px rgba(47, 92, 182, 0.35);
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  box-shadow: none;
 }
 
 .public-status-kicker {
-  color: #8bb8ff;
+  color: var(--accent);
   text-transform: uppercase;
   letter-spacing: 0.14em;
   font-size: 0.78rem;
@@ -497,7 +467,7 @@ tbody tr:hover {
 
 .status-hero-major_outage {
   border-color: rgba(255, 93, 125, 0.48);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 22px 50px rgba(33, 6, 13, 0.45);
+  box-shadow: none;
 }
 
 .status-hero-degraded {
@@ -518,7 +488,7 @@ tbody tr:hover {
 }
 
 .status-hero-kicker {
-  color: #8bb8ff;
+  color: var(--accent);
   text-transform: uppercase;
   letter-spacing: 0.14em;
   font-size: 0.76rem;
@@ -564,7 +534,7 @@ tbody tr:hover {
   border: 1px solid rgba(54, 78, 109, 0.55);
   border-radius: 14px;
   padding: 12px;
-  background: rgba(8, 14, 24, 0.48);
+  background: var(--panel-soft);
 }
 
 .status-overview-stat strong {
@@ -677,7 +647,7 @@ tbody tr:hover {
 .nav-rail {
   border: 1px solid var(--border);
   border-radius: 20px;
-  background: linear-gradient(180deg, #0a1322 0%, #08101b 100%);
+  background: var(--panel);
   box-shadow: var(--shadow-lg);
   padding: 14px 10px;
   position: sticky;
@@ -695,7 +665,7 @@ tbody tr:hover {
   border-radius: 14px;
   display: grid;
   place-items: center;
-  background: radial-gradient(circle at 20% 20%, #5ea8ff 0%, #315fc7 70%);
+  background: var(--accent);
   color: white;
   font-weight: 700;
   letter-spacing: 0.04em;
@@ -719,14 +689,14 @@ tbody tr:hover {
 }
 
 .rail-link:hover {
-  border-color: #2f425f;
-  background: rgba(79, 140, 255, 0.08);
+  border-color: var(--border-strong);
+  background: #23282f;
 }
 
 .rail-link.active {
-  background: linear-gradient(135deg, rgba(79, 140, 255, 0.2), rgba(24, 215, 192, 0.12));
-  border-color: #426188;
-  color: #e7f1ff;
+  background: #2d2418;
+  border-color: var(--accent);
+  color: #fff2df;
 }
 
 .main-stage {
@@ -758,8 +728,8 @@ tbody tr:hover {
   margin-bottom: 12px;
   border-radius: 14px;
   border: 1px solid rgba(255, 93, 125, 0.55);
-  background: linear-gradient(135deg, rgba(88, 24, 36, 0.85) 0%, rgba(57, 19, 31, 0.82) 48%, rgba(35, 14, 25, 0.8) 100%);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 10px 24px rgba(114, 29, 47, 0.35);
+  background: #3a1c24;
+  box-shadow: none;
 }
 
 .hero-banner-hidden {
@@ -775,9 +745,8 @@ tbody tr:hover {
   justify-content: center;
   font-weight: 800;
   color: #ffd8e1;
-  background: radial-gradient(circle at 30% 30%, #ff7d9b 0%, #e34f73 45%, #9f2d49 100%);
-  box-shadow: 0 0 0 1px rgba(255, 210, 220, 0.4), 0 0 16px rgba(227, 79, 115, 0.58);
-  animation: heroPulse 1.8s ease-in-out infinite;
+  background: #9f2d49;
+  box-shadow: none;
 }
 
 .hero-banner-content {
@@ -796,21 +765,6 @@ tbody tr:hover {
   font-size: 0.86rem;
 }
 
-@keyframes heroPulse {
-  0% {
-    transform: scale(1);
-    box-shadow: 0 0 0 1px rgba(255, 210, 220, 0.35), 0 0 10px rgba(227, 79, 115, 0.45);
-  }
-  60% {
-    transform: scale(1.08);
-    box-shadow: 0 0 0 1px rgba(255, 210, 220, 0.45), 0 0 18px rgba(227, 79, 115, 0.75);
-  }
-  100% {
-    transform: scale(1);
-    box-shadow: 0 0 0 1px rgba(255, 210, 220, 0.35), 0 0 10px rgba(227, 79, 115, 0.45);
-  }
-}
-
 .health-strip {
   display: flex;
   align-items: center;
@@ -827,7 +781,7 @@ tbody tr:hover {
   padding: 10px 12px;
   margin-bottom: 12px;
   border-radius: 14px;
-  background: linear-gradient(180deg, rgba(17, 27, 44, 0.96) 0%, rgba(12, 20, 32, 0.97) 100%);
+  background: var(--panel-strong);
 }
 
 .perf-strip-row {
@@ -897,7 +851,7 @@ tbody tr:hover {
 }
 
 .health-value {
-  color: #dce9fb;
+  color: var(--text);
   font-size: 0.92rem;
   font-weight: 600;
 }
@@ -955,7 +909,7 @@ tbody tr:hover {
 }
 
 .intelligence-summary-card {
-  background: linear-gradient(180deg, rgba(20, 35, 56, 0.98) 0%, rgba(13, 24, 39, 0.97) 100%);
+  background: var(--panel-strong);
 }
 
 .intel-pill-row {
@@ -972,27 +926,27 @@ tbody tr:hover {
   border-radius: 999px;
   font-size: 0.78rem;
   font-weight: 600;
-  border: 1px solid #314966;
-  color: #d8e8ff;
-  background: rgba(33, 52, 78, 0.78);
+  border: 1px solid var(--border);
+  color: var(--text);
+  background: var(--panel-soft);
 }
 
 .intel-pill-critical {
   border-color: rgba(255, 93, 125, 0.55);
-  background: rgba(109, 32, 50, 0.4);
+  background: #3a1c24;
   color: #ffd4de;
 }
 
 .intel-pill-warning {
   border-color: rgba(246, 188, 87, 0.55);
-  background: rgba(114, 79, 31, 0.42);
+  background: #3b2d18;
   color: #ffe2ad;
 }
 
 .intel-pill-flapping {
-  border-color: rgba(181, 121, 255, 0.55);
-  background: rgba(78, 40, 112, 0.42);
-  color: #eddcff;
+  border-color: rgba(201, 134, 49, 0.55);
+  background: #332519;
+  color: #ffe0b6;
 }
 
 .kpi-card {
@@ -1012,7 +966,7 @@ tbody tr:hover {
 
 .kpi-card.kpi-healthy {
   border-color: rgba(51, 201, 126, 0.55);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 10px 22px rgba(28, 110, 72, 0.27);
+  box-shadow: none;
 }
 
 .kpi-card.kpi-healthy .metric-value {
@@ -1021,7 +975,7 @@ tbody tr:hover {
 
 .kpi-card.kpi-warning {
   border-color: rgba(246, 188, 87, 0.62);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 10px 22px rgba(123, 86, 26, 0.32);
+  box-shadow: none;
 }
 
 .kpi-card.kpi-warning .metric-value {
@@ -1030,7 +984,7 @@ tbody tr:hover {
 
 .kpi-card.kpi-critical {
   border-color: rgba(255, 93, 125, 0.7);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 10px 22px rgba(136, 33, 58, 0.45);
+  box-shadow: none;
 }
 
 .kpi-card.kpi-critical .metric-value {
@@ -1038,12 +992,12 @@ tbody tr:hover {
 }
 
 .kpi-card.kpi-flapping {
-  border-color: rgba(181, 121, 255, 0.7);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 10px 22px rgba(88, 45, 128, 0.42);
+  border-color: rgba(201, 134, 49, 0.7);
+  box-shadow: none;
 }
 
 .kpi-card.kpi-flapping .metric-value {
-  color: #e9d4ff;
+  color: #ffe0b6;
 }
 
 .metric-label {
@@ -1080,7 +1034,7 @@ tbody tr:hover {
   border-radius: 12px;
   padding: 8px;
   overflow: hidden;
-  background: linear-gradient(180deg, rgba(12, 22, 35, 0.7) 0%, rgba(11, 19, 30, 0.74) 100%);
+  background: var(--panel-soft);
 }
 
 .chart-frame canvas {
@@ -1099,7 +1053,7 @@ tbody tr:hover {
   color: #9fb6d6;
   font-size: 0.9rem;
   font-weight: 600;
-  background: linear-gradient(180deg, rgba(10, 17, 27, 0.52) 0%, rgba(8, 15, 25, 0.62) 100%);
+  background: #171a1f;
 }
 
 .chart-card.is-loading .chart-frame::after {
@@ -1107,14 +1061,14 @@ tbody tr:hover {
   position: absolute;
   inset: 0;
   z-index: 3;
-  background: linear-gradient(110deg, rgba(24, 37, 57, 0.22) 8%, rgba(95, 127, 171, 0.26) 22%, rgba(24, 37, 57, 0.22) 34%);
-  transform: translateX(-120%);
-  animation: chartShimmer 1.25s ease-in-out infinite;
+  background: #2a241d;
+  opacity: 0.16;
+  animation: chartPulse 1.15s ease-in-out infinite alternate;
 }
 
-@keyframes chartShimmer {
+@keyframes chartPulse {
   100% {
-    transform: translateX(120%);
+    opacity: 0.32;
   }
 }
 
@@ -1250,37 +1204,37 @@ tbody tr:hover {
   font-weight: 700;
   letter-spacing: 0.03em;
   text-transform: uppercase;
-  border: 1px solid #335176;
-  background: rgba(37, 59, 88, 0.62);
-  color: #d8e7ff;
+  border: 1px solid var(--border);
+  background: var(--panel-soft);
+  color: var(--text);
 }
 
 .queue-badge-queued {
-  border-color: rgba(88, 144, 255, 0.38);
-  background: rgba(38, 68, 115, 0.52);
+  border-color: rgba(201, 134, 49, 0.38);
+  background: #2a241d;
 }
 
 .queue-badge-retry {
   border-color: rgba(246, 188, 87, 0.45);
-  background: rgba(92, 66, 26, 0.46);
+  background: #3b2d18;
   color: #ffe1ad;
 }
 
 .queue-badge-processing {
-  border-color: rgba(24, 215, 192, 0.4);
-  background: rgba(20, 82, 88, 0.42);
-  color: #b5f8f0;
+  border-color: rgba(201, 134, 49, 0.4);
+  background: #2a241d;
+  color: #ffe0b6;
 }
 
 .queue-badge-dead {
   border-color: rgba(255, 93, 125, 0.52);
-  background: rgba(101, 30, 47, 0.48);
+  background: #3a1c24;
   color: #ffd5de;
 }
 
 .queue-badge-delivered {
   border-color: rgba(42, 209, 138, 0.46);
-  background: rgba(25, 78, 54, 0.46);
+  background: #173328;
   color: #b6f5d0;
 }
 
@@ -1290,8 +1244,8 @@ tbody tr:hover {
 }
 
 .queue-row-selected {
-  background: rgba(79, 140, 255, 0.12) !important;
-  box-shadow: inset 0 0 0 1px rgba(110, 158, 237, 0.28);
+  background: #2a241d !important;
+  box-shadow: inset 0 0 0 1px rgba(201, 134, 49, 0.28);
 }
 
 .queue-inspect-card {
@@ -1311,7 +1265,7 @@ tbody tr:hover {
   border: 1px solid #2a3e5b;
   border-radius: 14px;
   padding: 12px;
-  background: linear-gradient(180deg, rgba(18, 33, 54, 0.96) 0%, rgba(13, 24, 39, 0.96) 100%);
+  background: var(--panel-strong);
 }
 
 .queue-inspect-meta {
@@ -1346,7 +1300,7 @@ tbody tr:hover {
   padding: 12px;
   border-radius: 12px;
   border: 1px solid #22354f;
-  background: linear-gradient(180deg, rgba(11, 18, 29, 0.94) 0%, rgba(8, 14, 24, 0.98) 100%);
+  background: var(--panel-soft);
   color: #d7e7ff;
   font-size: 0.82rem;
   line-height: 1.45;
@@ -1367,7 +1321,7 @@ tbody tr:hover {
 .insight-item {
   border: 1px solid #2a3e5b;
   border-radius: 12px;
-  background: linear-gradient(180deg, #122136 0%, #0f1b2d 100%);
+  background: var(--panel-soft);
   padding: 10px 11px;
   margin-bottom: 8px;
 }
@@ -1520,7 +1474,7 @@ tbody tr:hover {
   border: 1px solid #2a3e5b;
   border-radius: 14px;
   padding: 12px;
-  background: linear-gradient(180deg, #122136 0%, #0f1b2d 100%);
+  background: var(--panel-soft);
   margin-bottom: 10px;
 }
 
@@ -1560,12 +1514,12 @@ tbody tr:hover {
   font-weight: 600;
   border: 1px solid #314966;
   color: #d8e8ff;
-  background: rgba(33, 52, 78, 0.78);
+  background: var(--panel-soft);
 }
 
 .security-chip-critical {
   border-color: rgba(255, 93, 125, 0.55);
-  background: rgba(109, 32, 50, 0.4);
+  background: #3a1c24;
   color: #ffd4de;
 }
 
