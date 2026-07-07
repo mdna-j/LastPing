@@ -1,1 +1,0 @@
-"""LastPing application package."""

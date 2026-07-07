@@ -1,166 +1,107 @@
 # LastPing
 
-![CI](https://github.com/mdna-j/LastPing/actions/workflows/ci.yml/badge.svg)
+LastPing is a desktop application built in Python that continuously monitors the health of network services and applications. Rather than simply reporting whether a service is online or offline, LastPing collects historical performance metrics to help identify recurring failures, performance degradation, and long-term reliability trends.
 
-**Tech highlights**
+The goal of the project is to provide developers and system administrators with a lightweight monitoring tool that not only detects outages but also helps explain why they occur through historical analysis.
 
-- Python 3.11
-- FastAPI, Uvicorn
-- SQLModel / PostgreSQL
-- Docker / Docker Compose for local development
+---
 
-**Quickstart (local)**
+## Features (Planned)
 
-1. Create and activate a virtualenv (Python 3.11+ recommended):
+### Monitoring
+- HTTP/HTTPS endpoint monitoring
+- TCP port monitoring
+- DNS lookup monitoring
+- Configurable monitoring intervals
+- Automatic retry handling
 
-```bash
-python -m venv .venv
-source .venv/bin/activate   # macOS / Linux
-.venv\Scripts\activate     # Windows (PowerShell)
-```
+### Data Collection
+- Response time tracking
+- Status code recording
+- Failure reason logging
+- Historical uptime records
+- Latency history
 
-2. Install dependencies:
+### Analytics
+- Uptime percentage
+- Average response time
+- Failure frequency
+- Historical trend analysis
+- Performance visualization
 
-```bash
-pip install -r requirements.txt
-```
+### Alerts
+- Desktop notifications
+- Email alerts
+- Discord webhook support
+- Configurable alert thresholds
 
-3. Run the API locally:
+### Desktop Application
+- Service dashboard
+- Real-time monitoring status
+- Historical graphs
+- Service management
+- Dark mode (planned)
 
-```bash
-uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
-```
+---
 
-4. Run the background worker locally:
+## Tech Stack
 
-```bash
-python -m src.worker
-```
+| Component | Technology |
+|-----------|------------|
+| Language | Python |
+| Desktop GUI | PySide6 (Qt) |
+| Database | PostgreSQL |
+| ORM | SQLModel |
+| Scheduler | APScheduler |
+| Networking | Requests, Socket |
+| Charts | PyQtGraph / Matplotlib |
+| Version Control | Git & GitHub |
 
-**Environment variables**
+---
 
-- `WORKER_SCAN_INTERVAL` — seconds between worker loop iterations (default: `30`).
-- `WORKER_HEALTH_FILE` — path to write a health file for orchestration (default: `/tmp/lastping_worker.health`).
-- `DATABASE_URL` — SQLAlchemy/SQLModel database URL (set as appropriate for your environment).
-- `ROLLUP_DATABASE_URL` — database URL used by `.github/workflows/rollup_archive.yml` (set as a GitHub Actions secret).
+## Project Goals
 
-**Docker / Docker Compose**
+- Build a professional desktop application.
+- Learn modern software architecture.
+- Improve backend and data engineering skills.
+- Gain experience collecting, storing, and analyzing operational metrics.
+- Produce a portfolio-quality project suitable for software engineering and data engineering interviews.
 
-Use `docker build` or the provided `docker-compose.yml` to build and run containers. The worker
-process can be run inside the container; ensure `DATABASE_URL` and any alerting secrets are provided
-via environment or a secrets mechanism.
+---
 
-**Deployment**
+## Roadmap
 
-This repo now includes a real staging / production deployment foundation:
+### Version 0.1
+- [ ] Project setup
+- [ ] Database schema
+- [ ] Desktop window
+- [ ] Add/Delete monitored services
 
-- runtime env validation via `scripts/validate_env.py`
-- Helm chart at `deploy/helm/lastping`
-- example env files in `deploy/env/`
-- manual GitHub Actions deployment workflow at `.github/workflows/deploy.yml`
-- runbooks in `docs/deployment.md` and `docs/backup_restore.md`
+### Version 0.2
+- [ ] HTTP monitoring
+- [ ] Background scheduler
+- [ ] Save monitoring history
 
-Recommended approach:
+### Version 0.3
+- [ ] Dashboard
+- [ ] Historical metrics
+- [ ] Charts
 
-1. keep PostgreSQL and Redis external to the app chart
-2. store deploy secrets in GitHub Environments (`staging`, `production`)
-3. validate runtime env before deploy
-4. deploy with Helm
-5. keep logical DB backups and restore drills documented
+### Version 0.4
+- [ ] Alerting system
+- [ ] Notifications
+- [ ] Error logging
 
-**Development & CI recommendations**
+### Version 1.0
+- [ ] Complete desktop monitoring application
+- [ ] Analytics dashboard
+- [ ] Export reports
+- [ ] Installer
 
-- Formatting: use `black` and `isort`.
-- Linting & type checks: use `ruff` and `mypy` (or `ruff`'s type checks) and run them in CI.
-  - Add `pre-commit` with hooks for `black`, `isort`, and `ruff` to catch issues locally.
-  - This repository now includes a GitHub Actions workflow at `.github/workflows/ci.yml` which
-  runs `ruff`, `black --check`, and the test suite on push and PR to `main`.
+---
 
-**Packaging the `lastping_sdk`**
+## Status
 
-This repository includes a minimal SDK in `lastping_sdk/` and a PEP-621 `pyproject.toml` so
-the SDK can be built and published independently.
+🚧 Currently under active development.
 
-Build locally:
-
-```bash
-python -m pip install --upgrade build
-python -m build lastping_sdk
-```
-
-Publish to PyPI (recommended via CI):
-
-1. Create a GitHub release or push to `main`.
-2. Add `PYPI_USERNAME` and `PYPI_PASSWORD` to the repository's GitHub Secrets (Settings → Secrets → Actions).
-3. The included workflow `.github/workflows/publish_lastping_sdk.yml` will build and upload the wheel/sdist.
-
-Alternatively, publish manually:
-
-```bash
-python -m pip install --upgrade twine
-python -m twine upload lastping_sdk/dist/*
-```
-
-If you want the CI to run async tests, install dev requirements which include `aiohttp`:
-
-```bash
-pip install -r requirements.txt
-```
-
-**Java SDK publish guide**
-
-The Java SDK lives in `lastping_sdk/java` and can be built with Gradle or Maven.
-
-Build locally:
-
-```bash
-cd lastping_sdk/java
-./gradlew build
-# or
-mvn -q -f pom.xml package
-```
-
-Publish to GitHub Packages on tags:
-
-- Create a tag like `java-sdk-v0.1.1` and push it.
-- The workflow `.github/workflows/java_sdk_ci.yml` will publish to GitHub Packages.
-
-**Tests**
-
-Unit tests live under `tests/`. Run `python -m pytest -q` to run them locally. The project includes
-basic tests for alerts and worker behaviour; expand tests when adding features.
-
-Quick note: use the project virtualenv when available. You can run the tests using the provided
-helper scripts which prefer the repo `.venv`:
-
-Windows PowerShell:
-
-```powershell
-scripts\run_tests.ps1
-```
-
-macOS / Linux:
-
-```bash
-scripts/run_tests.sh
-```
-
-**Admin bypass & distributed rate limiting**
-
-- Admin bypass: an `X-ADMIN-TOKEN` header matching the `ADMIN_TOKEN` env var will bypass project API key checks and rate limits for management endpoints.
-- Distributed deployments: to enable robust per-API-key rate limiting across multiple worker instances, set `REDIS_URL` and install the `redis` package. The worker will use Redis counters when available; otherwise it falls back to a DB-backed per-minute counter.
-  Install Redis and set `REDIS_URL` in production:
-
-```bash
-pip install redis
-# example env var for local redis
-export REDIS_URL=redis://localhost:6379/0
-```
-
-**Contributing**
-
-Please open issues or PRs. Follow the existing coding style and run tests + linters before submitting.
-
-**License**
-
-See the `LICENSE` file at the repository root.
+This project is being rebuilt from the ground up with an emphasis on clean architecture, maintainability, and real-world software engineering practices.
