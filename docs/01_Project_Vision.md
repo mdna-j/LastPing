@@ -1,11 +1,8 @@
 # Project Vision
 
 **Project Name:** LastPing
-
-**Version:** 1.0
-
+**Document Version:** 1.0
 **Author:** Jose Medina
-
 **Last Updated:** July 2026
 
 ---
