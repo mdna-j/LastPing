@@ -3,6 +3,8 @@
 import uuid
 from datetime import datetime, timezone
 
+from sqlalchemy import Column, DateTime
+from sqlalchemy import Enum as SAEnum
 from sqlmodel import Field, SQLModel
 
 from persistence.enums import MonitorType, ServiceStatus
@@ -26,7 +28,16 @@ class Service(SQLModel, table=True):
         index=True,
     )
 
-    type: MonitorType
+    type: MonitorType = Field(
+        sa_column=Column(
+            SAEnum(
+                MonitorType,
+                name="monitor_type",
+                values_callable=lambda enum: [item.value for item in enum],
+            ),
+            nullable=False,
+        )
+    )
 
     target: str = Field(
         min_length=1,
@@ -50,16 +61,44 @@ class Service(SQLModel, table=True):
 
     is_paused: bool = False
 
-    current_status: ServiceStatus = ServiceStatus.UNKNOWN
+    current_status: ServiceStatus = Field(
+        default=ServiceStatus.UNKNOWN,
+        sa_column=Column(
+            SAEnum(
+                ServiceStatus,
+                name="service_status",
+                values_callable=lambda enum: [item.value for item in enum],
+            ),
+            nullable=False,
+        ),
+    )
 
     consecutive_failures: int = Field(
         default=0,
         ge=0,
     )
 
-    last_check_at: datetime | None = None
-    last_success_at: datetime | None = None
-    deleted_at: datetime | None = None
+    last_check_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
 
-    created_at: datetime = Field(default_factory=utc_now)
-    updated_at: datetime = Field(default_factory=utc_now)
+    last_success_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+
+    deleted_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+    updated_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
