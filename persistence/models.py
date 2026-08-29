@@ -3,14 +3,14 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, DateTime
+from sqlalchemy import Column, DateTime, String, Text
 from sqlalchemy import Enum as SAEnum
 from sqlmodel import Field, SQLModel
 
 from persistence.enums import MonitorType, ServiceStatus
 
 
-def utc_now():
+def utc_now() -> datetime:
     # Get the current UTC time
     return datetime.now(timezone.utc)
 
@@ -101,4 +101,41 @@ class Service(SQLModel, table=True):
     updated_at: datetime = Field(
         default_factory=utc_now,
         sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+
+class CheckResult(SQLModel, table=True):
+    """Result of a monitoring check."""
+
+    __tablename__ = "check_result"
+
+    id: uuid.UUID = Field(
+        default_factory=uuid.uuid4,
+        primary_key=True,
+    )
+
+    service_id: uuid.UUID = Field(
+        foreign_key="service.id",
+        index=True,
+    )
+
+    timestamp: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+    success: bool
+
+    response_time_ms: float | None = None
+
+    status_code: int | None = None
+
+    failure_type: str | None = Field(
+        default=None,
+        sa_column=Column(String(length=100), nullable=True),
+    )
+
+    message: str | None = Field(
+        default=None,
+        sa_column=Column(Text, nullable=True),
     )
