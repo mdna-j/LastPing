@@ -2,3 +2,4 @@ sqlmodel
 asyncpg
 alembic
 pydantic-settings
+httpx
