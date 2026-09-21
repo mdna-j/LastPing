@@ -4,3 +4,5 @@ alembic
 pydantic-settings
 httpx
 apscheduler==3.11.3
+PySide6
+qasync
