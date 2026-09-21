@@ -6,6 +6,7 @@ from enum import StrEnum
 class MonitorType(StrEnum):
     # Supported monitoring protocols
     HTTP = "http"
+    HTTPS = "https"
     TCP = "tcp"
     PING = "ping"
     DNS = "dns"
