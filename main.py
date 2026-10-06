@@ -37,6 +37,17 @@ async def bootstrap() -> tuple[MainWindow, ApplicationService]:
     return window, application
 
 
+async def refresh_dashboard(window: MainWindow) -> None:
+    while True:
+        await asyncio.sleep(5)
+
+        async with AsyncSessionLocal() as session:
+            service_repository = ServiceRepository(session)
+            services = await service_repository.list_active()
+
+        window.set_services(services)
+
+
 def main() -> None:
     app = QApplication(sys.argv)
 
@@ -44,6 +55,7 @@ def main() -> None:
     asyncio.set_event_loop(loop)
 
     application = None
+    refresh_task = None
 
     with loop:
         try:
@@ -51,9 +63,21 @@ def main() -> None:
                 bootstrap()
             )
 
+            refresh_task = loop.create_task(
+                refresh_dashboard(window)
+            )
+
             loop.run_forever()
 
         finally:
+            if refresh_task is not None:
+                refresh_task.cancel()
+
+                try:
+                    loop.run_until_complete(refresh_task)
+                except asyncio.CancelledError:
+                    pass
+
             if application is not None:
                 application.shutdown()
 
