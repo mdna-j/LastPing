@@ -1,4 +1,5 @@
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QHeaderView,
     QLabel,
     QMainWindow,
@@ -32,6 +33,22 @@ class MainWindow(QMainWindow):
         service_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch
         )
+
+        service_table.verticalHeader().setVisible(False)
+
+        service_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+
+        service_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
+
+        service_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+
+        service_table.setAlternatingRowColors(True)
 
         # Temporary sample data
         sample_services = [
