@@ -11,6 +11,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from persistence.enums import ServiceStatus
+from persistence.models import Service
+
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
@@ -23,13 +26,6 @@ class MainWindow(QMainWindow):
         self._apply_styles()
 
     def _setup_ui(self) -> None:
-        # Temporary sample data
-        sample_services = [
-            ("Example Website", "Healthy", "https://example.com"),
-            ("GitHub", "Healthy", "https://github.com"),
-            ("Local Server", "Down", "http://localhost:8000"),
-        ]
-
         # Header
         title = QLabel("LastPing")
         title.setObjectName("title")
@@ -38,26 +34,22 @@ class MainWindow(QMainWindow):
         subtitle.setObjectName("subtitle")
 
         # Dashboard statistics
-        total_services = len(sample_services)
-        healthy_services = sum(
-            1 for service in sample_services if service[1] == "Healthy"
-        )
-        down_services = sum(
-            1 for service in sample_services if service[1] == "Down"
-        )
-
         stats_layout = QHBoxLayout()
         stats_layout.setSpacing(16)
 
-        stats_layout.addWidget(
-            self._create_stat_card("Services", str(total_services))
+        services_card, self.services_value = self._create_stat_card(
+            "Services"
         )
-        stats_layout.addWidget(
-            self._create_stat_card("Healthy", str(healthy_services))
+        healthy_card, self.healthy_value = self._create_stat_card(
+            "Healthy"
         )
-        stats_layout.addWidget(
-            self._create_stat_card("Down", str(down_services))
+        down_card, self.down_value = self._create_stat_card(
+            "Down"
         )
+
+        stats_layout.addWidget(services_card)
+        stats_layout.addWidget(healthy_card)
+        stats_layout.addWidget(down_card)
 
         # Services section
         services_label = QLabel("Services")
@@ -88,29 +80,7 @@ class MainWindow(QMainWindow):
         )
 
         self.service_table.setAlternatingRowColors(True)
-
-        self.service_table.setRowCount(len(sample_services))
-
-        for row, service in enumerate(sample_services):
-            name, status, target = service
-
-            self.service_table.setItem(
-                row,
-                0,
-                QTableWidgetItem(name),
-            )
-
-            self.service_table.setItem(
-                row,
-                1,
-                QTableWidgetItem(status),
-            )
-
-            self.service_table.setItem(
-                row,
-                2,
-                QTableWidgetItem(target),
-            )
+        self.service_table.setRowCount(0)
 
         # Main layout
         layout = QVBoxLayout()
@@ -130,11 +100,14 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(container)
 
-    def _create_stat_card(self, label: str, value: str) -> QFrame:
+    def _create_stat_card(
+        self,
+        label: str,
+    ) -> tuple[QFrame, QLabel]:
         card = QFrame()
         card.setObjectName("statCard")
 
-        value_label = QLabel(value)
+        value_label = QLabel("0")
         value_label.setObjectName("statValue")
 
         name_label = QLabel(label)
@@ -149,7 +122,44 @@ class MainWindow(QMainWindow):
 
         card.setLayout(layout)
 
-        return card
+        return card, value_label
+
+    def set_services(self, services: list[Service]) -> None:
+        self.service_table.setRowCount(len(services))
+
+        healthy_count = 0
+        down_count = 0
+
+        for row, service in enumerate(services):
+            status = service.current_status.value.title()
+
+            self.service_table.setItem(
+                row,
+                0,
+                QTableWidgetItem(service.name),
+            )
+
+            self.service_table.setItem(
+                row,
+                1,
+                QTableWidgetItem(status),
+            )
+
+            self.service_table.setItem(
+                row,
+                2,
+                QTableWidgetItem(service.target),
+            )
+
+            if service.current_status == ServiceStatus.HEALTHY:
+                healthy_count += 1
+
+            if service.current_status == ServiceStatus.DOWN:
+                down_count += 1
+
+        self.services_value.setText(str(len(services)))
+        self.healthy_value.setText(str(healthy_count))
+        self.down_value.setText(str(down_count))
 
     def _apply_styles(self) -> None:
         self.setStyleSheet(
