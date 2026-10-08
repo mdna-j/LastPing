@@ -1,3 +1,4 @@
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
@@ -130,6 +131,14 @@ class MainWindow(QMainWindow):
         healthy_count = 0
         down_count = 0
 
+        status_colors = {
+            ServiceStatus.HEALTHY: QColor("#4ade80"),
+            ServiceStatus.DOWN: QColor("#f87171"),
+            ServiceStatus.DEGRADED: QColor("#fbbf24"),
+            ServiceStatus.PAUSED: QColor("#9ca3af"),
+            ServiceStatus.UNKNOWN: QColor("#9ca3af"),
+        }
+
         for row, service in enumerate(services):
             status = service.current_status.value.title()
 
@@ -139,10 +148,19 @@ class MainWindow(QMainWindow):
                 QTableWidgetItem(service.name),
             )
 
+            status_item = QTableWidgetItem(f"● {status}")
+
+            status_item.setForeground(
+                status_colors.get(
+                    service.current_status,
+                    QColor("#f2f2f2"),
+                )
+            )
+
             self.service_table.setItem(
                 row,
                 1,
-                QTableWidgetItem(status),
+                status_item,
             )
 
             self.service_table.setItem(
