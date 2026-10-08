@@ -1,6 +1,8 @@
+from PySide6.QtCore import Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QDialog,
     QFrame,
     QHBoxLayout,
     QHeaderView,
@@ -19,6 +21,8 @@ from ui.add_service_dialog import AddServiceDialog
 
 
 class MainWindow(QMainWindow):
+    service_submitted = Signal(object)
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -43,9 +47,11 @@ class MainWindow(QMainWindow):
         services_card, self.services_value = self._create_stat_card(
             "Services"
         )
+
         healthy_card, self.healthy_value = self._create_stat_card(
             "Healthy"
         )
+
         down_card, self.down_value = self._create_stat_card(
             "Down"
         )
@@ -71,7 +77,9 @@ class MainWindow(QMainWindow):
 
         # Services table
         self.service_table = QTableWidget()
+
         self.service_table.setColumnCount(3)
+
         self.service_table.setHorizontalHeaderLabels(
             ["Name", "Status", "Target"]
         )
@@ -104,6 +112,7 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(title)
         layout.addWidget(subtitle)
+
         layout.addSpacing(8)
 
         layout.addLayout(stats_layout)
@@ -144,10 +153,18 @@ class MainWindow(QMainWindow):
 
     def _open_add_service_dialog(self) -> None:
         dialog = AddServiceDialog(self)
-        dialog.exec()
+
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            service_data = dialog.get_service_data()
+
+            self.service_submitted.emit(
+                service_data
+            )
 
     def set_services(self, services: list[Service]) -> None:
-        self.service_table.setRowCount(len(services))
+        self.service_table.setRowCount(
+            len(services)
+        )
 
         healthy_count = 0
         down_count = 0
@@ -163,12 +180,14 @@ class MainWindow(QMainWindow):
         for row, service in enumerate(services):
             status = service.current_status.value.title()
 
+            # Name
             self.service_table.setItem(
                 row,
                 0,
                 QTableWidgetItem(service.name),
             )
 
+            # Status
             status_item = QTableWidgetItem(
                 f"● {status}"
             )
@@ -186,12 +205,14 @@ class MainWindow(QMainWindow):
                 status_item,
             )
 
+            # Target
             self.service_table.setItem(
                 row,
                 2,
                 QTableWidgetItem(service.target),
             )
 
+            # Statistics
             if service.current_status == ServiceStatus.HEALTHY:
                 healthy_count += 1
 
