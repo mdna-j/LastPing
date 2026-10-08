@@ -2,12 +2,14 @@
 
 import asyncio
 import sys
+import uuid
 
 from PySide6.QtWidgets import QApplication
 from qasync import QEventLoop
 
 from engine.scheduler import MonitoringScheduler
 from persistence.database import AsyncSessionLocal, close_database
+from persistence.enums import ServiceStatus
 from persistence.models import Service
 from persistence.repositories.service_repository import ServiceRepository
 from service_layer.application_service import ApplicationService
@@ -29,7 +31,7 @@ async def bootstrap(
         # Start monitoring all saved active services.
         await application.start()
 
-        # Load those same services for the dashboard.
+        # Load services for the dashboard.
         services = await service_repository.list_active()
 
     window = MainWindow()
@@ -55,6 +57,40 @@ async def handle_add_service(
         scheduler.schedule_service(saved_service)
 
         # Reload services so the new service appears immediately.
+        services = await service_repository.list_active()
+
+    window.set_services(services)
+
+
+async def handle_service_pause_toggle(
+    service_id: uuid.UUID,
+    should_pause: bool,
+    scheduler: MonitoringScheduler,
+    window: MainWindow,
+) -> None:
+    async with AsyncSessionLocal() as session:
+        service_repository = ServiceRepository(session)
+
+        service = await service_repository.get_by_id(service_id)
+
+        if service is None:
+            return
+
+        service.is_paused = should_pause
+
+        if should_pause:
+            service.current_status = ServiceStatus.PAUSED
+        else:
+            # A resumed service has not completed a new check yet.
+            service.current_status = ServiceStatus.UNKNOWN
+
+        saved_service = await service_repository.update(service)
+
+        if should_pause:
+            scheduler.remove_service(saved_service.id)
+        else:
+            scheduler.schedule_service(saved_service)
+
         services = await service_repository.list_active()
 
     window.set_services(services)
@@ -95,8 +131,25 @@ def main() -> None:
                     )
                 )
 
+            def on_service_pause_toggled(
+                service_id: uuid.UUID,
+                should_pause: bool,
+            ) -> None:
+                loop.create_task(
+                    handle_service_pause_toggle(
+                        service_id,
+                        should_pause,
+                        scheduler,
+                        window,
+                    )
+                )
+
             window.service_submitted.connect(
                 on_service_submitted
+            )
+
+            window.service_pause_toggled.connect(
+                on_service_pause_toggled
             )
 
             refresh_task = loop.create_task(

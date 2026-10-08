@@ -1,4 +1,4 @@
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -22,12 +22,15 @@ from ui.add_service_dialog import AddServiceDialog
 
 class MainWindow(QMainWindow):
     service_submitted = Signal(object)
+    service_pause_toggled = Signal(object, bool)
 
     def __init__(self) -> None:
         super().__init__()
 
         self.setWindowTitle("LastPing")
         self.resize(1100, 700)
+
+        self._services_by_id: dict = {}
 
         self._setup_ui()
         self._apply_styles()
@@ -66,6 +69,18 @@ class MainWindow(QMainWindow):
         services_label = QLabel("Services")
         services_label.setObjectName("sectionTitle")
 
+        self.pause_service_button = QPushButton(
+            "Pause Service"
+        )
+        self.pause_service_button.setObjectName(
+            "secondaryButton"
+        )
+        self.pause_service_button.setEnabled(False)
+
+        self.pause_service_button.clicked.connect(
+            self._toggle_selected_service
+        )
+
         add_service_button = QPushButton("+ Add Service")
         add_service_button.clicked.connect(
             self._open_add_service_dialog
@@ -73,7 +88,14 @@ class MainWindow(QMainWindow):
 
         services_header.addWidget(services_label)
         services_header.addStretch()
-        services_header.addWidget(add_service_button)
+
+        services_header.addWidget(
+            self.pause_service_button
+        )
+
+        services_header.addWidget(
+            add_service_button
+        )
 
         # Services table
         self.service_table = QTableWidget()
@@ -104,6 +126,10 @@ class MainWindow(QMainWindow):
 
         self.service_table.setAlternatingRowColors(True)
         self.service_table.setRowCount(0)
+
+        self.service_table.itemSelectionChanged.connect(
+            self._update_service_actions
+        )
 
         # Main layout
         layout = QVBoxLayout()
@@ -161,13 +187,94 @@ class MainWindow(QMainWindow):
                 service_data
             )
 
-    def set_services(self, services: list[Service]) -> None:
+    def _selected_service_id(self):
+        row = self.service_table.currentRow()
+
+        if row < 0:
+            return None
+
+        item = self.service_table.item(row, 0)
+
+        if item is None:
+            return None
+
+        return item.data(
+            Qt.ItemDataRole.UserRole
+        )
+
+    def _update_service_actions(self) -> None:
+        service_id = self._selected_service_id()
+
+        if service_id is None:
+            self.pause_service_button.setEnabled(False)
+            self.pause_service_button.setText(
+                "Pause Service"
+            )
+            return
+
+        service = self._services_by_id.get(
+            service_id
+        )
+
+        if service is None:
+            self.pause_service_button.setEnabled(False)
+            self.pause_service_button.setText(
+                "Pause Service"
+            )
+            return
+
+        self.pause_service_button.setEnabled(True)
+
+        if service.is_paused:
+            self.pause_service_button.setText(
+                "Resume Service"
+            )
+        else:
+            self.pause_service_button.setText(
+                "Pause Service"
+            )
+
+    def _toggle_selected_service(self) -> None:
+        service_id = self._selected_service_id()
+
+        if service_id is None:
+            return
+
+        service = self._services_by_id.get(
+            service_id
+        )
+
+        if service is None:
+            return
+
+        should_pause = not service.is_paused
+
+        self.service_pause_toggled.emit(
+            service.id,
+            should_pause,
+        )
+
+    def set_services(
+        self,
+        services: list[Service],
+    ) -> None:
+        selected_service_id = (
+            self._selected_service_id()
+        )
+
+        self._services_by_id = {
+            service.id: service
+            for service in services
+        }
+
         self.service_table.setRowCount(
             len(services)
         )
 
         healthy_count = 0
         down_count = 0
+
+        selected_row = None
 
         status_colors = {
             ServiceStatus.HEALTHY: QColor("#4ade80"),
@@ -181,10 +288,20 @@ class MainWindow(QMainWindow):
             status = service.current_status.value.title()
 
             # Name
+            name_item = QTableWidgetItem(
+                service.name
+            )
+
+            # Store the service UUID inside the row.
+            name_item.setData(
+                Qt.ItemDataRole.UserRole,
+                service.id,
+            )
+
             self.service_table.setItem(
                 row,
                 0,
-                QTableWidgetItem(service.name),
+                name_item,
             )
 
             # Status
@@ -219,6 +336,10 @@ class MainWindow(QMainWindow):
             if service.current_status == ServiceStatus.DOWN:
                 down_count += 1
 
+            # Restore the selected row after dashboard refreshes.
+            if service.id == selected_service_id:
+                selected_row = row
+
         self.services_value.setText(
             str(len(services))
         )
@@ -230,6 +351,13 @@ class MainWindow(QMainWindow):
         self.down_value.setText(
             str(down_count)
         )
+
+        if selected_row is not None:
+            self.service_table.selectRow(
+                selected_row
+            )
+
+        self._update_service_actions()
 
     def _apply_styles(self) -> None:
         self.setStyleSheet(
@@ -288,6 +416,29 @@ class MainWindow(QMainWindow):
 
             QPushButton:pressed {
                 background-color: #1d4ed8;
+            }
+
+            QPushButton:disabled {
+                background-color: #343840;
+                color: #737b88;
+            }
+
+            QPushButton#secondaryButton {
+                background-color: #343840;
+                color: #f2f2f2;
+            }
+
+            QPushButton#secondaryButton:hover {
+                background-color: #454b55;
+            }
+
+            QPushButton#secondaryButton:pressed {
+                background-color: #2b3037;
+            }
+
+            QPushButton#secondaryButton:disabled {
+                background-color: #2a2e35;
+                color: #666d78;
             }
 
             QTableWidget {
