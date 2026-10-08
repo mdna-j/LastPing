@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QMainWindow,
+    QPushButton,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -14,6 +15,7 @@ from PySide6.QtWidgets import (
 
 from persistence.enums import ServiceStatus
 from persistence.models import Service
+from ui.add_service_dialog import AddServiceDialog
 
 
 class MainWindow(QMainWindow):
@@ -52,10 +54,22 @@ class MainWindow(QMainWindow):
         stats_layout.addWidget(healthy_card)
         stats_layout.addWidget(down_card)
 
-        # Services section
+        # Services section header
+        services_header = QHBoxLayout()
+
         services_label = QLabel("Services")
         services_label.setObjectName("sectionTitle")
 
+        add_service_button = QPushButton("+ Add Service")
+        add_service_button.clicked.connect(
+            self._open_add_service_dialog
+        )
+
+        services_header.addWidget(services_label)
+        services_header.addStretch()
+        services_header.addWidget(add_service_button)
+
+        # Services table
         self.service_table = QTableWidget()
         self.service_table.setColumnCount(3)
         self.service_table.setHorizontalHeaderLabels(
@@ -91,9 +105,12 @@ class MainWindow(QMainWindow):
         layout.addWidget(title)
         layout.addWidget(subtitle)
         layout.addSpacing(8)
+
         layout.addLayout(stats_layout)
+
         layout.addSpacing(12)
-        layout.addWidget(services_label)
+
+        layout.addLayout(services_header)
         layout.addWidget(self.service_table)
 
         container = QWidget()
@@ -125,6 +142,10 @@ class MainWindow(QMainWindow):
 
         return card, value_label
 
+    def _open_add_service_dialog(self) -> None:
+        dialog = AddServiceDialog(self)
+        dialog.exec()
+
     def set_services(self, services: list[Service]) -> None:
         self.service_table.setRowCount(len(services))
 
@@ -148,7 +169,9 @@ class MainWindow(QMainWindow):
                 QTableWidgetItem(service.name),
             )
 
-            status_item = QTableWidgetItem(f"● {status}")
+            status_item = QTableWidgetItem(
+                f"● {status}"
+            )
 
             status_item.setForeground(
                 status_colors.get(
@@ -175,9 +198,17 @@ class MainWindow(QMainWindow):
             if service.current_status == ServiceStatus.DOWN:
                 down_count += 1
 
-        self.services_value.setText(str(len(services)))
-        self.healthy_value.setText(str(healthy_count))
-        self.down_value.setText(str(down_count))
+        self.services_value.setText(
+            str(len(services))
+        )
+
+        self.healthy_value.setText(
+            str(healthy_count)
+        )
+
+        self.down_value.setText(
+            str(down_count)
+        )
 
     def _apply_styles(self) -> None:
         self.setStyleSheet(
@@ -219,6 +250,23 @@ class MainWindow(QMainWindow):
             QLabel#statLabel {
                 color: #9ca3af;
                 font-size: 12px;
+            }
+
+            QPushButton {
+                background-color: #2563eb;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 14px;
+                font-weight: 600;
+            }
+
+            QPushButton:hover {
+                background-color: #3b82f6;
+            }
+
+            QPushButton:pressed {
+                background-color: #1d4ed8;
             }
 
             QTableWidget {
