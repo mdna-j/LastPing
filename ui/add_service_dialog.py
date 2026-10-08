@@ -4,6 +4,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFormLayout,
     QLineEdit,
+    QMessageBox,
     QSpinBox,
     QVBoxLayout,
 )
@@ -42,11 +43,31 @@ class AddServiceDialog(QDialog):
         self.timeout_input.setSuffix(" seconds")
 
         form_layout = QFormLayout()
-        form_layout.addRow("Name", self.name_input)
-        form_layout.addRow("Monitor Type", self.type_input)
-        form_layout.addRow("Target", self.target_input)
-        form_layout.addRow("Check Interval", self.interval_input)
-        form_layout.addRow("Timeout", self.timeout_input)
+
+        form_layout.addRow(
+            "Name",
+            self.name_input,
+        )
+
+        form_layout.addRow(
+            "Monitor Type",
+            self.type_input,
+        )
+
+        form_layout.addRow(
+            "Target",
+            self.target_input,
+        )
+
+        form_layout.addRow(
+            "Check Interval",
+            self.interval_input,
+        )
+
+        form_layout.addRow(
+            "Timeout",
+            self.timeout_input,
+        )
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Cancel
@@ -61,3 +82,31 @@ class AddServiceDialog(QDialog):
         layout.addWidget(buttons)
 
         self.setLayout(layout)
+
+    def get_service_data(self) -> dict:
+        return {
+            "name": self.name_input.text().strip(),
+            "type": self.type_input.currentData(),
+            "target": self.target_input.text().strip(),
+            "interval_seconds": self.interval_input.value(),
+            "timeout_seconds": self.timeout_input.value(),
+        }
+
+    def accept(self) -> None:
+        if not self.name_input.text().strip():
+            QMessageBox.warning(
+                self,
+                "Invalid Service",
+                "Service name is required.",
+            )
+            return
+
+        if not self.target_input.text().strip():
+            QMessageBox.warning(
+                self,
+                "Invalid Service",
+                "Target is required.",
+            )
+            return
+
+        super().accept()
