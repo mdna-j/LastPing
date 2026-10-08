@@ -8,12 +8,14 @@ from qasync import QEventLoop
 
 from engine.scheduler import MonitoringScheduler
 from persistence.database import AsyncSessionLocal, close_database
+from persistence.models import Service
 from persistence.repositories.service_repository import ServiceRepository
 from service_layer.application_service import ApplicationService
 from ui.main_window import MainWindow
 
 
-async def bootstrap() -> tuple[MainWindow, ApplicationService]:
+async def bootstrap(
+) -> tuple[MainWindow, ApplicationService, MonitoringScheduler]:
     scheduler = MonitoringScheduler()
 
     async with AsyncSessionLocal() as session:
@@ -34,7 +36,28 @@ async def bootstrap() -> tuple[MainWindow, ApplicationService]:
     window.set_services(services)
     window.show()
 
-    return window, application
+    return window, application, scheduler
+
+
+async def handle_add_service(
+    service_data: dict,
+    scheduler: MonitoringScheduler,
+    window: MainWindow,
+) -> None:
+    service = Service(**service_data)
+
+    async with AsyncSessionLocal() as session:
+        service_repository = ServiceRepository(session)
+
+        saved_service = await service_repository.create(service)
+
+        # Start monitoring the new service immediately.
+        scheduler.schedule_service(saved_service)
+
+        # Reload services so the new service appears immediately.
+        services = await service_repository.list_active()
+
+    window.set_services(services)
 
 
 async def refresh_dashboard(window: MainWindow) -> None:
@@ -59,8 +82,21 @@ def main() -> None:
 
     with loop:
         try:
-            window, application = loop.run_until_complete(
+            window, application, scheduler = loop.run_until_complete(
                 bootstrap()
+            )
+
+            def on_service_submitted(service_data: dict) -> None:
+                loop.create_task(
+                    handle_add_service(
+                        service_data,
+                        scheduler,
+                        window,
+                    )
+                )
+
+            window.service_submitted.connect(
+                on_service_submitted
             )
 
             refresh_task = loop.create_task(
